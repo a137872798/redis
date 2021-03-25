@@ -46,12 +46,19 @@ extern const char *SDS_NOINIT;
 typedef char *sds;
 
 /* Note: sdshdr5 is never used, we just access the flags byte directly.
- * However is here to document the layout of type 5 SDS strings. */
+ * However is here to document the layout of type 5 SDS strings.
+ * 这个结构实际上在redis内部是不会使用到的
+ * */
 struct __attribute__ ((__packed__)) sdshdr5 {
     unsigned char flags; /* 3 lsb of type, and 5 msb of string length */
     char buf[];
 };
+
+/**
+ * 可以看到每个结构体在 buf[]前面都是一个char这样就可以通过直接访问[-1]来得到 flags了
+ */
 struct __attribute__ ((__packed__)) sdshdr8 {
+    // 这里快捷的记录了此时的长度信息
     uint8_t len; /* used */
     uint8_t alloc; /* excluding the header and null terminator */
     unsigned char flags; /* 3 lsb of type, 5 unused bits */
@@ -87,10 +94,19 @@ struct __attribute__ ((__packed__)) sdshdr64 {
 #define SDS_HDR(T,s) ((struct sdshdr##T *)((s)-(sizeof(struct sdshdr##T))))
 #define SDS_TYPE_5_LEN(f) ((f)>>SDS_TYPE_BITS)
 
+/**
+ * 返回sds当前的长度
+ * @param s
+ * @return
+ */
 static inline size_t sdslen(const sds s) {
+    // 从结构体声明中可以看到 sds就是一个普通的byte[] 而各种SDS_TYPE_X  内部都有一个flag出现在sds属性的前面 所以这里的-1操作就是直接通过sds的地址 寻址并访问flag
+    // 也就体现了C直接与内存交互的特性
     unsigned char flags = s[-1];
+    // 下面的掩码可以得到type的类型 这样就知道为sds分配的总长度
     switch(flags&SDS_TYPE_MASK) {
         case SDS_TYPE_5:
+            // 反向计算当前数据长度
             return SDS_TYPE_5_LEN(flags);
         case SDS_TYPE_8:
             return SDS_HDR(8,s)->len;

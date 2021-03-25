@@ -177,8 +177,8 @@ volatile unsigned long lru_clock; /* Server global current LRU time. */
  *    that interact with keys without having anything to do with
  *    specific data structures, such as: DEL, RENAME, MOVE, SELECT,
  *    TYPE, EXPIRE*, PEXPIRE*, TTL, PTTL, ...
+ *
  */
-
 struct redisCommand redisCommandTable[] = {
         {"module",               moduleCommand,              -2,
                 "admin no-script",
@@ -1201,6 +1201,11 @@ uint64_t dictSdsHash(const void *key) {
     return dictGenHashFunction((unsigned char *) key, sdslen((char *) key));
 }
 
+/**
+ * hash函数
+ * @param key
+ * @return
+ */
 uint64_t dictSdsCaseHash(const void *key) {
     return dictGenCaseHashFunction((unsigned char *) key, sdslen((char *) key));
 }
@@ -2414,9 +2419,10 @@ void initServerConfig(void) {
     /* Command table -- we initiialize it here as it is part of the
      * initial configuration, since command names may be changed via
      * redis.conf using the rename-command directive.
-     * 创建一个存储了所有指令的字典 有关指令的 dictType是内置的
+     * 创建一个存储了所有指令的字典 有关指令的dictType是内置的
      * */
     server.commands = dictCreate(&commandTableDictType, NULL);
+    // 原始command???
     server.orig_commands = dictCreate(&commandTableDictType, NULL);
     populateCommandTable();
     server.delCommand = lookupCommandByCString("del");
@@ -2951,7 +2957,10 @@ void InitServerLast() {
 
 /* Parse the flags string description 'strflags' and set them to the
  * command 'c'. If the flags are all valid C_OK is returned, otherwise
- * C_ERR is returned (yet the recognized flags are set in the command). */
+ * C_ERR is returned (yet the recognized flags are set in the command).
+ * @param c redis命令
+ * @param strflags 描述信息
+ * */
 int populateCommandTableParseFlags(struct redisCommand *c, char *strflags) {
     int argc;
     sds *argv;
@@ -3012,17 +3021,22 @@ int populateCommandTableParseFlags(struct redisCommand *c, char *strflags) {
 }
 
 /* Populates the Redis Command Table starting from the hard coded list
- * we have on top of redis.c file. */
+ * we have on top of redis.c file.
+ * 开始填充redis指令hash桶
+ */
 void populateCommandTable(void) {
     int j;
+    // 总计有多少内置指令
     int numcommands = sizeof(redisCommandTable) / sizeof(struct redisCommand);
 
     for (j = 0; j < numcommands; j++) {
+        // 访问数组的标准操作
         struct redisCommand *c = redisCommandTable + j;
         int retval1, retval2;
 
         /* Translate the command string flags description into an actual
          * set of flags. */
+        // 传入命令对象和 描述信息
         if (populateCommandTableParseFlags(c, c->sflags) == C_ERR)
             serverPanic("Unsupported command flag");
 

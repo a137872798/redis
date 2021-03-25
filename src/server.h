@@ -1451,10 +1451,19 @@ typedef struct pubsubPattern {
     robj *pattern;
 } pubsubPattern;
 
+/**
+ * 这里是定义了一个接收client 并返回 void的函数
+ */
 typedef void redisCommandProc(client *c);
 typedef int *redisGetKeysProc(struct redisCommand *cmd, robj **argv, int argc, int *numkeys);
+
+/**
+ * redis命令 结构体
+ */
 struct redisCommand {
+    // 该命令的名称
     char *name;
+    // 对应一个接收client作为参数 返回void的函数
     redisCommandProc *proc;
     int arity;
     char *sflags;   /* Flags as string representation, one char per flag. */
