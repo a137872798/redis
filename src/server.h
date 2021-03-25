@@ -850,6 +850,9 @@ typedef struct client {
     char buf[PROTO_REPLY_CHUNK_BYTES];
 } client;
 
+/**
+ * RDB 配置项  代表在多少时间内达到多少次写入就允许执行一次刷盘
+ */
 struct saveparam {
     time_t seconds;
     int changes;
@@ -900,6 +903,9 @@ typedef struct zset {
     zskiplist *zsl;
 } zset;
 
+/**
+ * 缓冲区限流是什么???
+ */
 typedef struct clientBufferLimitsConfig {
     unsigned long long hard_limit_bytes;
     unsigned long long soft_limit_bytes;
@@ -1049,7 +1055,7 @@ struct redisServer {
     int arch_bits;              /* 32 or 64 depending on sizeof(long) */
     int cronloops;              /* Number of times the cron function run */
     char runid[CONFIG_RUN_ID_SIZE+1];  /* ID always different at every exec. */
-    int sentinel_mode;          /* True if this instance is a Sentinel. */
+    int sentinel_mode;          /* True if this instance is a Sentinel. 当前实例是否是一个哨兵 */
     size_t initial_memory_usage; /* Bytes used after initialization. */
     int always_show_logo;       /* Show logo even for non-stdout logging. */
     /* Modules */

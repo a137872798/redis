@@ -44,17 +44,30 @@
 /* Unused arguments generate annoying warnings... */
 #define DICT_NOTUSED(V) ((void) V)
 
+/**
+ * hash结构对象
+ */
+
+/**
+ * 每个槽对应一个entry对象
+ */
 typedef struct dictEntry {
     void *key;
+    // 下面v可能是各种类型
     union {
         void *val;
         uint64_t u64;
         int64_t s64;
         double d;
     } v;
+    // 基于链表实现么
     struct dictEntry *next;
 } dictEntry;
 
+/**
+ * 变动的部分被抽象成一个type对象
+ * 该对象内部定义了比较逻辑 hash函数 析构函数
+ */
 typedef struct dictType {
     uint64_t (*hashFunction)(const void *key);
     void *(*keyDup)(void *privdata, const void *key);
@@ -65,7 +78,9 @@ typedef struct dictType {
 } dictType;
 
 /* This is our hash table structure. Every dictionary has two of this as we
- * implement incremental rehashing, for the old to the new table. */
+ * implement incremental rehashing, for the old to the new table.
+ * redis定义的每个字典 包含2个桶对象 一个用于记录旧的数据 一个是存储扩容后的新数据
+ * */
 typedef struct dictht {
     dictEntry **table;
     unsigned long size;
@@ -73,9 +88,14 @@ typedef struct dictht {
     unsigned long used;
 } dictht;
 
+/**
+ * 字典
+ */
 typedef struct dict {
+    // 该属性定义了字典的 比较函数 hash函数等
     dictType *type;
     void *privdata;
+    // 内部包含新旧2个桶结构
     dictht ht[2];
     long rehashidx; /* rehashing not in progress if rehashidx == -1 */
     unsigned long iterators; /* number of iterators currently running */
@@ -84,11 +104,15 @@ typedef struct dict {
 /* If safe is set to 1 this is a safe iterator, that means, you can call
  * dictAdd, dictFind, and other functions against the dictionary even while
  * iterating. Otherwise it is a non safe iterator, and only dictNext()
- * should be called while iterating. */
+ * should be called while iterating.
+ * 通过该对象可以遍历字典元素
+ * */
 typedef struct dictIterator {
+    // 该迭代器是针对哪个字典的
     dict *d;
     long index;
     int table, safe;
+    // 当前遍历到的实体 以及下一个实体
     dictEntry *entry, *nextEntry;
     /* unsafe iterator fingerprint for misuse detection. */
     long long fingerprint;

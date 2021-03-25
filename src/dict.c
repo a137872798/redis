@@ -107,12 +107,17 @@ static void _dictReset(dictht *ht)
     ht->used = 0;
 }
 
-/* Create a new hash table */
+/*
+ * Create a new hash table
+ * 同一个定义了hash函数 比较函数的类型对象来初始化字典
+ * */
 dict *dictCreate(dictType *type,
         void *privDataPtr)
 {
+    // 生成一个字典指针
     dict *d = zmalloc(sizeof(*d));
 
+    // 将字典相关属性清空后 返回指针 (因为c没有垃圾回收机制 所以要手动重置地址上对应的数据)
     _dictInit(d,type,privDataPtr);
     return d;
 }
@@ -121,6 +126,7 @@ dict *dictCreate(dictType *type,
 int _dictInit(dict *d, dictType *type,
         void *privDataPtr)
 {
+    // 将字典中的新旧数组清空
     _dictReset(&d->ht[0]);
     _dictReset(&d->ht[1]);
     d->type = type;

@@ -268,6 +268,9 @@ static long getLongInfoField(char *info, char *field);
 
 uint16_t crc16(const char *buf, int len);
 
+/**
+ * 结构体中2个值的总和才是当前时间
+ */
 static long long ustime(void) {
     struct timeval tv;
     long long ust;

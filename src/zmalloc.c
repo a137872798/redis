@@ -71,18 +71,28 @@ void zlibc_free(void *ptr) {
 #define dallocx(ptr,flags) je_dallocx(ptr,flags)
 #endif
 
+/**
+ * 由于分配了新的内存 需要更新计数值
+ */
 #define update_zmalloc_stat_alloc(__n) do { \
     size_t _n = (__n); \
     if (_n&(sizeof(long)-1)) _n += sizeof(long)-(_n&(sizeof(long)-1)); \
     atomicIncr(used_memory,__n); \
 } while(0)
 
+/**
+ * 释放内存 更新计数值
+ * @param __n 对应释放的byte数
+ */
 #define update_zmalloc_stat_free(__n) do { \
     size_t _n = (__n); \
     if (_n&(sizeof(long)-1)) _n += sizeof(long)-(_n&(sizeof(long)-1)); \
     atomicDecr(used_memory,__n); \
 } while(0)
 
+/**
+ * 记录此时总计使用了多少内存
+ */
 static size_t used_memory = 0;
 pthread_mutex_t used_memory_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -141,6 +151,12 @@ void *zcalloc(size_t size) {
 #endif
 }
 
+/**
+ * 进行扩容 同时保留旧数据
+ * @param ptr
+ * @param size 新长度
+ * @return
+ */
 void *zrealloc(void *ptr, size_t size) {
 #ifndef HAVE_MALLOC_SIZE
     void *realptr;
@@ -148,16 +164,22 @@ void *zrealloc(void *ptr, size_t size) {
     size_t oldsize;
     void *newptr;
 
+    // 代表本次是一次错误的调用 释放指针对应的内存
     if (size == 0 && ptr != NULL) {
         zfree(ptr);
         return NULL;
     }
+    // 没有旧数据对应的指针 为指定的大小分配一块新内存
     if (ptr == NULL) return zmalloc(size);
 #ifdef HAVE_MALLOC_SIZE
+    // 获取此时旧数组对应的长度
     oldsize = zmalloc_size(ptr);
+    // 拷贝数据 这里使用新的size 进行内存分配
     newptr = realloc(ptr,size);
+    // 代表此时内存不足 抛出异常
     if (!newptr) zmalloc_oom_handler(size);
 
+    // 更新内存统计对象
     update_zmalloc_stat_free(oldsize);
     update_zmalloc_stat_alloc(zmalloc_size(newptr));
     return newptr;
@@ -223,6 +245,10 @@ size_t zmalloc_used_memory(void) {
     return um;
 }
 
+/**
+ * 设置一个oom处理器
+ * @param oom_handler  参数是一个函数指针
+ */
 void zmalloc_set_oom_handler(void (*oom_handler)(size_t)) {
     zmalloc_oom_handler = oom_handler;
 }

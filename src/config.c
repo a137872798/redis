@@ -254,14 +254,20 @@ int yesnotoi(char *s) {
 }
 
 void appendServerSaveParams(time_t seconds, int changes) {
+    // 数组扩容 同时将最新的参数设置进去
     server.saveparams = zrealloc(server.saveparams,sizeof(struct saveparam)*(server.saveparamslen+1));
     server.saveparams[server.saveparamslen].seconds = seconds;
     server.saveparams[server.saveparamslen].changes = changes;
     server.saveparamslen++;
 }
 
+/**
+ * 重置服务器参数
+ */
 void resetServerSaveParams(void) {
+    // 将指针指向的内存释放
     zfree(server.saveparams);
+    // 清空指针
     server.saveparams = NULL;
     server.saveparamslen = 0;
 }

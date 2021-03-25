@@ -61,7 +61,9 @@ static unsigned int dictGenHashFunction(const unsigned char *buf, int len) {
 /* ----------------------------- API implementation ------------------------- */
 
 /* Reset an hashtable already initialized with ht_init().
- * NOTE: This function should only called by ht_destroy(). */
+ * NOTE: This function should only called by ht_destroy().
+ * 重置字典对象的相关属性
+ * */
 static void _dictReset(dict *ht) {
     ht->table = NULL;
     ht->size = 0;
@@ -69,14 +71,21 @@ static void _dictReset(dict *ht) {
     ht->used = 0;
 }
 
-/* Create a new hash table */
+/*
+ * Create a new hash table
+ * 创建一个hash桶
+ * */
 static dict *dictCreate(dictType *type, void *privDataPtr) {
+    // 分配一个指针的大小
     dict *ht = malloc(sizeof(*ht));
     _dictInit(ht,type,privDataPtr);
     return ht;
 }
 
-/* Initialize the hash table */
+/*
+ * Initialize the hash table
+ * 初始化一个hash桶
+ * */
 static int _dictInit(dict *ht, dictType *type, void *privDataPtr) {
     _dictReset(ht);
     ht->type = type;
