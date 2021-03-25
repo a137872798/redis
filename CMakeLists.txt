@@ -1,9 +1,8 @@
-# cmake_minimum_required(VERSION <specify CMake version here>)
+cmake_minimum_required(VERSION 3.17)
 project(redis)
 
 set(CMAKE_CXX_STANDARD 14)
 
-include_directories(deps/hdr_histogram)
 include_directories(deps/hiredis)
 include_directories(deps/hiredis/adapters)
 include_directories(deps/hiredis/examples)
@@ -21,9 +20,6 @@ include_directories(deps/lua/src)
 include_directories(src)
 
 add_executable(redis
-        deps/hdr_histogram/hdr_atomic.h
-        deps/hdr_histogram/hdr_histogram.c
-        deps/hdr_histogram/hdr_histogram.h
         deps/hiredis/adapters/ae.h
         deps/hiredis/adapters/glib.h
         deps/hiredis/adapters/ivykis.h
@@ -40,13 +36,10 @@ add_executable(redis
         deps/hiredis/examples/example-libevent.c
         deps/hiredis/examples/example-libuv.c
         deps/hiredis/examples/example-macosx.c
-        deps/hiredis/examples/example-push.c
         deps/hiredis/examples/example-qt.cpp
         deps/hiredis/examples/example-qt.h
         deps/hiredis/examples/example-ssl.c
         deps/hiredis/examples/example.c
-        deps/hiredis/alloc.c
-        deps/hiredis/alloc.h
         deps/hiredis/async.c
         deps/hiredis/async.h
         deps/hiredis/async_private.h
@@ -63,7 +56,6 @@ add_executable(redis
         deps/hiredis/sds.c
         deps/hiredis/sds.h
         deps/hiredis/sdsalloc.h
-        deps/hiredis/sdscompat.h
         deps/hiredis/sockcompat.c
         deps/hiredis/sockcompat.h
         deps/hiredis/ssl.c
@@ -388,8 +380,6 @@ add_executable(redis
         src/bitops.c
         src/blocked.c
         src/childinfo.c
-        src/cli_common.c
-        src/cli_common.h
         src/cluster.c
         src/cluster.h
         src/config.c
@@ -442,10 +432,6 @@ add_executable(redis
         src/lzfP.h
         src/memtest.c
         src/module.c
-        src/monotonic.c
-        src/monotonic.h
-        src/mt19937-64.c
-        src/mt19937-64.h
         src/multi.c
         src/networking.c
         src/notify.c
@@ -514,26 +500,16 @@ add_executable(redis
         src/zmalloc.c
         src/zmalloc.h
         tests/modules/auth.c
-        tests/modules/blockedclient.c
-        tests/modules/blockonbackground.c
         tests/modules/blockonkeys.c
         tests/modules/commandfilter.c
         tests/modules/datatype.c
-        tests/modules/defragtest.c
         tests/modules/fork.c
-        tests/modules/getkeys.c
-        tests/modules/hash.c
         tests/modules/hooks.c
         tests/modules/infotest.c
-        tests/modules/keyspace_events.c
         tests/modules/misc.c
         tests/modules/propagate.c
         tests/modules/scan.c
-        tests/modules/stream.c
-        tests/modules/test_lazyfree.c
         tests/modules/testrdb.c
-        tests/modules/timer.c
-        tests/modules/zset.c
         utils/hashtable/rehashing.c
         utils/lru/lfu-simulation.c
         utils/corrupt_rdb.c

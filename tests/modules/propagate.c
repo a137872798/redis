@@ -51,23 +51,10 @@ void timerHandler(RedisModuleCtx *ctx, void *data) {
     RedisModule_Replicate(ctx,"INCR","c","timer");
     times++;
 
-    if (times < 3)
+    if (times < 10)
         RedisModule_CreateTimer(ctx,100,timerHandler,NULL);
     else
         times = 0;
-}
-
-int propagateTestTimerCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
-{
-    REDISMODULE_NOT_USED(argv);
-    REDISMODULE_NOT_USED(argc);
-
-    RedisModuleTimerID timer_id =
-        RedisModule_CreateTimer(ctx,100,timerHandler,NULL);
-    REDISMODULE_NOT_USED(timer_id);
-
-    RedisModule_ReplyWithSimpleString(ctx,"OK");
-    return REDISMODULE_OK;
 }
 
 /* The thread entry point. */
@@ -75,7 +62,7 @@ void *threadMain(void *arg) {
     REDISMODULE_NOT_USED(arg);
     RedisModuleCtx *ctx = RedisModule_GetThreadSafeContext(NULL);
     RedisModule_SelectDb(ctx,9); /* Tests ran in database number 9. */
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 10; i++) {
         RedisModule_ThreadSafeContextLock(ctx);
         RedisModule_Replicate(ctx,"INCR","c","a-from-thread");
         RedisModule_Replicate(ctx,"INCR","c","b-from-thread");
@@ -85,10 +72,14 @@ void *threadMain(void *arg) {
     return NULL;
 }
 
-int propagateTestThreadCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
+int propagateTestCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
 {
     REDISMODULE_NOT_USED(argv);
     REDISMODULE_NOT_USED(argc);
+
+    RedisModuleTimerID timer_id =
+        RedisModule_CreateTimer(ctx,100,timerHandler,NULL);
+    REDISMODULE_NOT_USED(timer_id);
 
     pthread_t tid;
     if (pthread_create(&tid,NULL,threadMain,NULL) != 0)
@@ -99,7 +90,7 @@ int propagateTestThreadCommand(RedisModuleCtx *ctx, RedisModuleString **argv, in
     return REDISMODULE_OK;
 }
 
-int propagateTestSimpleCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
+int propagateTest2Command(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
 {
     REDISMODULE_NOT_USED(argv);
     REDISMODULE_NOT_USED(argc);
@@ -111,7 +102,7 @@ int propagateTestSimpleCommand(RedisModuleCtx *ctx, RedisModuleString **argv, in
     return REDISMODULE_OK;
 }
 
-int propagateTestMixedCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
+int propagateTest3Command(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
 {
     REDISMODULE_NOT_USED(argv);
     REDISMODULE_NOT_USED(argc);
@@ -138,23 +129,18 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
     if (RedisModule_Init(ctx,"propagate-test",1,REDISMODULE_APIVER_1)
             == REDISMODULE_ERR) return REDISMODULE_ERR;
 
-    if (RedisModule_CreateCommand(ctx,"propagate-test.timer",
-                propagateTestTimerCommand,
+    if (RedisModule_CreateCommand(ctx,"propagate-test",
+                propagateTestCommand,
                 "",1,1,1) == REDISMODULE_ERR)
             return REDISMODULE_ERR;
 
-    if (RedisModule_CreateCommand(ctx,"propagate-test.thread",
-                propagateTestThreadCommand,
+    if (RedisModule_CreateCommand(ctx,"propagate-test-2",
+                propagateTest2Command,
                 "",1,1,1) == REDISMODULE_ERR)
             return REDISMODULE_ERR;
 
-    if (RedisModule_CreateCommand(ctx,"propagate-test.simple",
-                propagateTestSimpleCommand,
-                "",1,1,1) == REDISMODULE_ERR)
-            return REDISMODULE_ERR;
-
-    if (RedisModule_CreateCommand(ctx,"propagate-test.mixed",
-                propagateTestMixedCommand,
+    if (RedisModule_CreateCommand(ctx,"propagate-test-3",
+                propagateTest3Command,
                 "",1,1,1) == REDISMODULE_ERR)
             return REDISMODULE_ERR;
 

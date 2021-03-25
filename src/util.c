@@ -643,19 +643,23 @@ int ld2string(char *buf, size_t len, long double value, ld2string_mode mode) {
  * the uses a one way hash function in counter mode to generate a random
  * stream. However if /dev/urandom is not available, a weaker seed is used.
  *
- * This function is not thread safe, since the state is global. */
+ * This function is not thread safe, since the state is global.
+ * 生成随机数种子 并填充数组
+ * */
 void getRandomBytes(unsigned char *p, size_t len) {
     /* Global state. */
     static int seed_initialized = 0;
     static unsigned char seed[64]; /* 512 bit internal block size. */
     static uint64_t counter = 0; /* The counter we hash with the seed. */
 
+    // 首次进入 seed还没有被初始化
     if (!seed_initialized) {
         /* Initialize a seed and use SHA1 in counter mode, where we hash
          * the same seed with a progressive counter. For the goals of this
          * function we just need non-colliding strings, there are no
          * cryptographic security needs. */
         FILE *fp = fopen("/dev/urandom","r");
+        // 当文件不存在 或者数据长度不够时 填充64个槽的数组
         if (fp == NULL || fread(seed,sizeof(seed),1,fp) != 1) {
             /* Revert to a weaker seed, and in this case reseed again
              * at every call.*/
@@ -666,11 +670,13 @@ void getRandomBytes(unsigned char *p, size_t len) {
                 seed[j] = tv.tv_sec ^ tv.tv_usec ^ pid ^ (long)fp;
             }
         } else {
+            // 代表种子已经被初始化
             seed_initialized = 1;
         }
         if (fp) fclose(fp);
     }
 
+    // 这里开始填充数组参数
     while(len) {
         /* This implements SHA256-HMAC. */
         unsigned char digest[SHA256_BLOCK_SIZE];

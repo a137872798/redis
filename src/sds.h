@@ -40,6 +40,9 @@ extern const char *SDS_NOINIT;
 #include <stdarg.h>
 #include <stdint.h>
 
+/**
+ * 这里定义了数据结构 sds 用于增强c的byte[]
+ */
 typedef char *sds;
 
 /* Note: sdshdr5 is never used, we just access the flags byte directly.
