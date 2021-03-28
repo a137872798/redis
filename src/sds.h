@@ -90,7 +90,9 @@ struct __attribute__ ((__packed__)) sdshdr64 {
 #define SDS_TYPE_64 4
 #define SDS_TYPE_MASK 7
 #define SDS_TYPE_BITS 3
+// 通过 sds结构体中 数据块的位置 反推到 sds结构体首个地址
 #define SDS_HDR_VAR(T,s) struct sdshdr##T *sh = (void*)((s)-(sizeof(struct sdshdr##T)));
+// 卧槽 这个 ##T 是替换符是么 传入一个8  这里就变成 sdshdr8
 #define SDS_HDR(T,s) ((struct sdshdr##T *)((s)-(sizeof(struct sdshdr##T))))
 #define SDS_TYPE_5_LEN(f) ((f)>>SDS_TYPE_BITS)
 
@@ -109,6 +111,7 @@ static inline size_t sdslen(const sds s) {
             // 反向计算当前数据长度
             return SDS_TYPE_5_LEN(flags);
         case SDS_TYPE_8:
+            // 定位到sdshdr##T的首位置，并通过->len 直接访问len属性
             return SDS_HDR(8,s)->len;
         case SDS_TYPE_16:
             return SDS_HDR(16,s)->len;
@@ -120,14 +123,22 @@ static inline size_t sdslen(const sds s) {
     return 0;
 }
 
+/**
+ * 获取sds此时剩余可用空间
+ * @param s
+ * @return
+ */
 static inline size_t sdsavail(const sds s) {
     unsigned char flags = s[-1];
     switch(flags&SDS_TYPE_MASK) {
+        // 这是特殊的sds 默认返回0
         case SDS_TYPE_5: {
             return 0;
         }
         case SDS_TYPE_8: {
+            // 看来该方法是将sds指针指向首位
             SDS_HDR_VAR(8,s);
+            // 将总计分配的大小 - 此时的长度
             return sh->alloc - sh->len;
         }
         case SDS_TYPE_16: {
@@ -146,6 +157,11 @@ static inline size_t sdsavail(const sds s) {
     return 0;
 }
 
+/**
+ * 更新sds的长度
+ * @param s
+ * @param newlen
+ */
 static inline void sdssetlen(sds s, size_t newlen) {
     unsigned char flags = s[-1];
     switch(flags&SDS_TYPE_MASK) {
@@ -170,6 +186,11 @@ static inline void sdssetlen(sds s, size_t newlen) {
     }
 }
 
+/**
+ * 在原有的基础上增加sds.length
+ * @param s
+ * @param inc
+ */
 static inline void sdsinclen(sds s, size_t inc) {
     unsigned char flags = s[-1];
     switch(flags&SDS_TYPE_MASK) {
@@ -195,7 +216,10 @@ static inline void sdsinclen(sds s, size_t inc) {
     }
 }
 
-/* sdsalloc() = sdsavail() + sdslen() */
+/**
+ * 返回sds已分配的大小
+ * @return sdsalloc() = sdsavail() + sdslen()
+ * */
 static inline size_t sdsalloc(const sds s) {
     unsigned char flags = s[-1];
     switch(flags&SDS_TYPE_MASK) {
@@ -213,6 +237,11 @@ static inline size_t sdsalloc(const sds s) {
     return 0;
 }
 
+/**
+ * 更新sds.alloc
+ * @param s
+ * @param newlen
+ */
 static inline void sdssetalloc(sds s, size_t newlen) {
     unsigned char flags = s[-1];
     switch(flags&SDS_TYPE_MASK) {
@@ -234,6 +263,8 @@ static inline void sdssetalloc(sds s, size_t newlen) {
     }
 }
 
+
+// 下面这些api是需要 .c实现的
 sds sdsnewlen(const void *init, size_t initlen);
 sds sdstrynewlen(const void *init, size_t initlen);
 sds sdsnew(const char *init);
