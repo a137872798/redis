@@ -32,24 +32,30 @@
 #define __ADLIST_H__
 
 /* Node, List, and Iterator are the only data structures used currently. */
-
+// redis自己封装的一个链表结构  每个节点有自己的左右节点 并且包含一个value值
 typedef struct listNode {
     struct listNode *prev;
     struct listNode *next;
     void *value;
 } listNode;
 
+/**
+ * 迭代器对象 通过指定方向 迭代node节点
+ */
 typedef struct listIter {
     listNode *next;
     int direction;
 } listIter;
 
+/**
+ * 主结构 并定义了一些函数
+ */
 typedef struct list {
     listNode *head;
     listNode *tail;
-    void *(*dup)(void *ptr);
-    void (*free)(void *ptr);
-    int (*match)(void *ptr, void *key);
+    void *(*dup)(void *ptr); // 指定了node的拷贝函数
+    void (*free)(void *ptr); // 指定了node的释放函数
+    int (*match)(void *ptr, void *key); // 检测是否匹配时使用的函数
     unsigned long len;
 } list;
 
