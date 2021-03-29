@@ -28,7 +28,9 @@ extern monotime (*getMonotonicUs)(void);
 /* Call once at startup to initialize the monotonic clock.  Though this only
  * needs to be called once, it may be called additional times without impact.
  * Returns a printable string indicating the type of clock initialized.
- * (The returned string is static and doesn't need to be freed.)  */
+ * (The returned string is static and doesn't need to be freed.)
+ * 初始化单调闹钟
+ * */
 const char * monotonicInit();
 
 
@@ -41,6 +43,11 @@ static inline void elapsedStart(monotime *start_time) {
     *start_time = getMonotonicUs();
 }
 
+/**
+ * 获取当前时间 并减去起始时间
+ * @param start_time
+ * @return
+ */
 static inline uint64_t elapsedUs(monotime start_time) {
     return getMonotonicUs() - start_time;
 }

@@ -31,20 +31,32 @@
 
 #include <sys/epoll.h>
 
+/**
+ * 每个epoll事件对应一个 apiState
+ */
 typedef struct aeApiState {
     int epfd;
     struct epoll_event *events;
 } aeApiState;
 
+/**
+ * 目前只关注基于epoll的事件循环
+ * @param eventLoop
+ * @return
+ */
 static int aeApiCreate(aeEventLoop *eventLoop) {
     aeApiState *state = zmalloc(sizeof(aeApiState));
 
+    // 创建state失败 返回-1
     if (!state) return -1;
+    // 根据事件循环分配的slot数 申请等量的 epoll_event
     state->events = zmalloc(sizeof(struct epoll_event)*eventLoop->setsize);
+    // 分配失败 归还内存
     if (!state->events) {
         zfree(state);
         return -1;
     }
+    // 调用linux epoll函数
     state->epfd = epoll_create(1024); /* 1024 is just a hint for the kernel */
     if (state->epfd == -1) {
         zfree(state->events);
@@ -52,10 +64,17 @@ static int aeApiCreate(aeEventLoop *eventLoop) {
         return -1;
     }
     anetCloexec(state->epfd);
+    // 设置apidata
     eventLoop->apidata = state;
     return 0;
 }
 
+/**
+ * 重置epoll_event的数量
+ * @param eventLoop
+ * @param setsize
+ * @return
+ */
 static int aeApiResize(aeEventLoop *eventLoop, int setsize) {
     aeApiState *state = eventLoop->apidata;
 
@@ -63,6 +82,10 @@ static int aeApiResize(aeEventLoop *eventLoop, int setsize) {
     return 0;
 }
 
+/**
+ * 关闭句柄 释放内存
+ * @param eventLoop
+ */
 static void aeApiFree(aeEventLoop *eventLoop) {
     aeApiState *state = eventLoop->apidata;
 
@@ -71,11 +94,20 @@ static void aeApiFree(aeEventLoop *eventLoop) {
     zfree(state);
 }
 
+/**
+ * 追加一个事件
+ * @param eventLoop
+ * @param fd
+ * @param mask
+ * @return
+ */
 static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
     aeApiState *state = eventLoop->apidata;
     struct epoll_event ee = {0}; /* avoid valgrind warning */
     /* If the fd was already monitored for some event, we need a MOD
-     * operation. Otherwise we need an ADD operation. */
+     * operation. Otherwise we need an ADD operation.
+     * 根据此时该slot是否已经有事件 判断本次是一个插入操作还是更新操作
+     * */
     int op = eventLoop->events[fd].mask == AE_NONE ?
             EPOLL_CTL_ADD : EPOLL_CTL_MOD;
 
@@ -84,10 +116,17 @@ static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
     if (mask & AE_READABLE) ee.events |= EPOLLIN;
     if (mask & AE_WRITABLE) ee.events |= EPOLLOUT;
     ee.data.fd = fd;
+    // 将相关信息作为参数调用epoll_ctl 失败时返回-1
     if (epoll_ctl(state->epfd,op,fd,&ee) == -1) return -1;
     return 0;
 }
 
+/**
+ * 移除底层的事件
+ * @param eventLoop
+ * @param fd
+ * @param delmask
+ */
 static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int delmask) {
     aeApiState *state = eventLoop->apidata;
     struct epoll_event ee = {0}; /* avoid valgrind warning */

@@ -53,24 +53,36 @@ static void anetSetError(char *err, const char *fmt, ...)
     va_list ap;
 
     if (!err) return;
+    // 可变参数相关的 先忽略
     va_start(ap, fmt);
     vsnprintf(err, ANET_ERR_LEN, fmt, ap);
     va_end(ap);
 }
 
+/**
+ * 设置socket的阻塞模式
+ * @param err
+ * @param fd 对应套接字句柄
+ * @param non_block 是否非阻塞
+ * @return
+ */
 int anetSetBlock(char *err, int fd, int non_block) {
     int flags;
 
     /* Set the socket blocking (if non_block is zero) or non-blocking.
      * Note that fcntl(2) for F_GETFL and F_SETFL can't be
-     * interrupted by a signal. */
+     * interrupted by a signal.
+     * 获取此时套接字的选项
+     * */
     if ((flags = fcntl(fd, F_GETFL)) == -1) {
         anetSetError(err, "fcntl(F_GETFL): %s", strerror(errno));
         return ANET_ERR;
     }
 
     /* Check if this flag has been set or unset, if so, 
-     * then there is no need to call fcntl to set/unset it again. */
+     * then there is no need to call fcntl to set/unset it again.
+     * flags 已经与期望的一致了
+     * */
     if (!!(flags & O_NONBLOCK) == !!non_block)
         return ANET_OK;
 
@@ -79,6 +91,7 @@ int anetSetBlock(char *err, int fd, int non_block) {
     else
         flags &= ~O_NONBLOCK;
 
+    // 更新套接字配置
     if (fcntl(fd, F_SETFL, flags) == -1) {
         anetSetError(err, "fcntl(F_SETFL,O_NONBLOCK): %s", strerror(errno));
         return ANET_ERR;
@@ -268,6 +281,12 @@ int anetResolve(char *err, char *host, char *ipbuf, size_t ipbuf_len,
     return ANET_OK;
 }
 
+/**
+ * 设置socket配置 允许某些即将被关闭的套接字重复使用 以提高效率
+ * @param err
+ * @param fd
+ * @return
+ */
 static int anetSetReuseAddr(char *err, int fd) {
     int yes = 1;
     /* Make sure connection-intensive things like the redis benchmark
@@ -298,29 +317,42 @@ static int anetCreateSocket(char *err, int domain) {
 #define ANET_CONNECT_NONE 0
 #define ANET_CONNECT_NONBLOCK 1
 #define ANET_CONNECT_BE_BINDING 2 /* Best effort binding. */
+// 生成一条tcp 连接
 static int anetTcpGenericConnect(char *err, const char *addr, int port,
                                  const char *source_addr, int flags)
 {
     int s = ANET_ERR, rv;
+    // 存储端口的数组
     char portstr[6];  /* strlen("65535") + 1; */
+    // addrinfo 是 linux内置的有关网络地址的信息
     struct addrinfo hints, *servinfo, *bservinfo, *p, *b;
 
     snprintf(portstr,sizeof(portstr),"%d",port);
     memset(&hints,0,sizeof(hints));
+
+    // 指定tcp相关模式
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
+    // 应该是通过addr 和 post 来填充servinfo
     if ((rv = getaddrinfo(addr,portstr,&hints,&servinfo)) != 0) {
         anetSetError(err, "%s", gai_strerror(rv));
         return ANET_ERR;
     }
+
+    // 创建连接服务器的套接字对象
     for (p = servinfo; p != NULL; p = p->ai_next) {
         /* Try to create the socket and to connect it.
          * If we fail in the socket() call, or on connect(), we retry with
-         * the next entry in servinfo. */
+         * the next entry in servinfo.
+         * 打开通往服务器的套接字  当创建 失败时 遍历下一个p 这里是网络的底层实现 先忽略
+         * 此时s 指向套接字句柄
+         * */
         if ((s = socket(p->ai_family,p->ai_socktype,p->ai_protocol)) == -1)
             continue;
+        // 开启socket 重复使用选项 开启失败返回异常
         if (anetSetReuseAddr(err,s) == ANET_ERR) goto error;
+        // 将socket设置成非阻塞模式 失败返回异常
         if (flags & ANET_CONNECT_NONBLOCK && anetNonBlock(err,s) != ANET_OK)
             goto error;
         if (source_addr) {
@@ -378,6 +410,13 @@ end:
     }
 }
 
+/**
+ * 开启一条阻塞式的tcp连接
+ * @param err
+ * @param addr
+ * @param port
+ * @return
+ */
 int anetTcpConnect(char *err, const char *addr, int port)
 {
     return anetTcpGenericConnect(err,addr,port,NULL,ANET_CONNECT_NONE);

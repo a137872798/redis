@@ -60,6 +60,7 @@
 /* Macros */
 #define AE_NOTUSED(V) ((void) V)
 
+// AE时间循环 可能会监测到多种事件
 struct aeEventLoop;
 
 /* Types and data structures */
@@ -68,7 +69,9 @@ typedef int aeTimeProc(struct aeEventLoop *eventLoop, long long id, void *client
 typedef void aeEventFinalizerProc(struct aeEventLoop *eventLoop, void *clientData);
 typedef void aeBeforeSleepProc(struct aeEventLoop *eventLoop);
 
-/* File event structure */
+/* File event structure
+ * 事件循环监听文件事件
+ * */
 typedef struct aeFileEvent {
     int mask; /* one of AE_(READABLE|WRITABLE|BARRIER) */
     aeFileProc *rfileProc;
@@ -76,10 +79,13 @@ typedef struct aeFileEvent {
     void *clientData;
 } aeFileEvent;
 
-/* Time event structure */
+/* Time event structure
+ * 监听时间事件
+ * */
 typedef struct aeTimeEvent {
     long long id; /* time event identifier. */
     monotime when;
+    // 当时间条件满足时触发的函数
     aeTimeProc *timeProc;
     aeEventFinalizerProc *finalizerProc;
     void *clientData;
@@ -89,21 +95,28 @@ typedef struct aeTimeEvent {
   		   * freed in recursive time event calls. */
 } aeTimeEvent;
 
-/* A fired event */
+/* A fired event
+ * 一个触发类型的事件 */
 typedef struct aeFiredEvent {
     int fd;
     int mask;
 } aeFiredEvent;
 
-/* State of an event based program */
+/* State of an event based program
+ * 事件循环
+ * */
 typedef struct aeEventLoop {
     int maxfd;   /* highest file descriptor currently registered */
+    // 槽的长度 (events/fired)
     int setsize; /* max number of file descriptors tracked */
+    // 每当增加了一个时间事件 就会将该值+1
     long long timeEventNextId;
     aeFileEvent *events; /* Registered events */
     aeFiredEvent *fired; /* Fired events */
     aeTimeEvent *timeEventHead;
+    // 当前事件循环是否被暂停
     int stop;
+    // 基于不同的实现机制 指向不同的数据 比如epoll 指向 linux_epoll
     void *apidata; /* This is used for polling API specific data */
     aeBeforeSleepProc *beforesleep;
     aeBeforeSleepProc *aftersleep;
