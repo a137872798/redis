@@ -1244,7 +1244,7 @@ sds *sdssplitargs(const char *line, int *argc) {
                 } else {
                     // 解析下一个字符
                     switch (*p) {
-                        // 识别特殊符号 并设置对应的标记值
+                        // 当解析到这些字符时 代表读取到了一个 token
                         case ' ':
                         case '\n':
                         case '\r':

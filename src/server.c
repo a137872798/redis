@@ -2350,14 +2350,14 @@ void initServerConfig(void) {
     server.active_defrag_running = 0;
     server.notify_keyspace_events = 0;
     server.blocked_clients = 0;
-    // 将int数组清空
+    // 将blocks数组清空
     memset(server.blocked_clients_by_type, 0,
            sizeof(server.blocked_clients_by_type));
     server.shutdown_asap = 0;
     // 生成一个配置文件名的副本指针
     server.cluster_configfile = zstrdup(CONFIG_DEFAULT_CLUSTER_CONFIG_FILE);
     server.cluster_module_flags = CLUSTER_MODULE_FLAG_NONE;
-    // 传入一个字典类型 + Null 返回一个hash桶对象
+    // 传入指定的字典定义对象 生成字典
     server.migrate_cached_sockets = dictCreate(&migrateCacheDictType, NULL);
     // 当前客户端的id
     server.next_client_id = 1; /* Client IDs, start from 1 .*/
@@ -2403,6 +2403,7 @@ void initServerConfig(void) {
     /*
      * Client output buffer limits
      * 这里按照不同的客户端类型 设置限流参数
+     * 目前3种类型 normal, slave, pubsub
      */
     for (j = 0; j < CLIENT_TYPE_OBUF_COUNT; j++)
         server.client_obuf_limits[j] = clientBufferLimitsDefaults[j];
@@ -2422,8 +2423,9 @@ void initServerConfig(void) {
      * 创建一个存储了所有指令的字典 有关指令的dictType是内置的
      * */
     server.commands = dictCreate(&commandTableDictType, NULL);
-    // 原始command???
+    // 看来存在2种command
     server.orig_commands = dictCreate(&commandTableDictType, NULL);
+    // 填充 command字典
     populateCommandTable();
     server.delCommand = lookupCommandByCString("del");
     server.multiCommand = lookupCommandByCString("multi");
@@ -2963,9 +2965,12 @@ void InitServerLast() {
  * */
 int populateCommandTableParseFlags(struct redisCommand *c, char *strflags) {
     int argc;
+    // 等同于 char **
     sds *argv;
 
-    /* Split the line into arguments for processing. */
+    /* Split the line into arguments for processing.
+     * argc 代表拆解成多少个片段  每个片段 描述了该命令的一种属性
+     * */
     argv = sdssplitargs(strflags, &argc);
     if (argv == NULL) return C_ERR;
 
@@ -3036,7 +3041,7 @@ void populateCommandTable(void) {
 
         /* Translate the command string flags description into an actual
          * set of flags. */
-        // 传入命令对象和 描述信息
+        // 将指令和描述信息填充到字典中
         if (populateCommandTableParseFlags(c, c->sflags) == C_ERR)
             serverPanic("Unsupported command flag");
 

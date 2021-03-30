@@ -1044,6 +1044,9 @@ struct redisServer {
                                    is enabled. */
     int hz;                     /* serverCron() calls frequency in hertz */
     redisDb *db;
+    /**
+     * 存储了服务器支持的所有指令的字典
+     */
     dict *commands;             /* Command table */
     dict *orig_commands;        /* Command table before command renaming. */
     aeEventLoop *el;

@@ -1274,7 +1274,9 @@ void updateSlavesWaitingBgsave(int bgsaveerr, int type) {
 /* Change the current instance replication ID with a new, random one.
  * This will prevent successful PSYNCs between this master and other
  * slaves, so the command should be called when something happens that
- * alters the current story of the dataset. */
+ * alters the current story of the dataset.
+ * 随机生成一个副本id
+ * */
 void changeReplicationId(void) {
     getRandomHexChars(server.replid,CONFIG_RUN_ID_SIZE);
     server.replid[CONFIG_RUN_ID_SIZE] = '\0';

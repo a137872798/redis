@@ -48,7 +48,7 @@
 #define DICT_NOTUSED(V) ((void) V)
 
 /**
- * hash结构对象
+ * 字典对象 对应hashMap
  */
 
 /**
@@ -63,7 +63,7 @@ typedef struct dictEntry {
         int64_t s64;
         double d;
     } v;
-    // 基于链表实现么
+    // 拉链法  在dictht中本身存储的是entry数组 每个entry下面是链表结构
     struct dictEntry *next;
 } dictEntry;
 
@@ -89,6 +89,7 @@ typedef struct dictht {
     dictEntry **table;
     unsigned long size;
     unsigned long sizemask;
+    // 标记哪个数组正在被使用
     unsigned long used;
 } dictht;
 
@@ -98,6 +99,7 @@ typedef struct dictht {
 typedef struct dict {
     // 该属性定义了字典的 比较函数 hash函数等
     dictType *type;
+    // 字典本身还可以存储一个私有数据
     void *privdata;
     // 内部包含新旧2个桶结构
     dictht ht[2];
