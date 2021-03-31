@@ -96,8 +96,11 @@
 
 #define RAX_NODE_MAX_SIZE ((1<<29)-1)
 typedef struct raxNode {
+    // 如果不包含key 应该就是结尾节点吧
     uint32_t iskey:1;     /* Does this node contain a key? */
+    // 代表该node关联的数据为null
     uint32_t isnull:1;    /* Associated value is NULL (don't store it). */
+    // 是否是压缩节点
     uint32_t iscompr:1;   /* Node is compressed. */
     uint32_t size:29;     /* Number of children, or compressed string len. */
     /* Data layout is as follows:
@@ -130,9 +133,15 @@ typedef struct raxNode {
     unsigned char data[];
 } raxNode;
 
+/**
+ * 整个rax树结构
+ */
 typedef struct rax {
+    // 首个节点
     raxNode *head;
+    // 内部总计有多少元素
     uint64_t numele;
+    // 内部有多少节点 元素数量与节点数不一致 因为公共前缀也占用一个节点
     uint64_t numnodes;
 } rax;
 
@@ -161,7 +170,9 @@ typedef struct raxStack {
  * reallocate the nodes to reduce the allocation fragmentation (this is the
  * Redis application for this callback).
  *
- * This is currently only supported in forward iterations (raxNext) */
+ * This is currently only supported in forward iterations (raxNext)
+ * 定义一个回调函数 一般是在遍历node节点时使用的
+ * */
 typedef int (*raxNodeCallback)(raxNode **noderef);
 
 /* Radix tree iterator state is encapsulated into this data structure. */
@@ -172,24 +183,38 @@ typedef int (*raxNodeCallback)(raxNode **noderef);
 #define RAX_ITER_EOF (1<<1)    /* End of iteration reached. */
 #define RAX_ITER_SAFE (1<<2)   /* Safe iterator, allows operations while
                                   iterating. But it is slower. */
+
+/**
+ * rax节点迭代器
+ */
 typedef struct raxIterator {
     int flags;
+    // 该迭代器是针对哪个rax树
     rax *rt;                /* Radix tree we are iterating. */
+    // 当前读取到的某个数据node(公共前缀的节点不算) 对应的key
     unsigned char *key;     /* The current string. */
+    // 关联的数据
     void *data;             /* Data associated to this key. */
+    // 当前key的长度
     size_t key_len;         /* Current key length. */
+    // 当前存储key的缓冲区最大容量
     size_t key_max;         /* Max key len the current key buffer can hold. */
     unsigned char key_static_string[RAX_ITER_STATIC_LEN];
+    // 当前遍历到的节点
     raxNode *node;          /* Current node. Only for unsafe iteration. */
     raxStack stack;         /* Stack used for unsafe iteration. */
+    // 可以为迭代器设置回调函数
     raxNodeCallback node_cb; /* Optional node callback. Normally set to NULL. */
 } raxIterator;
 
 /* A special pointer returned for not found items. */
 extern void *raxNotFound;
 
-/* Exported API. */
+/* Exported API.
+ * 初始化一个 rax结构
+ * */
 rax *raxNew(void);
+// 下面都是一些相关api的定义
 int raxInsert(rax *rax, unsigned char *s, size_t len, void *data, void **old);
 int raxTryInsert(rax *rax, unsigned char *s, size_t len, void *data, void **old);
 int raxRemove(rax *rax, unsigned char *s, size_t len, void **old);

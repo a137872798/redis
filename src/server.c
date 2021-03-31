@@ -2427,6 +2427,7 @@ void initServerConfig(void) {
     server.orig_commands = dictCreate(&commandTableDictType, NULL);
     // 填充 command字典
     populateCommandTable();
+    // 从字典中取出这些命令 并赋值
     server.delCommand = lookupCommandByCString("del");
     server.multiCommand = lookupCommandByCString("multi");
     server.lpushCommand = lookupCommandByCString("lpush");
@@ -2455,6 +2456,7 @@ void initServerConfig(void) {
      * Redis 5. However it is possible to revert it via redis.conf. */
     server.lua_always_replicate_commands = 1;
 
+    // 初始化配置项信息
     initConfigValues();
 }
 
@@ -3046,6 +3048,7 @@ void populateCommandTable(void) {
             serverPanic("Unsupported command flag");
 
         c->id = ACLGetCommandID(c->name); /* Assign the ID used for ACL. */
+        // 将指令存储到字典中
         retval1 = dictAdd(server.commands, sdsnew(c->name), c);
         /* Populate an additional dictionary that will be unaffected
          * by rename-command statements in redis.conf. */
@@ -5025,7 +5028,9 @@ int main(int argc, char **argv) {
     dictSetHashFunctionSeed(hashseed);
     // 检测是否开启了哨兵模式
     server.sentinel_mode = checkForSentinelMode(argc, argv);
+    // 初始化 server 的配置信息
     initServerConfig();
+    // ACL子系统必须被初始化 因为基础的网络层代码和客户端依赖于它
     ACLInit(); /* The ACL subsystem must be initialized ASAP because the
                   basic networking code and client creation depends on it. */
     moduleInitModulesSystem();

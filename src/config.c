@@ -38,12 +38,19 @@
  * Config file name-value maps.
  *----------------------------------------------------------------------------*/
 
+/**
+ * 每个配置项包含 key/value
+ */
 typedef struct configEnum {
     const char *name;
     const int val;
 } configEnum;
 
+/**
+ * 这是内存淘汰策略么
+ */
 configEnum maxmemory_policy_enum[] = {
+        // value 对应各种flag值
     {"volatile-lru", MAXMEMORY_VOLATILE_LRU},
     {"volatile-lfu", MAXMEMORY_VOLATILE_LFU},
     {"volatile-random",MAXMEMORY_VOLATILE_RANDOM},
@@ -55,6 +62,9 @@ configEnum maxmemory_policy_enum[] = {
     {NULL, 0}
 };
 
+/**
+ * 系统日志参数
+ */
 configEnum syslog_facility_enum[] = {
     {"user",    LOG_USER},
     {"local0",  LOG_LOCAL0},
@@ -68,6 +78,9 @@ configEnum syslog_facility_enum[] = {
     {NULL, 0}
 };
 
+/**
+ * 日志级别
+ */
 configEnum loglevel_enum[] = {
     {"debug", LL_DEBUG},
     {"verbose", LL_VERBOSE},
@@ -76,6 +89,9 @@ configEnum loglevel_enum[] = {
     {NULL,0}
 };
 
+/**
+ * 监督模式
+ */
 configEnum supervised_mode_enum[] = {
     {"upstart", SUPERVISED_UPSTART},
     {"systemd", SUPERVISED_SYSTEMD},
@@ -84,6 +100,9 @@ configEnum supervised_mode_enum[] = {
     {NULL, 0}
 };
 
+/**
+ * aof 刷盘时间间隔 每次写入都刷盘 还是每秒刷盘一次 一般不会每次写入都刷盘 这样性能低
+ */
 configEnum aof_fsync_enum[] = {
     {"everysec", AOF_FSYNC_EVERYSEC},
     {"always", AOF_FSYNC_ALWAYS},
@@ -91,6 +110,9 @@ configEnum aof_fsync_enum[] = {
     {NULL, 0}
 };
 
+/**
+ * 副本加载策略???
+ */
 configEnum repl_diskless_load_enum[] = {
     {"disabled", REPL_DISKLESS_LOAD_DISABLED},
     {"on-empty-db", REPL_DISKLESS_LOAD_WHEN_DB_EMPTY},
@@ -98,7 +120,9 @@ configEnum repl_diskless_load_enum[] = {
     {NULL, 0}
 };
 
-/* Output buffer limits presets. */
+/* Output buffer limits presets.
+ * 向外输出的buffer大小 这是一个限流值
+ * */
 clientBufferLimitsConfig clientBufferLimitsDefaults[CLIENT_TYPE_OBUF_COUNT] = {
     {0, 0, 0}, /* normal */
     {1024*1024*256, 1024*1024*64, 60}, /* slave */
@@ -118,7 +142,9 @@ clientBufferLimitsConfig clientBufferLimitsDefaults[CLIENT_TYPE_OBUF_COUNT] = {
  */
 
 /* Configuration values that require no special handling to set, get, load or
- * rewrite. */
+ * rewrite.
+ * 代表包含默认数据的配置项 并且该配置值类型为boolean
+ * */
 typedef struct boolConfigData {
     int *config; /* The pointer to the server config this value is stored in */
     const int default_value; /* The default value of the config on rewrite */
@@ -126,6 +152,9 @@ typedef struct boolConfigData {
     int (*update_fn)(int val, int prev, char **err); /* Optional function to apply new value at runtime (generic doc above) */
 } boolConfigData;
 
+/**
+ * 配置项值为string类型
+ */
 typedef struct stringConfigData {
     char **config; /* Pointer to the server config this value is stored in. */
     const char *default_value; /* Default value of the config on rewrite. */
@@ -178,6 +207,9 @@ typedef struct numericConfigData {
     int (*update_fn)(long long val, long long prev, char **err); /* Optional function to apply new value at runtime (generic doc above) */
 } numericConfigData;
 
+/**
+ * union 代表配置项的值只能是其中一个
+ */
 typedef union typeData {
     boolConfigData yesno;
     stringConfigData string;
@@ -185,6 +217,9 @@ typedef union typeData {
     numericConfigData numeric;
 } typeData;
 
+/**
+ * 将配置项的 修改/获取 逻辑抽取出来 包装成一个结构体
+ */
 typedef struct typeInterface {
     /* Called on server start, to init the server with default value */
     void (*init)(typeData data);
@@ -199,14 +234,22 @@ typedef struct typeInterface {
     void (*rewrite)(typeData data, const char *name, struct rewriteConfigState *state);
 } typeInterface;
 
+/**
+ * 标准配置项
+ */
 typedef struct standardConfig {
     const char *name; /* The user visible name of this config */
+    // 配置项会有一个别名
     const char *alias; /* An alias that can also be used for this config */
+    // 该配置项是否允许修改
     const int modifiable; /* Can this value be updated by CONFIG SET? */
+    // 该函数包含了如何修改/获取/覆盖 配置项的值
     typeInterface interface; /* The function pointers that define the type interface */
+    // 具体的配置值
     typeData data; /* The type specific data exposed used by the interface */
 } standardConfig;
 
+// 内部包含一组标准配置项
 standardConfig configs[];
 
 /*-----------------------------------------------------------------------------
@@ -286,6 +329,9 @@ void queueLoadModule(sds path, sds *argv, int argc) {
     listAddNodeTail(server.loadmodule_queue,loadmod);
 }
 
+/**
+ * 对此时已经设置的配置项进行初始化
+ */
 void initConfigValues() {
     for (standardConfig *config = configs; config->name != NULL; config++) {
         config->interface.init(config->data);

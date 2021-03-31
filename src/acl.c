@@ -36,6 +36,7 @@
  * Global state for ACLs
  * ==========================================================================*/
 
+// 使用rax来存储所有用户信息 ACL是做权限认证的么
 rax *Users; /* Table mapping usernames to user structures. */
 
 user *DefaultUser;  /* Global reference to the default user.
@@ -927,8 +928,12 @@ void ACLInitDefaultUser(void) {
     ACLSetUser(DefaultUser,"nopass",-1);
 }
 
-/* Initialization of the ACL subsystem. */
+/*
+ * Initialization of the ACL subsystem.
+ * 在启动 redis server时 必须确保acl子系统完成初始化
+ * */
 void ACLInit(void) {
+    // 初始化一个 rax结构 用于存储所有的用户信息
     Users = raxNew();
     UsersToLoad = listCreate();
     ACLLog = listCreate();
