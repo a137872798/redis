@@ -207,6 +207,9 @@ typedef struct standardConfig {
     typeData data; /* The type specific data exposed used by the interface */
 } standardConfig;
 
+/**
+ * 配置项本身存储了一组standardConfig
+ */
 standardConfig configs[];
 
 /*-----------------------------------------------------------------------------

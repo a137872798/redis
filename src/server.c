@@ -2424,7 +2424,10 @@ void initServerConfig(void) {
     server.commands = dictCreate(&commandTableDictType, NULL);
     // 原始command???
     server.orig_commands = dictCreate(&commandTableDictType, NULL);
+    // 解析command相关的描述信息 并作用到flag上
     populateCommandTable();
+
+    // 之前已经将所有command插入到字典中了 现在反查出来并设置到server上
     server.delCommand = lookupCommandByCString("del");
     server.multiCommand = lookupCommandByCString("multi");
     server.lpushCommand = lookupCommandByCString("lpush");
@@ -2453,6 +2456,7 @@ void initServerConfig(void) {
      * Redis 5. However it is possible to revert it via redis.conf. */
     server.lua_always_replicate_commands = 1;
 
+    // 初始化配置值
     initConfigValues();
 }
 
@@ -2969,8 +2973,10 @@ int populateCommandTableParseFlags(struct redisCommand *c, char *strflags) {
     argv = sdssplitargs(strflags, &argc);
     if (argv == NULL) return C_ERR;
 
+    // 这里根据解析command的描述信息 更新flag
     for (int j = 0; j < argc; j++) {
         char *flag = argv[j];
+        // 返回0 代表相等 也就是false
         if (!strcasecmp(flag, "write")) {
             c->flags |= CMD_WRITE | CMD_CATEGORY_WRITE;
         } else if (!strcasecmp(flag, "read-only")) {
@@ -3004,6 +3010,7 @@ int populateCommandTableParseFlags(struct redisCommand *c, char *strflags) {
         } else {
             /* Parse ACL categories here if the flag name starts with @. */
             uint64_t catflag;
+            // 解析出来的token 可能是 @XXX 这里将XXX 与ACL进行匹配  成功的情况下追加flag
             if (flag[0] == '@' &&
                 (catflag = ACLGetCommandCategoryFlagByName(flag + 1)) != 0) {
                 c->flags |= catflag;
@@ -3013,9 +3020,12 @@ int populateCommandTableParseFlags(struct redisCommand *c, char *strflags) {
             }
         }
     }
-    /* If it's not @fast is @slow in this binary world. */
+    /* If it's not @fast is @slow in this binary world.
+     * 如果没有解析到fast标识  自动补上slow
+     * */
     if (!(c->flags & CMD_CATEGORY_FAST)) c->flags |= CMD_CATEGORY_SLOW;
 
+    // 回收之前分配的sds  因为这些内存块是通过alloc函数创建的 需要手动释放 否则内存分配函数将无法访问到它 也就产生了内存泄漏
     sdsfreesplitres(argv, argc);
     return C_OK;
 }
@@ -3040,7 +3050,10 @@ void populateCommandTable(void) {
         if (populateCommandTableParseFlags(c, c->sflags) == C_ERR)
             serverPanic("Unsupported command flag");
 
+        // 将name 插入到rax结构中 并返回id  为什么要使用rax结构???
         c->id = ACLGetCommandID(c->name); /* Assign the ID used for ACL. */
+
+        // 将命令插入到字典中 插入到字典中是为了通过时间复杂度O(1)进行快速查找
         retval1 = dictAdd(server.commands, sdsnew(c->name), c);
         /* Populate an additional dictionary that will be unaffected
          * by rename-command statements in redis.conf. */

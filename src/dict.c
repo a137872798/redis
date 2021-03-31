@@ -132,7 +132,7 @@ int _dictInit(dict *d, dictType *type,
     d->type = type;
     d->privdata = privDataPtr;
     d->rehashidx = -1;
-    d->iterators = 0;
+    d->pauserehash = 0;
     return DICT_OK;
 }
 
@@ -264,7 +264,7 @@ int dictRehashMilliseconds(dict *d, int ms) {
  * dictionary so that the hash table automatically migrates from H1 to H2
  * while it is actively used. */
 static void _dictRehashStep(dict *d) {
-    if (d->iterators == 0) dictRehash(d,1);
+    if (d->pauserehash == 0) dictRehash(d,1);
 }
 
 /* Add an element to the target hash table */
@@ -572,7 +572,7 @@ dictEntry *dictNext(dictIterator *iter)
             dictht *ht = &iter->d->ht[iter->table];
             if (iter->index == -1 && iter->table == 0) {
                 if (iter->safe)
-                    iter->d->iterators++;
+                    iter->d->pauserehash++;
                 else
                     iter->fingerprint = dictFingerprint(iter->d);
             }
@@ -604,7 +604,7 @@ void dictReleaseIterator(dictIterator *iter)
 {
     if (!(iter->index == -1 && iter->table == 0)) {
         if (iter->safe)
-            iter->d->iterators--;
+            iter->d->pauserehash--;
         else
             assert(iter->fingerprint == dictFingerprint(iter->d));
     }
@@ -879,7 +879,7 @@ unsigned long dictScan(dict *d,
 
     /* Having a safe iterator means no rehashing can happen, see _dictRehashStep.
      * This is needed in case the scan callback tries to do dictFind or alike. */
-    d->iterators++;
+    d->pauserehash++;
 
     if (!dictIsRehashing(d)) {
         t0 = &(d->ht[0]);
@@ -948,7 +948,7 @@ unsigned long dictScan(dict *d,
     }
 
     /* undo the ++ at the top */
-    d->iterators--;
+    d->pauserehash--;
 
     return v;
 }
@@ -1026,7 +1026,7 @@ void dictEmpty(dict *d, void(callback)(void*)) {
     _dictClear(d,&d->ht[0],callback);
     _dictClear(d,&d->ht[1],callback);
     d->rehashidx = -1;
-    d->iterators = 0;
+    d->pauserehash = 0;
 }
 
 void dictEnableResize(void) {
