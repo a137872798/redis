@@ -1006,12 +1006,16 @@ int ACLAuthenticateUser(client *c, robj *username, robj *password) {
  * should have an assigned ID (that is used to index the bitmap). This function
  * creates such an ID: it uses sequential IDs, reusing the same ID for the same
  * command name, so that a command retains the same ID in case of modules that
- * are unloaded and later reloaded. */
+ * are unloaded and later reloaded.
+ * 通过命令名称  兑换id
+ * */
 unsigned long ACLGetCommandID(const char *cmdname) {
     static rax *map = NULL;
     static unsigned long nextid = 0;
 
+    // 基于参数文本转换成 sds结构
     sds lowername = sdsnew(cmdname);
+    // 全部转换成小写
     sdstolower(lowername);
     if (map == NULL) map = raxNew();
     void *id = raxFind(map,(unsigned char*)lowername,sdslen(lowername));
