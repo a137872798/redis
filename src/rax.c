@@ -178,7 +178,10 @@ static inline void raxStackFree(raxStack *ts) {
 
 /* Return the current total size of the node. Note that the second line
  * computes the padding after the string of characters, needed in order to
- * save pointers to aligned addresses. */
+ * save pointers to aligned addresses.
+ * 计算当前节点长度
+ * 节点本身长度 + size +填充行 + 节点指针类型的长度(根据节点类型) + void指针
+ * */
 #define raxNodeCurrentLength(n) ( \
     sizeof(raxNode)+(n)->size+ \
     raxPadding((n)->size)+ \
@@ -233,10 +236,14 @@ rax *raxNew(void) {
 }
 
 /* realloc the node to make room for auxiliary data in order
- * to store an item in that node. On out of memory NULL is returned. */
+ * to store an item in that node. On out of memory NULL is returned.
+ * 将数据填充到该节点上
+ * */
 raxNode *raxReallocForData(raxNode *n, void *data) {
     if (data == NULL) return n; /* No reallocation needed, setting isnull=1 */
+    // 计算当前节点的长度
     size_t curlen = raxNodeCurrentLength(n);
+    // 在原基础上 多分配一个void指针 用于存储数据
     return rax_realloc(n,curlen+sizeof(void*));
 }
 
@@ -513,28 +520,28 @@ static inline size_t raxLowWalk(rax *rax, unsigned char *s, size_t len, raxNode 
             // 当遇到不匹配的前缀时 代表该前缀无法再共用 需要进行分裂
             if (j != h->size) break;
 
-            // head节点初始化时是非压缩节点  将该状态当作初始状态 看看怎么处理
         } else {
             /* Even when h->size is large, linear scan provides good
              * performances compared to other approaches that are in theory
              * more sounding, like performing a binary search.
-             * 对于非压缩节点 size就是子节点数量
+             * 如果是非压缩节点 就是分岔点 对应[a,b,c] 这种情况 需要通过对比下一个字符确定分支
+             * 当[] 内部没有元素时 就代表来到了一个字符串的末尾
              * */
             for (j = 0; j < h->size; j++) {
                 if (v[j] == s[i]) break;
             }
+            // 代表没有元素匹配上 需要新增节点
             if (j == h->size) break;
             i++;
         }
 
-        // 假设此时已经匹配上了h节点关联的公共前缀 这时代表着后面的数据无法共用 需要分裂
         // 先假设没有传入ts 不需要处理
         if (ts) raxStackPush(ts,h); /* Save stack of parent nodes. */
         // 定位到下一个子节点的起始偏移量
         raxNode **children = raxNodeFirstChildPtr(h);
         // 如果本次是压缩节点 重置j
         if (h->iscompr) j = 0; /* Compressed node only child is at index 0. */
-        // 这里应该是用子节点的数据去覆盖h的数据
+        // 这里应该是用子节点的数据去覆盖h的数据  如果本次是非压缩节点 对应[a,b,c]的情况 通过+j定位到对应的节点
         memcpy(&h,children+j,sizeof(h));
         // 记录最近一个匹配上的节点
         parentlink = children+j;
@@ -545,10 +552,12 @@ static inline size_t raxLowWalk(rax *rax, unsigned char *s, size_t len, raxNode 
                   the searched key. */
     }
     debugnode("Lookup stop node is",h);
+    // 上面这块逻辑都在最大限度的匹配前缀 直到无法继续匹配的时候返回 此时i停留在最后匹配上的位置
+
     // 此时已经知道了 本次要插入的字符串匹配到的下标 之后要从这里开始分裂
-    // stopnode 是外部传入 希望被设置的
+
+    // 对这3个指针进行赋值
     if (stopnode) *stopnode = h;
-    // 为三级指针赋值
     if (plink) *plink = parentlink;
     // 找到最近的一个分裂点
     if (splitpos && h->iscompr) *splitpos = j;
@@ -571,12 +580,12 @@ int raxGenericInsert(rax *rax, unsigned char *s, size_t len, void *data, void **
                   node, the index 'j' represents the char we stopped within the
                   compressed node, that is, the position where to split the
                   node for insertion. */
-    // 这里声明了一个二级指针
+    //
     raxNode *h, **parentlink;
 
     debugf("### Insert %.*s with value %p\n", (int)len, s, data);
     // &parentlink是一个三级指针
-    // 该方法是匹配相同的前缀 当找到某个不匹配的字符时 返回对应的数组下标 往rax中插入首个元素的情况比较简单
+    // 这里寻找匹配的字符串前缀，并返回下标
     i = raxLowWalk(rax,s,len,&h,&parentlink,&j,NULL);
 
     /* If i == len we walked following the whole string. If we are not
@@ -584,18 +593,20 @@ int raxGenericInsert(rax *rax, unsigned char *s, size_t len, void *data, void **
      * inserted or this middle node is currently not a key, but can represent
      * our key. We have just to reallocate the node and make space for the
      * data pointer.
-     * 先考虑最简单的情况 假设这时插入的是第一个元素 此时h就是head节点
-     *
+     * 代表字符串完全匹配 这时h可能是压缩节点 也可能是分岔节点
      * */
     if (i == len && (!h->iscompr || j == 0 /* not in the middle if j is 0 */)) {
         debugf("### Insert: node representing key exists\n");
         /* Make space for the value pointer if needed.
-         * 首次 head节点 iskey/isnull 都是0 不会进入这个分支
+         * 假设此时进入的分岔节点 此时对j没有要求
          * */
         if (!h->iskey || (h->isnull && overwrite)) {
+            // 将数据填充到对应的节点上
             h = raxReallocForData(h,data);
+            // parentlink 指向的是最后一个匹配上的节点
             if (h) memcpy(parentlink,&h,sizeof(h));
         }
+        // TODO
         if (h == NULL) {
             errno = ENOMEM;
             return 0;

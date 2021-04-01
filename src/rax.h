@@ -102,6 +102,7 @@ typedef struct raxNode {
     uint32_t isnull:1;    /* Associated value is NULL (don't store it). */
     // 是否是压缩节点
     uint32_t iscompr:1;   /* Node is compressed. */
+    // 对于非压缩节点就是  [a,b,c] 这种 也就是分岔点
     uint32_t size:29;     /* Number of children, or compressed string len. */
     /* Data layout is as follows:
      *
