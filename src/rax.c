@@ -270,7 +270,10 @@ void raxSetData(raxNode *n, void *data) {
     }
 }
 
-/* Get the node auxiliary data. */
+/*
+ * Get the node auxiliary data.
+ * 获取某个节点原先绑定的数据
+ * */
 void *raxGetData(raxNode *n) {
     if (n->isnull) return NULL;
     void **ndata =(void**)((char*)n+raxNodeCurrentLength(n)-sizeof(void*));
@@ -564,7 +567,7 @@ static inline size_t raxLowWalk(rax *rax, unsigned char *s, size_t len, raxNode 
     // 对这3个指针进行赋值
     if (stopnode) *stopnode = h;
     if (plink) *plink = parentlink;
-    // 找到最近的一个分裂点
+    // 标注如果是压缩节点的场景 应该从字符串的哪个下标开始分裂
     if (splitpos && h->iscompr) *splitpos = j;
     return i;
 }
@@ -601,29 +604,35 @@ int raxGenericInsert(rax *rax, unsigned char *s, size_t len, void *data, void **
      * our key. We have just to reallocate the node and make space for the
      * data pointer.
      * 代表字符串完全匹配
-     * 但是rax中key是否存在需要通过判断子节点的 iskey标识
+     * 但是rax中key是否存在需要通过判断子节点的 iskey标识 下面会有相关的判断逻辑
+     * !h->iscompr || j == 0 这段逻辑的意思是 如果h是压缩节点 此时字符串可能与压缩前缀部分匹配 就需要进行节点的分裂
      * */
     if (i == len && (!h->iscompr || j == 0 /* not in the middle if j is 0 */)) {
         debugf("### Insert: node representing key exists\n");
         /* Make space for the value pointer if needed.
          * 如果子节点iskey == false 代表i作为key还没有存储到rax中
-         * 或者key存在 但是需要覆盖之前的数据
+         * 或者key存在 但是之前未设置数据
          * */
         if (!h->iskey || (h->isnull && overwrite)) {
             // 将数据填充到对应的节点上
             h = raxReallocForData(h,data);
-            // parentlink 指向的是最后一个匹配上的节点
+            // 更新parentlink指针对应的值
             if (h) memcpy(parentlink,&h,sizeof(h));
         }
-        // TODO
+        // 对应raxReallocForData 无法分配足够内存的情况
         if (h == NULL) {
             errno = ENOMEM;
             return 0;
         }
 
-        /* Update the existing key if there is already one. */
+        /*
+         * Update the existing key if there is already one.
+         * 此时字符串完全匹配 并且子节点对应的iskey为true 代表在rax中该字符串已经以key的形式存在了
+         * */
         if (h->iskey) {
+            // 如果传入了 old指针 就获取该key原先绑定的值
             if (old) *old = raxGetData(h);
+            // 如果允许覆盖数据 进行覆盖
             if (overwrite) raxSetData(h,data);
             errno = 0;
             return 0; /* Element already exists. */
@@ -631,10 +640,10 @@ int raxGenericInsert(rax *rax, unsigned char *s, size_t len, void *data, void **
 
         /* Otherwise set the node as a key. Note that raxSetData()
          * will set h->iskey.
-         * 这里开始将数据插入到目标节点上 比如第一次调用 就是将data插入到head上
-         * 没有设置key么???
+         * 此时字符串完全匹配 但是字符串还没有成为key 需要修改子节点的标识位 并设置value(data存在的情况下)
          * */
         raxSetData(h,data);
+        // 因为有一个新的key产生 所以element+1
         rax->numele++;
         return 1; /* Element inserted. */
     }
