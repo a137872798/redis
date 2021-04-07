@@ -195,7 +195,9 @@ uint64_t ACLGetCommandCategoryFlagByName(const char *name) {
 }
 
 /* Method for passwords/pattern comparison used for the user->passwords list
- * so that we can search for items with listSearchKey(). */
+ * so that we can search for items with listSearchKey().
+ * 当sds内容完全相同才认为匹配
+ * */
 int ACLListMatchSds(void *a, void *b) {
     return sdscmp(a,b) == 0;
 }
@@ -214,22 +216,35 @@ void *ACLListDupSds(void *item) {
  * of users (the Users global radix tree), and returns a reference to
  * the structure representing the user.
  *
- * If the user with such name already exists NULL is returned. */
+ * If the user with such name already exists NULL is returned.
+ * 创建一个新的用户
+ * @param name 用户名
+ * @param 标明char*长度
+ * */
 user *ACLCreateUser(const char *name, size_t namelen) {
+    // 如果此时用户信息已经存在与rax结构中 不需要重复插入
     if (raxFind(Users,(unsigned char*)name,namelen) != raxNotFound) return NULL;
     user *u = zmalloc(sizeof(*u));
+    // 用一个sds表示用户名
     u->name = sdsnewlen(name,namelen);
     u->flags = USER_FLAG_DISABLED;
+    // 当前用户允许执行的所有指令
     u->allowed_subcommands = NULL;
+    // 每个用户可以有一组密码么
     u->passwords = listCreate();
     u->patterns = listCreate();
+    // 定义passwords的match函数 当使用某个元素判断是否存在于链表中时 就是通过该函数进行匹配
     listSetMatchMethod(u->passwords,ACLListMatchSds);
+    // 释放元素时触发的回收函数
     listSetFreeMethod(u->passwords,ACLListFreeSds);
+    // 拷贝函数
     listSetDupMethod(u->passwords,ACLListDupSds);
     listSetMatchMethod(u->patterns,ACLListMatchSds);
     listSetFreeMethod(u->patterns,ACLListFreeSds);
     listSetDupMethod(u->patterns,ACLListDupSds);
+    // 内存置零
     memset(u->allowed_commands,0,sizeof(u->allowed_commands));
+    // 将用户以name作为key 存储到users中
     raxInsert(Users,(unsigned char*)name,namelen,u,NULL);
     return u;
 }
@@ -370,8 +385,13 @@ void ACLSetUserCommandBit(user *u, unsigned long id, int value) {
  * and will set all the bits corresponding to such commands to the specified
  * value. Since the category passed by the user may be non existing, the
  * function returns C_ERR if the category was not found, or C_OK if it was
- * found and the operation was performed. */
+ * found and the operation was performed.
+ * 为某个用户追加某些命令
+ * @param category 代表命令类型
+ * @param value 代表增加/减少
+ * */
 int ACLSetUserCommandBitsForCategory(user *u, const char *category, int value) {
+    // 找到命令
     uint64_t cflag = ACLGetCommandCategoryFlagByName(category);
     if (!cflag) return C_ERR;
     dictIterator *di = dictGetIterator(server.orig_commands);
@@ -591,7 +611,9 @@ void ACLResetSubcommandsForCommand(user *u, unsigned long id) {
 
 /* Flush the entire table of subcommands. This is useful on +@all, -@all
  * or similar to return back to the minimal memory usage (and checks to do)
- * for the user. */
+ * for the user.
+ * 这里是释放掉所有sub命令 以节省内存
+ * */
 void ACLResetSubcommands(user *u) {
     if (u->allowed_subcommands == NULL) return;
     for (int j = 0; j < USER_COMMAND_BITS_COUNT; j++) {
@@ -713,9 +735,11 @@ void ACLAddAllowedSubcommand(user *u, unsigned long id, const char *sub) {
  * EEXIST: You are adding a key pattern after "*" was already added. This is
  *         almost surely an error on the user side.
  * ENODEV: The password you are trying to remove from the user does not exist.
- * EBADMSG: The hash you are trying to add is not a valid hash. 
+ * EBADMSG: The hash you are trying to add is not a valid hash.
+ * 针对某些用户执行一些操作 比如赋予权限
  */
 int ACLSetUser(user *u, const char *op, ssize_t oplen) {
+    // 因为op使用的是普通字符串 可以直接通过strlen计算长度
     if (oplen == -1) oplen = strlen(op);
     if (!strcasecmp(op,"on")) {
         u->flags |= USER_FLAG_ENABLED;
@@ -731,11 +755,15 @@ int ACLSetUser(user *u, const char *op, ssize_t oplen) {
     } else if (!strcasecmp(op,"resetkeys")) {
         u->flags &= ~USER_FLAG_ALLKEYS;
         listEmpty(u->patterns);
+
+        // 将所有命令权限赋予该用户
     } else if (!strcasecmp(op,"allcommands") ||
                !strcasecmp(op,"+@all"))
     {
+        // 每个命令都设置成255
         memset(u->allowed_commands,255,sizeof(u->allowed_commands));
         u->flags |= USER_FLAG_ALLCOMMANDS;
+        // 清空subCommand
         ACLResetSubcommands(u);
     } else if (!strcasecmp(op,"nocommands") ||
                !strcasecmp(op,"-@all"))
@@ -874,6 +902,7 @@ int ACLSetUser(user *u, const char *op, ssize_t oplen) {
         unsigned long id = ACLGetCommandID(op+1);
         ACLSetUserCommandBit(u,id,0);
         ACLResetSubcommandsForCommand(u,id);
+        // 代表为用户设置/移除某些命令
     } else if ((op[0] == '+' || op[0] == '-') && op[1] == '@') {
         int bitval = op[0] == '+' ? 1 : 0;
         if (ACLSetUserCommandBitsForCategory(u,op+2,bitval) == C_ERR) {
@@ -919,12 +948,18 @@ char *ACLSetUserStringError(void) {
 }
 
 /* Initialize the default user, that will always exist for all the process
- * lifetime. */
+ * lifetime.
+ * acl应该是redis的权限验证模块  在启动redis服务器时 需要完成权限校验 这里会先设置一个默认用户
+ * */
 void ACLInitDefaultUser(void) {
     DefaultUser = ACLCreateUser("default",7);
+    // 给默认用户设置各种权限
     ACLSetUser(DefaultUser,"+@all",-1);
+    // 清空user.pattern
     ACLSetUser(DefaultUser,"~*",-1);
+    // 启用该用户
     ACLSetUser(DefaultUser,"on",-1);
+    // 代表默认用户没有密码
     ACLSetUser(DefaultUser,"nopass",-1);
 }
 
@@ -933,11 +968,14 @@ void ACLInitDefaultUser(void) {
  * 在启动 redis server时 必须确保acl子系统完成初始化
  * */
 void ACLInit(void) {
-    // 初始化一个 rax结构 用于存储所有的用户信息
+    // 初始化一个 rax结构 用于存储所有的用户信息  rax与hash桶的区别就是实现复杂 但是更节省内存 (get/put会更耗时)
     Users = raxNew();
+    // adlist 是链表结构
     UsersToLoad = listCreate();
     ACLLog = listCreate();
+    // 初始化默认用户
     ACLInitDefaultUser();
+    // 兼容相关忽略
     server.requirepass = NULL; /* Only used for backward compatibility. */
 }
 

@@ -1086,7 +1086,9 @@ void serverLog(int level, const char *fmt, ...) {
  *
  * We actually use this only for signals that are not fatal from the point
  * of view of Redis. Signals that are going to kill the server anyway and
- * where we need printf-alike features are served by serverLog(). */
+ * where we need printf-alike features are served by serverLog().
+ * 将日志信息存储到文件中
+ * */
 void serverLogFromHandler(int level, const char *msg) {
     int fd;
     int log_to_stdout = server.logfile[0] == '\0';
@@ -2745,13 +2747,20 @@ void resetServerStats(void) {
     server.aof_delayed_fsync = 0;
 }
 
+/**
+ * 启动服务器
+ * 此时可能已经切换成一个后台进程在执行任务了
+ */
 void initServer(void) {
     int j;
 
+    // 这里注册一些信号处理器 当捕获到相关信号时触发函数 SIG_IGN 应该是忽略信号
     signal(SIGHUP, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
+    // 安装处理终止/打断信号的处理器
     setupSignalHandlers();
 
+    // 是否启用系统日志
     if (server.syslog_enabled) {
         openlog(server.syslog_ident, LOG_PID | LOG_NDELAY | LOG_NOWAIT,
                 server.syslog_facility);
@@ -4623,15 +4632,21 @@ void createPidFile(void) {
     }
 }
 
+/**
+ * 使用子进程继续执行任务
+ */
 void daemonize(void) {
     int fd;
 
+    // 此时产生了2个进程 同时父进程会调用exit
     if (fork() != 0) exit(0); /* parent exits */
+    // 当创建了子进程时 此时进程还是受到控制终端影响的 所以通过开启新的会话进行隔离
     setsid(); /* create a new session */
 
     /* Every output goes to /dev/null. If Redis is daemonized but
      * the 'logfile' is set to 'stdout' in the configuration file
      * it will not log at all. */
+    //
     if ((fd = open("/dev/null", O_RDWR, 0)) != -1) {
         dup2(fd, STDIN_FILENO);
         dup2(fd, STDOUT_FILENO);
@@ -4705,6 +4720,10 @@ void redisAsciiArt(void) {
     zfree(buf);
 }
 
+/**
+ * 根据接收到的信号值 走不同的逻辑
+ * @param sig
+ */
 static void sigShutdownHandler(int sig) {
     char *msg;
 
@@ -4723,27 +4742,38 @@ static void sigShutdownHandler(int sig) {
      * If we receive the signal the second time, we interpret this as
      * the user really wanting to quit ASAP without waiting to persist
      * on disk. */
+    // 已经接收过中断信号 并继续收到时
     if (server.shutdown_asap && sig == SIGINT) {
         serverLogFromHandler(LL_WARNING, "You insist... exiting now.");
+        // 移除临时文件  临时文件名格式为 temp-(pid).rdb
         rdbRemoveTempFile(getpid());
         exit(1); /* Exit with an error since this was not a clean shutdown. */
+        // 在服务器还处于加载过程中时 接收到中断信号 退出程序
     } else if (server.loading) {
         serverLogFromHandler(LL_WARNING, "Received shutdown signal during loading, exiting now.");
         exit(0);
     }
 
     serverLogFromHandler(LL_WARNING, msg);
+    // 应该是有某个地方轮询检测该标识
     server.shutdown_asap = 1;
 }
 
+/**
+ * 安装内置的信号处理器
+ */
 void setupSignalHandlers(void) {
     struct sigaction act;
 
     /* When the SA_SIGINFO flag is set in sa_flags then sa_sigaction is used.
      * Otherwise, sa_handler is used. */
+    // 这里初始化了一个信号集  然后清空
     sigemptyset(&act.sa_mask);
     act.sa_flags = 0;
+    // 声明一个处理信号的函数
     act.sa_handler = sigShutdownHandler;
+
+    // 指明这2种信号交给 act去处理   打断和终止信号会为server设置一个待终止标识，应该有某个逻辑在轮询该标识
     sigaction(SIGTERM, &act, NULL);
     sigaction(SIGINT, &act, NULL);
 
@@ -4939,7 +4969,9 @@ int redisCommunicateSystemd(const char *sd_notify_msg) {
     return 0;
 }
 
+// 检测是否开启了监督模式
 int redisIsSupervised(int mode) {
+    // 1代表开启
     if (mode == SUPERVISED_AUTODETECT) {
         const char *upstart_job = getenv("UPSTART_JOB");
         const char *notify_socket = getenv("NOTIFY_SOCKET");
@@ -5030,22 +5062,30 @@ int main(int argc, char **argv) {
     server.sentinel_mode = checkForSentinelMode(argc, argv);
     // 初始化 server 的配置信息
     initServerConfig();
-    // ACL子系统必须被初始化 因为基础的网络层代码和客户端依赖于它
+    // ACL子系统必须被初始化 因为基础的网络层代码和客户端依赖于它 这里会设置一个默认用户 没有密码并且具备所有权限
     ACLInit(); /* The ACL subsystem must be initialized ASAP because the
                   basic networking code and client creation depends on it. */
+    // 初始化系统模块 主要就是初始化了一个内置于module的client对象 以及往module字典中插入了一系列api 同时在该方法的最后为
+    // 当前线程申请了一个互斥锁
     moduleInitModulesSystem();
+
+    // 目前是NOOP
     tlsInit();
 
     /* Store the executable path and arguments in a safe place in order
      * to be able to restart the server later. */
+    // 将参数中的文件名转换成绝对路径后 设置到executable
     server.executable = getAbsolutePath(argv[0]);
+    // 其余的是执行参数
     server.exec_argv = zmalloc(sizeof(char *) * (argc + 1));
     server.exec_argv[argc] = NULL;
+    // 将参数转移到 server.exec_argv 
     for (j = 0; j < argc; j++) server.exec_argv[j] = zstrdup(argv[j]);
 
     /* We need to init sentinel right now as parsing the configuration file
      * in sentinel mode will have the effect of populating the sentinel
      * data structures with master nodes to monitor. */
+    // TODO 如果开启了哨兵模式 需要做一些初始化工作
     if (server.sentinel_mode) {
         initSentinelConfig();
         initSentinel();
@@ -5054,6 +5094,7 @@ int main(int argc, char **argv) {
     /* Check if we need to start in redis-check-rdb/aof mode. We just execute
      * the program main. However the program is part of the Redis executable
      * so that we can easily execute an RDB check on loading errors. */
+    // TODO 是否要检查 rdb/aof模式  检查类的代码先不看
     if (strstr(argv[0], "redis-check-rdb") != NULL)
         redis_check_rdb_main(argc, argv, NULL);
     else if (strstr(argv[0], "redis-check-aof") != NULL)
@@ -5065,6 +5106,7 @@ int main(int argc, char **argv) {
         char *configfile = NULL;
 
         /* Handle special options --help and --version */
+        // 忽略一些简单的启动参数
         if (strcmp(argv[1], "-v") == 0 ||
             strcmp(argv[1], "--version") == 0)
             version();
@@ -5083,12 +5125,14 @@ int main(int argc, char **argv) {
         }
 
         /* First argument is the config file name? */
+        // 是否有指定配置文件
         if (argv[j][0] != '-' || argv[j][1] != '-') {
             configfile = argv[j];
             server.configfile = getAbsolutePath(configfile);
             /* Replace the config file in server.exec_argv with
              * its absolute path. */
             zfree(server.exec_argv[j]);
+            // 将配置值替换成绝对路径
             server.exec_argv[j] = zstrdup(server.configfile);
             j++;
         }
@@ -5105,16 +5149,20 @@ int main(int argc, char **argv) {
                     j++;
                     continue;
                 }
+                // 将参数拼接在options后面
                 if (sdslen(options)) options = sdscat(options, "\n");
                 options = sdscat(options, argv[j] + 2);
                 options = sdscat(options, " ");
             } else {
                 /* Option argument */
+                // 追加转义符 实际效果也是将参数拼接起来
                 options = sdscatrepr(options, argv[j], strlen(argv[j]));
                 options = sdscat(options, " ");
             }
             j++;
         }
+
+        // 如果启用了哨兵模式 必须指定配置文件
         if (server.sentinel_mode && configfile && *configfile == '-') {
             serverLog(LL_WARNING,
                       "Sentinel config from STDIN not allowed.");
@@ -5122,7 +5170,9 @@ int main(int argc, char **argv) {
                       "Sentinel needs config file on disk to save state.  Exiting...");
             exit(1);
         }
+        // 存在配置文件/参数的情况 不会使用内置的saveParam
         resetServerSaveParams();
+        // 通过配置文件 或者指定的参数加载服务端配置
         loadServerConfig(configfile, options);
         sdsfree(options);
     }
@@ -5144,10 +5194,13 @@ int main(int argc, char **argv) {
         serverLog(LL_WARNING, "Configuration loaded");
     }
 
+    // TODO 是否使用监督模式
     server.supervised = redisIsSupervised(server.supervised_mode);
+    // 不阻塞当前线程 而是通过一条后台线程运行redis
     int background = server.daemonize && !server.supervised;
     if (background) daemonize();
 
+    // 启动服务器
     initServer();
     if (background || server.pidfile) createPidFile();
     redisSetProcTitle(argv[0]);

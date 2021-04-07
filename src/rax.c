@@ -1311,6 +1311,7 @@ int raxRemove(rax *rax, unsigned char *s, size_t len, void **old) {
      *
      * "FOOBAR" -> [] (1)
      */
+    // 尝试将本节点与父节点压缩
     if (trycompress) {
         debugf("After removing %.*s:\n", (int)len, s);
         debugnode("Compression may be needed",h);
@@ -1320,6 +1321,7 @@ int raxRemove(rax *rax, unsigned char *s, size_t len, void **old) {
          * At the end of the loop 'h' will point to the first node we
          * can try to compress and 'parent' to its parent. */
         raxNode *parent;
+        // 不断向上寻找 直到发现一个无法被合并的节点
         while(1) {
             parent = raxStackPop(&ts);
             if (!parent || parent->iskey ||
@@ -1330,20 +1332,25 @@ int raxRemove(rax *rax, unsigned char *s, size_t len, void **old) {
         raxNode *start = h; /* Compression starting node. */
 
         /* Scan chain of nodes we can compress. */
+        // 此时h可能是一个单分支的分岔节点 也可能是一个压缩节点  但是都能确保此时h只有一个子节点
         size_t comprsize = h->size;
         int nodes = 1;
         while(h->size != 0) {
             raxNode **cp = raxNodeLastChildPtr(h);
+            // 使用子节点数据覆盖h此时的数据
             memcpy(&h,cp,sizeof(h));
             if (h->iskey || (!h->iscompr && h->size != 1)) break;
             /* Stop here if going to the next node would result into
              * a compressed node larger than h->size can hold. */
             if (comprsize + h->size > RAX_NODE_MAX_SIZE) break;
             nodes++;
+            // 每当发现有一个满足条件的node 就将size累加到comprsize  代表总计压缩了多少长度
             comprsize += h->size;
         }
+        // 代表至少有一个节点满足合并条件
         if (nodes > 1) {
             /* If we can compress, create the new node and populate it. */
+            // 计算最新的node长度
             size_t nodesize =
                 sizeof(raxNode)+comprsize+raxPadding(comprsize)+sizeof(raxNode*);
             raxNode *new = rax_malloc(nodesize);
@@ -1357,11 +1364,13 @@ int raxRemove(rax *rax, unsigned char *s, size_t len, void **old) {
             new->isnull = 0;
             new->iscompr = 1;
             new->size = comprsize;
+            // 这里先假定会插入这个新的节点 将nodes+1 在下面会开始拷贝数据 同时减少nodes
             rax->numnodes++;
 
             /* Scan again, this time to populate the new node content and
              * to fix the new node child pointer. At the same time we free
              * all the nodes that we'll no longer use. */
+            // 主要用来跟踪data的偏移量
             comprsize = 0;
             h = start;
             while(h->size != 0) {
@@ -1377,10 +1386,12 @@ int raxRemove(rax *rax, unsigned char *s, size_t len, void **old) {
 
             /* Now 'h' points to the first node that we still need to use,
              * so our new node child pointer will point to it. */
+            // 此时h指向的是未参与合并的节点 挂载到新节点下
             raxNode **cp = raxNodeLastChildPtr(new);
             memcpy(cp,&h,sizeof(h));
 
             /* Fix parent link. */
+            // 将新节点挂载到未参与合并的父节点下
             if (parent) {
                 raxNode **parentlink = raxFindParentLink(parent,start);
                 memcpy(parentlink,&new,sizeof(new));
@@ -1392,23 +1403,30 @@ int raxRemove(rax *rax, unsigned char *s, size_t len, void **old) {
                 nodes, (int)comprsize);
         }
     }
+    // 释放整个stack结构的内存
     raxStackFree(&ts);
     return 1;
 }
 
 /* This is the core of raxFree(): performs a depth-first scan of the
- * tree and releases all the nodes found. */
+ * tree and releases all the nodes found.
+ * 从某个节点开始 递归的回收每个node
+ * */
 void raxRecursiveFree(rax *rax, raxNode *n, void (*free_callback)(void*)) {
     debugnode("free traversing",n);
+    // 根据是否是压缩节点类型 判断有多少子节点
     int numchildren = n->iscompr ? 1 : n->size;
     raxNode **cp = raxNodeLastChildPtr(n);
+    // 后序递归
     while(numchildren--) {
         raxNode *child;
         memcpy(&child,cp,sizeof(child));
         raxRecursiveFree(rax,child,free_callback);
+        // 指针回溯 指向前个子节点
         cp--;
     }
     debugnode("free depth-first",n);
+    // 触发回调函数
     if (free_callback && n->iskey && !n->isnull)
         free_callback(raxGetData(n));
     rax_free(n);
@@ -1424,6 +1442,7 @@ void raxFreeWithCallback(rax *rax, void (*free_callback)(void*)) {
 }
 
 /* Free a whole radix tree. */
+// 释放某个radix的所有内存
 void raxFree(rax *rax) {
     raxFreeWithCallback(rax,NULL);
 }
@@ -1432,7 +1451,9 @@ void raxFree(rax *rax) {
 
 /* Initialize a Rax iterator. This call should be performed a single time
  * to initialize the iterator, and must be followed by a raxSeek() call,
- * otherwise the raxPrev()/raxNext() functions will just return EOF. */
+ * otherwise the raxPrev()/raxNext() functions will just return EOF.
+ * 为某个rax迭代器做初始化工作
+ * */
 void raxStart(raxIterator *it, rax *rt) {
     it->flags = RAX_ITER_EOF; /* No crash if the iterator is not seeked. */
     it->rt = rt;
@@ -1441,13 +1462,17 @@ void raxStart(raxIterator *it, rax *rt) {
     it->key_max = RAX_ITER_STATIC_LEN;
     it->data = NULL;
     it->node_cb = NULL;
+    // 迭代器中 也包含栈结构
     raxStackInit(&it->stack);
 }
 
 /* Append characters at the current key string of the iterator 'it'. This
  * is a low level function used to implement the iterator, not callable by
- * the user. Returns 0 on out of memory, otherwise 1 is returned. */
+ * the user. Returns 0 on out of memory, otherwise 1 is returned.
+ * 将共享前缀的字符串追加到 it.key 上
+ * */
 int raxIteratorAddChars(raxIterator *it, unsigned char *s, size_t len) {
+    // 扩容逻辑 忽略
     if (it->key_max < it->key_len+len) {
         unsigned char *old = (it->key == it->key_static_string) ? NULL :
                                                                   it->key;
@@ -1487,7 +1512,10 @@ void raxIteratorDelChars(raxIterator *it, size_t count) {
  * the starting node is not a key in that particular case, so we start the scan
  * from a node that does not represent the key set.
  *
- * The function returns 1 on success or 0 on out of memory. */
+ * The function returns 1 on success or 0 on out of memory.
+ * 移动迭代器 指向下一个key
+ * noup为true 代表当前节点下面所有的key 都已经检查过 直接从上一个分岔节点开始继续寻找 这个属性本身不影响迭代的逻辑实现
+ * */
 int raxIteratorNextStep(raxIterator *it, int noup) {
     if (it->flags & RAX_ITER_EOF) {
         return 1;
@@ -1504,23 +1532,29 @@ int raxIteratorNextStep(raxIterator *it, int noup) {
 
     while(1) {
         int children = it->node->iscompr ? 1 : it->node->size;
+        // children代表子节点数量
         if (!noup && children) {
             debugf("GO DEEPER\n");
             /* Seek the lexicographically smaller key in this subtree, which
              * is the first one found always going towards the first child
              * of every successive node. */
+            // 将此时迭代器指向的节点设置到栈结构中
             if (!raxStackPush(&it->stack,it->node)) return 0;
             raxNode **cp = raxNodeFirstChildPtr(it->node);
+            // 将节点上的字符串追加到 data中
             if (!raxIteratorAddChars(it,it->node->data,
                 it->node->iscompr ? it->node->size : 1)) return 0;
+            // 更新迭代器此时的节点
             memcpy(&it->node,cp,sizeof(it->node));
             /* Call the node callback if any, and replace the node pointer
              * if the callback returns true. */
+            // TODO 先忽略回调函数的处理逻辑
             if (it->node_cb && it->node_cb(&it->node))
                 memcpy(cp,&it->node,sizeof(it->node));
             /* For "next" step, stop every time we find a key along the
              * way, since the key is lexicograhically smaller compared to
              * what follows in the sub-children. */
+            // 当发现了一个key后 就代表遍历到了下一个key
             if (it->node->iskey) {
                 it->data = raxGetData(it->node);
                 return 1;
@@ -1530,11 +1564,14 @@ int raxIteratorNextStep(raxIterator *it, int noup) {
              * new one: go upper until a node is found where there are
              * children representing keys lexicographically greater than the
              * current key. */
+            // 此时某个节点下已经没有key了 但是它的上层节点中 可能存在某个分岔节点 需要通过它找到兄弟节点并继续寻找key
             while(1) {
                 int old_noup = noup;
 
                 /* Already on head? Can't go up, iteration finished. */
+                // 此时已经回溯到了head节点 代表无数据可以继续遍历了
                 if (!noup && it->node == it->rt->head) {
+                    // 对迭代器进行还原
                     it->flags |= RAX_ITER_EOF;
                     it->stack.items = orig_stack_items;
                     it->key_len = orig_key_len;
@@ -1544,6 +1581,7 @@ int raxIteratorNextStep(raxIterator *it, int noup) {
                 /* If there are no children at the current node, try parent's
                  * next child. */
                 unsigned char prevchild = it->key[it->key_len-1];
+                // 返回上个节点
                 if (!noup) {
                     it->node = raxStackPop(&it->stack);
                 } else {
@@ -1552,19 +1590,23 @@ int raxIteratorNextStep(raxIterator *it, int noup) {
                 /* Adjust the current key to represent the node we are
                  * at. */
                 int todel = it->node->iscompr ? it->node->size : 1;
+                // 修改it.key_len 之后追加key时就会从这里开始 也就会覆盖旧数据
                 raxIteratorDelChars(it,todel);
 
                 /* Try visiting the next child if there was at least one
                  * additional child. */
+                // 向上找到分岔节点
                 if (!it->node->iscompr && it->node->size > (old_noup ? 0 : 1)) {
                     raxNode **cp = raxNodeFirstChildPtr(it->node);
                     int i = 0;
+                    // 这里寻找分岔口的下标 只要超过之前遍历的分支对应的字符就可以
                     while (i < it->node->size) {
                         debugf("SCAN NEXT %c\n", it->node->data[i]);
                         if (it->node->data[i] > prevchild) break;
                         i++;
                         cp++;
                     }
+                    // 代表存在这个分支
                     if (i != it->node->size) {
                         debugf("SCAN found a new node\n");
                         raxIteratorAddChars(it,it->node->data+i,1);
@@ -1588,12 +1630,18 @@ int raxIteratorNextStep(raxIterator *it, int noup) {
 
 /* Seek the greatest key in the subtree at the current node. Return 0 on
  * out of memory, otherwise 1. This is an helper function for different
- * iteration functions below. */
+ * iteration functions below.
+ * 遍历迭代器 找到最大的key
+ * */
 int raxSeekGreatest(raxIterator *it) {
+    // 首先当前节点下还有子节点
     while(it->node->size) {
+        // 如果当前节点是压缩节点 往下寻找  压缩节点本身不会单独存在(详见remove) 下游必然有key
         if (it->node->iscompr) {
+            // 将共享前缀的字符串追加到 it的key上
             if (!raxIteratorAddChars(it,it->node->data,
                 it->node->size)) return 0;
+            // 将分岔节点最大的子节点字符串追加到it.key上
         } else {
             if (!raxIteratorAddChars(it,it->node->data+it->node->size-1,1))
                 return 0;
@@ -1607,7 +1655,9 @@ int raxSeekGreatest(raxIterator *it) {
 
 /* Like raxIteratorNextStep() but implements an iteration step moving
  * to the lexicographically previous element. The 'noup' option has a similar
- * effect to the one of raxIteratorNextStep(). */
+ * effect to the one of raxIteratorNextStep().
+ * 寻找上个节点 next的逆操作
+ * */
 int raxIteratorPrevStep(raxIterator *it, int noup) {
     if (it->flags & RAX_ITER_EOF) {
         return 1;
@@ -1684,7 +1734,11 @@ int raxIteratorPrevStep(raxIterator *it, int noup) {
 /* Seek an iterator at the specified element.
  * Return 0 if the seek failed for syntax error or out of memory. Otherwise
  * 1 is returned. When 0 is returned for out of memory, errno is set to
- * the ENOMEM value. */
+ * the ENOMEM value.
+ * 通过遍历迭代器 找到匹配某个字符串的元素
+ * op 代表操作类型 可能是 > < >= etc
+ * ele + len 代表要匹配的字符串
+ * */
 int raxSeek(raxIterator *it, const char *op, unsigned char *ele, size_t len) {
     int eq = 0, lt = 0, gt = 0, first = 0, last = 0;
 
@@ -1708,6 +1762,7 @@ int raxSeek(raxIterator *it, const char *op, unsigned char *ele, size_t len) {
     } else if (op[0] == '$') {
         last = 1;
     } else {
+        // 无效的操作符
         errno = 0;
         return 0; /* Error. */
     }
@@ -1729,6 +1784,7 @@ int raxSeek(raxIterator *it, const char *op, unsigned char *ele, size_t len) {
         /* Find the greatest key taking always the last child till a
          * final node is found. */
         it->node = it->rt->head;
+        // 通过遍历迭代器 找到最大的key所在的node 基于每个压缩节点/分岔节点不会单独存在的前提 必然能找到一个key(如果下游没有key那么在remove时 节点就会被移除)
         if (!raxSeekGreatest(it)) return 0;
         assert(it->node->iskey);
         it->data = raxGetData(it->node);
@@ -1744,11 +1800,13 @@ int raxSeek(raxIterator *it, const char *op, unsigned char *ele, size_t len) {
     /* Return OOM on incomplete stack info. */
     if (it->stack.oom) return 0;
 
+    // 如果是要求相等的情况 后半段就是代表匹配成功 在insert逻辑中也有这个判断
     if (eq && i == len && (!it->node->iscompr || splitpos == 0) &&
         it->node->iskey)
     {
         /* We found our node, since the key matches and we have an
          * "equal" condition. */
+        // 因为key完全匹配 所以直接将 ele+len 作为key
         if (!raxIteratorAddChars(it,ele,len)) return 0; /* OOM. */
         it->data = raxGetData(it->node);
     } else if (lt || gt) {
@@ -1757,6 +1815,8 @@ int raxSeek(raxIterator *it, const char *op, unsigned char *ele, size_t len) {
          * a next/prev operation to seek. To reconstruct the key at this node
          * we start from the parent and go to the current node, accumulating
          * the characters found along the way. */
+        // 将此时匹配失败的节点也加入到栈结构中
+        // 下面的逻辑不看了 推测就是将key进行拼接 并于本次传入的字符串进行比较
         if (!raxStackPush(&it->stack,it->node)) return 0;
         for (size_t j = 1; j < it->stack.items; j++) {
             raxNode *parent = it->stack.stack[j-1];
@@ -1862,6 +1922,7 @@ int raxSeek(raxIterator *it, const char *op, unsigned char *ele, size_t len) {
         }
     } else {
         /* If we are here just eq was set but no match was found. */
+        // 没有找到匹配的节点
         it->flags |= RAX_ITER_EOF;
         return 1;
     }
@@ -1885,7 +1946,9 @@ int raxNext(raxIterator *it) {
 
 /* Go to the previous element in the scope of the iterator 'it'.
  * If EOF (or out of memory) is reached, 0 is returned, otherwise 1 is
- * returned. In case 0 is returned because of OOM, errno is set to ENOMEM. */
+ * returned. In case 0 is returned because of OOM, errno is set to ENOMEM.
+ * 寻找上个节点
+ * */
 int raxPrev(raxIterator *it) {
     if (!raxIteratorPrevStep(it,0)) {
         errno = ENOMEM;

@@ -1065,6 +1065,7 @@ struct redisServer {
     dict *moduleapi;            /* Exported core APIs dictionary for modules. */
     dict *sharedapi;            /* Like moduleapi but containing the APIs that
                                    modules share with each other. */
+    // 记录在启动阶段已经加载的所有模块
     list *loadmodule_queue;     /* List of modules to load at startup. */
     int module_blocked_pipe[2]; /* Pipe used to awake the event loop if a
                                    client blocked on a module command needs
