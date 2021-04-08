@@ -868,7 +868,7 @@ sds sdstrim(sds s, const char *cset) {
  *
  * s = sdsnew("Hello World");
  * sdsrange(s,1,-1); => "ello World"
- * 获取返回内的数据  ssize_t 在宏替换后就是一个long
+ * 获取范围内的数据  ssize_t 在宏替换后就是一个long
  */
 void sdsrange(sds s, ssize_t start, ssize_t end) {
     size_t newlen, len = sdslen(s);

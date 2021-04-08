@@ -1375,6 +1375,10 @@ int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
     return C_OK; /* unreached */
 }
 
+/**
+ * 某个进程需要移除临时文件
+ * @param childpid
+ */
 void rdbRemoveTempFile(pid_t childpid) {
     char tmpfile[256];
 

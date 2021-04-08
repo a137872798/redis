@@ -259,6 +259,8 @@ static list *moduleUnblockedClients;
 
 /* We need a mutex that is unlocked / relocked in beforeSleep() in order to
  * allow thread safe contexts to execute commands at a safe moment. */
+// 这里初始化了一个互斥锁  c语言的线程相关实现与操作系统紧密相连 所以一般都是调用操作系统api
+// 而互斥锁就是一种判断临界资源能否访问的控制对象  类似互斥锁的概念 这里向操作系统申请了一个互斥锁
 static pthread_mutex_t moduleGIL = PTHREAD_MUTEX_INITIALIZER;
 
 
@@ -7222,6 +7224,12 @@ dictType moduleAPIDictType = {
     NULL                       /* val destructor */
 };
 
+/**
+ * 将某个模块以及相关的fun 插入到字典中
+ * @param funcname
+ * @param funcptr
+ * @return
+ */
 int moduleRegisterApi(const char *funcname, void *funcptr) {
     return dictAdd(server.moduleapi, (char*)funcname, funcptr);
 }
@@ -7232,21 +7240,32 @@ int moduleRegisterApi(const char *funcname, void *funcptr) {
 /* Global initialization at Redis startup. */
 void moduleRegisterCoreAPI(void);
 
+/**
+ * 初始化所有系统模块
+ */
 void moduleInitModulesSystem(void) {
     moduleUnblockedClients = listCreate();
     server.loadmodule_queue = listCreate();
+    // 模块信息使用字典存储 相关函数实现包含在modulesDictType
     modules = dictCreate(&modulesDictType,NULL);
 
     /* Set up the keyspace notification susbscriber list and static client */
     moduleKeyspaceSubscribers = listCreate();
+    // 模块中存储了一个client对象 便于随时与某个服务器通信  这里只是做了一些初始化工作 还没有涉及到真正的通信逻辑
     moduleFreeContextReusedClient = createClient(NULL);
+    // 标记该client是属于模块中共享的
     moduleFreeContextReusedClient->flags |= CLIENT_MODULE;
+    // 模块内置的client 认为属于root用户
     moduleFreeContextReusedClient->user = NULL; /* root user. */
 
-    /* Set up filter list */
+    /* Set up filter list
+     * 存储了一组过滤器
+     * */
     moduleCommandFilters = listCreate();
 
+    // 往模块中注册核心api
     moduleRegisterCoreAPI();
+    // 尝试创建管道 管道是一种进程间通信的工具 [0]用于读取数据 [1]用于写入数据
     if (pipe(server.module_blocked_pipe) == -1) {
         serverLog(LL_WARNING,
             "Can't create the pipe for module blocking commands: %s",
@@ -7255,17 +7274,21 @@ void moduleInitModulesSystem(void) {
     }
     /* Make the pipe non blocking. This is just a best effort aware mechanism
      * and we do not want to block not in the read nor in the write half. */
+    // 这里认为2个文件描述符对应的是底层的2个socket句柄 将io模型调整成非阻塞模式
     anetNonBlock(NULL,server.module_blocked_pipe[0]);
     anetNonBlock(NULL,server.module_blocked_pipe[1]);
 
     /* Create the timers radix tree. */
+    // 创建一个rax结构 用于存储定时任务 key是什么呢?
     Timers = raxNew();
 
     /* Setup the event listeners data structures. */
+    // 内部存储了各种监听器
     RedisModule_EventListeners = listCreate();
 
     /* Our thread-safe contexts GIL must start with already locked:
      * it is just unlocked when it's safe. */
+    // 上锁 这样此时其他线程就会在这里被阻塞
     pthread_mutex_lock(&moduleGIL);
 }
 
@@ -7686,10 +7709,13 @@ int RM_ModuleTypeReplaceValue(RedisModuleKey *key, moduleType *mt, void *new_val
 }
 
 /* Register all the APIs we export. Keep this function at the end of the
- * file so that's easy to seek it to add new entries. */
+ * file so that's easy to seek it to add new entries.
+ * 将核心api注册到模块上
+ * */
 void moduleRegisterCoreAPI(void) {
     server.moduleapi = dictCreate(&moduleAPIDictType,NULL);
     server.sharedapi = dictCreate(&moduleAPIDictType,NULL);
+    // 这里以apiname作为key fun作为value存储到module字典中
     REGISTER_API(Alloc);
     REGISTER_API(Calloc);
     REGISTER_API(Realloc);

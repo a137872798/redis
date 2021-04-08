@@ -732,21 +732,27 @@ void getRandomHexChars(char *p, size_t len) {
  *
  * The function does not try to normalize everything, but only the obvious
  * case of one or more "../" appearing at the start of "filename"
- * relative path. */
+ * relative path.
+ * 基于文件名获取文件的绝对路径
+ * */
 sds getAbsolutePath(char *filename) {
     char cwd[1024];
     sds abspath;
     sds relpath = sdsnew(filename);
 
+    // 从左右2侧裁剪掉转义符
     relpath = sdstrim(relpath," \r\n\t");
+    // 如果文件名以 / 开头 就认为此时已经是一个绝对路径
     if (relpath[0] == '/') return relpath; /* Path is already absolute. */
 
     /* If path is relative, join cwd and relative path. */
+    // cwd就是获取当前路径
     if (getcwd(cwd,sizeof(cwd)) == NULL) {
         sdsfree(relpath);
         return NULL;
     }
     abspath = sdsnew(cwd);
+    // 如果不以 / 结尾 进行拼接
     if (sdslen(abspath) && abspath[sdslen(abspath)-1] != '/')
         abspath = sdscat(abspath,"/");
 
@@ -756,9 +762,11 @@ sds getAbsolutePath(char *filename) {
      *
      * For every "../" we find in the filename, we remove it and also remove
      * the last element of the cwd, unless the current cwd is "/". */
+    // 如果此时的文件名以 ../开头
     while (sdslen(relpath) >= 3 &&
            relpath[0] == '.' && relpath[1] == '.' && relpath[2] == '/')
     {
+        // 只需要后面的部分
         sdsrange(relpath,3,-1);
         if (sdslen(abspath) > 1) {
             char *p = abspath + sdslen(abspath)-2;

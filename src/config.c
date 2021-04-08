@@ -338,6 +338,10 @@ void initConfigValues() {
     }
 }
 
+/**
+ * 基于加载的字符串读取服务端配置
+ * TODO 这里先不细看
+ */
 void loadServerConfigFromString(char *config) {
     char *err = NULL;
     int linenum = 0, totlines, i;
@@ -588,7 +592,9 @@ loaderr:
  *
  * Both filename and options can be NULL, in such a case are considered
  * empty. This way loadServerConfig can be used to just load a file or
- * just load a string. */
+ * just load a string.
+ * 从配置文件或者参数中加载服务端配置
+ * */
 void loadServerConfig(char *filename, char *options) {
     sds config = sdsempty();
     char buf[CONFIG_MAX_LINE+1];
@@ -597,6 +603,7 @@ void loadServerConfig(char *filename, char *options) {
     if (filename) {
         FILE *fp;
 
+        // 忽略从标准输入流读取参数的逻辑
         if (filename[0] == '-' && filename[1] == '\0') {
             fp = stdin;
         } else {
@@ -615,6 +622,7 @@ void loadServerConfig(char *filename, char *options) {
         config = sdscat(config,"\n");
         config = sdscat(config,options);
     }
+    // 基于读取出来的字符串加载服务端配置
     loadServerConfigFromString(config);
     sdsfree(config);
 }

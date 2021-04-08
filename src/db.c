@@ -444,6 +444,12 @@ long long emptyDb(int dbnum, int flags, void(callback)(void*)) {
     return emptyDbGeneric(server.db, dbnum, flags, callback);
 }
 
+/**
+ * redis中有多个db 每个db代表存储数据的一个仓库
+ * @param c
+ * @param id 对应仓库的下标
+ * @return
+ */
 int selectDb(client *c, int id) {
     if (id < 0 || id >= server.dbnum)
         return C_ERR;

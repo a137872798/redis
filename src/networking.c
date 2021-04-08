@@ -85,6 +85,11 @@ void linkClient(client *c) {
     raxInsert(server.clients_index,(unsigned char*)&id,sizeof(id),c,NULL);
 }
 
+/**
+ * 基于某条连接创建client对象
+ * @param conn 可以为null
+ * @return
+ */
 client *createClient(connection *conn) {
     client *c = zmalloc(sizeof(client));
 
@@ -92,6 +97,7 @@ client *createClient(connection *conn) {
      * This is useful since all the commands needs to be executed
      * in the context of a client. When commands are executed in other
      * contexts (for instance a Lua script) we need a non connected client. */
+    // TODO 在初始化模块时 会在模块内部创建一个client 此时传入的conn为null
     if (conn) {
         connNonBlock(conn);
         connEnableTcpNoDelay(conn);
@@ -101,9 +107,12 @@ client *createClient(connection *conn) {
         connSetPrivateData(conn, c);
     }
 
+    // 该客户端默认会指向第一个db
     selectDb(c,0);
+    // 当前redis服务器上 每个新创建的client都会自动分配一个id
     uint64_t client_id = ++server.next_client_id;
     c->id = client_id;
+    // 这里初始化属性
     c->resp = 2;
     c->conn = conn;
     c->name = NULL;
@@ -124,6 +133,7 @@ client *createClient(connection *conn) {
     c->ctime = c->lastinteraction = server.unixtime;
     /* If the default user does not require authentication, the user is
      * directly authenticated. */
+    // 此时客户端是否已经通过验证 要求client绑定的用户不需要密码 且处于可用状态
     c->authenticated = (c->user->flags & USER_FLAG_NOPASS) &&
                        !(c->user->flags & USER_FLAG_DISABLED);
     c->replstate = REPL_STATE_NONE;
@@ -165,6 +175,7 @@ client *createClient(connection *conn) {
     listSetFreeMethod(c->pubsub_patterns,decrRefCountVoid);
     listSetMatchMethod(c->pubsub_patterns,listMatchObjects);
     if (conn) linkClient(c);
+    // 为client设置各种状态
     initClientMultiState(c);
     return c;
 }
