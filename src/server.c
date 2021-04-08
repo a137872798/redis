@@ -2739,7 +2739,9 @@ int listenToPort(int port, int *fds, int *count) {
 
 /* Resets the stats that we expose via INFO or other means that we want
  * to reset via CONFIG RESETSTAT. The function is also used in order to
- * initialize these fields in initServer() at server startup. */
+ * initialize these fields in initServer() at server startup.
+ * 重置有关服务器的统计数据
+ * */
 void resetServerStats(void) {
     int j;
 
@@ -2855,6 +2857,7 @@ void initServer(void) {
         exit(1);
 
     /* Open the listening Unix domain socket. */
+    // 这种特化于unix的先忽略  尽然不用传端口号...
     if (server.unixsocket != NULL) {
         unlink(server.unixsocket); /* don't care if this fails */
         server.sofd = anetUnixServer(server.neterr, server.unixsocket,
@@ -2867,13 +2870,16 @@ void initServer(void) {
     }
 
     /* Abort if there are no listening sockets at all. */
+    // 代表创建socket句柄失败
     if (server.ipfd_count == 0 && server.tlsfd_count == 0 && server.sofd < 0) {
         serverLog(LL_WARNING, "Configured to not listen anywhere, exiting.");
         exit(1);
     }
 
     /* Create the Redis databases, and initialize other internal state. */
+    // 对每个db的相关属性进行初始化
     for (j = 0; j < server.dbnum; j++) {
+        // 在dbDictType 中定义了dbhash函数 compare函数等  下面的几个字典都是相同的套路 将变化封装在一个dictType对象中
         server.db[j].dict = dictCreate(&dbDictType, NULL);
         server.db[j].expires = dictCreate(&keyptrDictType, NULL);
         server.db[j].expires_cursor = 0;
@@ -2883,8 +2889,10 @@ void initServer(void) {
         server.db[j].id = j;
         server.db[j].avg_ttl = 0;
         server.db[j].defrag_later = listCreate();
+        // 指定该链表内元素的回收函数 就是释放sds内存
         listSetFreeMethod(server.db[j].defrag_later, (void (*)(void *)) sdsfree);
     }
+    // 初始化LRU池 该对象下会维护所有db下所有key的过期时间
     evictionPoolAlloc(); /* Initialize the LRU keys pool. */
     server.pubsub_channels = dictCreate(&keylistDictType, NULL);
     server.pubsub_patterns = listCreate();
@@ -2905,13 +2913,19 @@ void initServer(void) {
     server.child_info_pipe[0] = -1;
     server.child_info_pipe[1] = -1;
     server.child_info_data.magic = 0;
+
+    // 重置aof_rewrite_buf_blocks
     aofRewriteBufferReset();
+    // 可能下个待写入的数据存储在aof_buf中  而所有待写入任务存储在aof_rewrite_buf_blocks 中
     server.aof_buf = sdsempty();
+    // 返回当前时间戳 如果传入参数 就是将指针指向这个时间戳
     server.lastsave = time(NULL); /* At startup we consider the DB saved. */
+    // 重置重试次数
     server.lastbgsave_try = 0;    /* At startup we never tried to BGSAVE. */
     server.rdb_save_time_last = -1;
     server.rdb_save_time_start = -1;
     server.dirty = 0;
+    // 统计项先不管
     resetServerStats();
     /* A few stats we don't want to reset: server startup time, and peak mem. */
     server.stat_starttime = time(NULL);
@@ -2933,14 +2947,19 @@ void initServer(void) {
 
     /* Create the timer callback, this is our way to process many background
      * operations incrementally, like clients timeout, eviction of unaccessed
-     * expired keys and so forth. */
+     * expired keys and so forth.
+     * 创建一个timeEvent对象 并设置到ae中
+     * TODO 注意之后触发的函数(serverCron) 但是事件循环在创建后并没有fork出新的进程，应该还是要再初始化完成后由当前进程轮询事件循环
+     * */
     if (aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL) == AE_ERR) {
         serverPanic("Can't create event loop timers.");
         exit(1);
     }
 
     /* Create an event handler for accepting new connections in TCP and Unix
-     * domain sockets. */
+     * domain sockets.
+     * 每个socket句柄被包装成一个 fileEvent对象 并存储在事件循环中
+     * */
     for (j = 0; j < server.ipfd_count; j++) {
         if (aeCreateFileEvent(server.el, server.ipfd[j], AE_READABLE,
                               acceptTcpHandler, NULL) == AE_ERR) {
@@ -2948,6 +2967,7 @@ void initServer(void) {
                     "Unrecoverable error creating server.ipfd file event.");
         }
     }
+    // tls代表安全层端口
     for (j = 0; j < server.tlsfd_count; j++) {
         if (aeCreateFileEvent(server.el, server.tlsfd[j], AE_READABLE,
                               acceptTLSHandler, NULL) == AE_ERR) {
@@ -2955,13 +2975,16 @@ void initServer(void) {
                     "Unrecoverable error creating server.tlsfd file event.");
         }
     }
+    // unix 特有的开放端口
     if (server.sofd > 0 && aeCreateFileEvent(server.el, server.sofd, AE_READABLE,
                                              acceptUnixHandler, NULL) == AE_ERR)
         serverPanic("Unrecoverable error creating server.sofd file event.");
 
 
     /* Register a readable event for the pipe used to awake the event loop
-     * when a blocked client in a module needs attention. */
+     * when a blocked client in a module needs attention.
+     * 这里注册了一些阻塞通道
+     * */
     if (aeCreateFileEvent(server.el, server.module_blocked_pipe[0], AE_READABLE,
                           moduleBlockedClientPipeReadable, NULL) == AE_ERR) {
         serverPanic(
@@ -2969,8 +2992,11 @@ void initServer(void) {
                 "blocked clients subsystem.");
     }
 
-    /* Open the AOF file if needed. */
+    /* Open the AOF file if needed.
+     * 检测aof开关是否开启
+     * */
     if (server.aof_state == AOF_ON) {
+        // 打开aof文件 aof文件存储了每次操作记录 对应的有rdb 存储的是快照信息
         server.aof_fd = open(server.aof_filename,
                              O_WRONLY | O_APPEND | O_CREAT, 0644);
         if (server.aof_fd == -1) {
@@ -2983,7 +3009,9 @@ void initServer(void) {
     /* 32 bit instances are limited to 4GB of address space, so if there is
      * no explicit limit in the user provided configuration we set a limit
      * at 3 GB using maxmemory with 'noeviction' policy'. This avoids
-     * useless crashes of the Redis instance for out of memory. */
+     * useless crashes of the Redis instance for out of memory.
+     * 先忽略32位的特殊处理
+     * */
     if (server.arch_bits == 32 && server.maxmemory == 0) {
         serverLog(LL_WARNING,
                   "Warning: 32 bit instance detected but no memory limit set. Setting 3 GB maxmemory limit with 'noeviction' policy now.");
@@ -2991,6 +3019,7 @@ void initServer(void) {
         server.maxmemory_policy = MAXMEMORY_NO_EVICTION;
     }
 
+    // 初始化集群
     if (server.cluster_enabled) clusterInit();
     replicationScriptCacheInit();
     scriptingInit(1);

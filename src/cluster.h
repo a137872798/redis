@@ -141,12 +141,17 @@ typedef struct clusterNode {
     list *fail_reports;         /* List of nodes signaling this as failing */
 } clusterNode;
 
+/**
+ * 描述当前集群状态
+ */
 typedef struct clusterState {
     clusterNode *myself;  /* This node */
     uint64_t currentEpoch;
     int state;            /* CLUSTER_OK, CLUSTER_FAIL, ... */
     int size;             /* Num of master nodes with at least one slot */
+    // 所有节点信息存储在字典中
     dict *nodes;          /* Hash table of name -> clusterNode structures */
+    // 代表某些节点在黑名单中 短期内无法加入到集群
     dict *nodes_black_list; /* Nodes we don't re-add for a few seconds. */
     clusterNode *migrating_slots_to[CLUSTER_SLOTS];
     clusterNode *importing_slots_from[CLUSTER_SLOTS];

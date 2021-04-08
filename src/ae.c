@@ -191,17 +191,18 @@ void aeStop(aeEventLoop *eventLoop) {
 }
 
 /**
- * 创建文件事件
+ * 创建文件事件 实际上就是socket事件
  * @param eventLoop
- * @param fd
- * @param mask
- * @param proc
+ * @param fd socket句柄
+ * @param mask 描述该事件是可读/可写
+ * @param proc 当感知到事件触发时,使用该函数处理
  * @param clientData
  * @return
  */
 int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
                       aeFileProc *proc, void *clientData) {
-    // 此时事件循环中已经注册了足够多的事件 无法继续注册
+    // 在server初始化时 曾经调整过允许接收的文件句柄数据 setsize就是允许接收的最大长度
+    // fd是从0开始递增的么 不过这个逻辑不影响事件循环本身 先不管
     if (fd >= eventLoop->setsize) {
         errno = ERANGE;
         return AE_ERR;
@@ -214,7 +215,7 @@ int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
     if (aeApiAddEvent(eventLoop, fd, mask) == -1)
         return AE_ERR;
     fe->mask |= mask;
-    // 根据mask类型 设置proc
+    // 本次mask的类型代表了相关的proc是针对什么操作的函数
     if (mask & AE_READABLE) fe->rfileProc = proc;
     if (mask & AE_WRITABLE) fe->wfileProc = proc;
     fe->clientData = clientData;
@@ -275,14 +276,16 @@ int aeGetFileEvents(aeEventLoop *eventLoop, int fd) {
  * 创建时间事件
  * @param eventLoop
  * @param milliseconds
- * @param proc
- * @param clientData
+ * @param proc 这里传入的是一个函数对象  函数签名:typedef int aeTimeProc(struct aeEventLoop *eventLoop, long long id, void *clientData);
+ *             当定时任务触发时就会使用该函数进行处理
+ * @param clientData 携带的额外数据
  * @param finalizerProc
  * @return
  */
 long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,
                             aeTimeProc *proc, void *clientData,
                             aeEventFinalizerProc *finalizerProc) {
+    // 为时间事件分配一个新id
     long long id = eventLoop->timeEventNextId++;
     aeTimeEvent *te;
 
@@ -291,6 +294,7 @@ long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,
     if (te == NULL) return AE_ERR;
     // 进行一些赋值操作
     te->id = id;
+    // 设置触发时间
     te->when = getMonotonicUs() + milliseconds * 1000;
     te->timeProc = proc;
     te->finalizerProc = finalizerProc;

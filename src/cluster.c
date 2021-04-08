@@ -440,6 +440,9 @@ void clusterUpdateMyselfFlags(void) {
     }
 }
 
+/**
+ * 初始化集群
+ */
 void clusterInit(void) {
     int saveconf = 0;
 
@@ -458,6 +461,7 @@ void clusterInit(void) {
     server.cluster->failover_auth_epoch = 0;
     server.cluster->cant_failover_reason = CLUSTER_CANT_FAILOVER_NONE;
     server.cluster->lastVoteEpoch = 0;
+    // 统计相关 先忽略
     for (int i = 0; i < CLUSTERMSG_TYPE_COUNT; i++) {
         server.cluster->stats_bus_messages_sent[i] = 0;
         server.cluster->stats_bus_messages_received[i] = 0;

@@ -51,13 +51,27 @@
  * Empty entries have the key pointer set to NULL. */
 #define EVPOOL_SIZE 16
 #define EVPOOL_CACHED_SDS_SIZE 255
+
+/**
+ * lru池中每个元素被包装成一个entry对象
+ */
 struct evictionPoolEntry {
+
+    /**
+     * 该对象有多久没有被访问到
+     */
     unsigned long long idle;    /* Object idle time (inverse frequency for LFU) */
     sds key;                    /* Key name. */
     sds cached;                 /* Cached SDS object for key name. */
+    /**
+     * 该key所在的db 也就是说所有db下的数据都存储在同一个pool下
+     */
     int dbid;                   /* Key DB number. */
 };
 
+/**
+ * 本文件的私有变量 不会暴露到外面
+ */
 static struct evictionPoolEntry *EvictionPoolLRU;
 
 /* ----------------------------------------------------------------------------
@@ -136,15 +150,20 @@ unsigned long long estimateObjectIdleTime(robj *o) {
  * one key that can be evicted, if there is at least one key that can be
  * evicted in the whole database. */
 
-/* Create a new eviction pool. */
+/* Create a new eviction pool.
+ * 创建一个用于维护所有key回收时间的pool对象
+ * */
 void evictionPoolAlloc(void) {
     struct evictionPoolEntry *ep;
     int j;
 
+    // 默认大小为16
     ep = zmalloc(sizeof(*ep)*EVPOOL_SIZE);
+    // 这里为数组中每个元素填充属性
     for (j = 0; j < EVPOOL_SIZE; j++) {
         ep[j].idle = 0;
         ep[j].key = NULL;
+        // 初始化sds结构 同时初始字符串为null
         ep[j].cached = sdsnewlen(NULL,EVPOOL_CACHED_SDS_SIZE);
         ep[j].dbid = 0;
     }
