@@ -2176,6 +2176,9 @@ void afterSleep(struct aeEventLoop *eventLoop) {
 
 /* =========================== Server initialization ======================== */
 
+/**
+ * 设置共享对象的相关属性 主要也是做一些赋值/初始化操作
+ */
 void createSharedObjects(void) {
     int j;
 
@@ -2533,11 +2536,16 @@ int restartServer(int flags, mstime_t delay) {
  *
  * If it will not be possible to set the limit accordingly to the configured
  * max number of clients, the function will do the reverse setting
- * server.maxclients to the value that we can actually handle. */
+ * server.maxclients to the value that we can actually handle.
+ * 调整允许打开文件的数量限制
+ * */
 void adjustOpenFilesLimit(void) {
+
+    // 这是默认的文件句柄数量
     rlim_t maxfiles = server.maxclients + CONFIG_MIN_RESERVED_FDS;
     struct rlimit limit;
 
+    // 无法通过操作系统api获取文件句柄限制数量
     if (getrlimit(RLIMIT_NOFILE, &limit) == -1) {
         serverLog(LL_WARNING,
                   "Unable to obtain the current NOFILE limit (%s), assuming 1024 and setting the max clients configuration accordingly.",
@@ -2548,6 +2556,7 @@ void adjustOpenFilesLimit(void) {
 
         /* Set the max number of files if the current limit is not enough
          * for our needs. */
+        // 代表本次尝试扩大限制数
         if (oldlimit < maxfiles) {
             rlim_t bestlimit;
             int setrlimit_error = 0;
@@ -2558,14 +2567,18 @@ void adjustOpenFilesLimit(void) {
             while (bestlimit > oldlimit) {
                 rlim_t decr_step = 16;
 
+                // 更新当前值以及最大值
                 limit.rlim_cur = bestlimit;
                 limit.rlim_max = bestlimit;
+                // 通过操作系统api 替换限制值 成功后退出循环
                 if (setrlimit(RLIMIT_NOFILE, &limit) != -1) break;
+                // 如果在调用api时发生了异常 需要通过错误码判断是什么情况
                 setrlimit_error = errno;
 
                 /* We failed to set file limit to 'bestlimit'. Try with a
                  * smaller limit decrementing by a few FDs per iteration. */
                 if (bestlimit < decr_step) break;
+                // 可能分配的值太大了 操作系统不允许 每次以16为单位 开始减小限制值
                 bestlimit -= decr_step;
             }
 
@@ -2573,12 +2586,15 @@ void adjustOpenFilesLimit(void) {
              * our last try was even lower. */
             if (bestlimit < oldlimit) bestlimit = oldlimit;
 
+            // 因为此时并没有申请到一开始预期的数量 这里要根据错误码输出日志
             if (bestlimit < maxfiles) {
                 unsigned int old_maxclients = server.maxclients;
+                // 将maxclients 与合适的限制量同步
                 server.maxclients = bestlimit - CONFIG_MIN_RESERVED_FDS;
                 /* maxclients is unsigned so may overflow: in order
                  * to check if maxclients is now logically less than 1
                  * we test indirectly via bestlimit. */
+                // 不允许低于最小的限制值
                 if (bestlimit <= CONFIG_MIN_RESERVED_FDS) {
                     serverLog(LL_WARNING, "Your current 'ulimit -n' "
                                           "of %llu is not enough for the server to start. "
@@ -2644,14 +2660,21 @@ void checkTcpBacklogSettings(void) {
  * error, at least one of the server.bindaddr addresses was
  * impossible to bind, or no bind addresses were specified in the server
  * configuration but the function is not able to bind * for at least
- * one of the IPv4 or IPv6 protocols. */
+ * one of the IPv4 or IPv6 protocols.
+ * 绑定某个端口 并准备监听连接
+ * @param count 代表此时已经存储了多少个socket句柄
+ * */
 int listenToPort(int port, int *fds, int *count) {
     int j;
 
     /* Force binding of 0.0.0.0 if no bind address is specified, always
      * entering the loop if j == 0. */
     if (server.bindaddr_count == 0) server.bindaddr[0] = NULL;
+    // 在 server.bindaddr_count/bindaddr 中存储了要绑定的地址
+    // 如果count是0 至少会进入一次 也就是绑定到0.0.0.0的地址
     for (j = 0; j < server.bindaddr_count || j == 0; j++) {
+
+        // 对应未设置绑定地址的情况
         if (server.bindaddr[j] == NULL) {
             int unsupported = 0;
             /* Bind * for both IPv6 and IPv4, we enter here only if
@@ -2666,11 +2689,14 @@ int listenToPort(int port, int *fds, int *count) {
                 serverLog(LL_WARNING, "Not listening to IPv6: unsupported");
             }
 
+            // 忽略上面有关IP6的绑定
             if (*count == 1 || unsupported) {
                 /* Bind the IPv4 address as well. */
+                // 返回套接字句柄
                 fds[*count] = anetTcpServer(server.neterr, port, NULL,
                                             server.tcp_backlog);
                 if (fds[*count] != ANET_ERR) {
+                    // 将套接字修改成非阻塞模式 也是通过操作系统层面实现的
                     anetNonBlock(NULL, fds[*count]);
                     (*count)++;
                 } else if (errno == EAFNOSUPPORT) {
@@ -2682,11 +2708,13 @@ int listenToPort(int port, int *fds, int *count) {
              * otherwise fds[*count] will be ANET_ERR and we'll print an
              * error and return to the caller with an error. */
             if (*count + unsupported == 2) break;
+            // 如果地址中包含 ":" 代表是一个ip6地址
         } else if (strchr(server.bindaddr[j], ':')) {
             /* Bind IPv6 address. */
             fds[*count] = anetTcp6Server(server.neterr, port, server.bindaddr[j],
                                          server.tcp_backlog);
         } else {
+            // ip4地址 这里的操作和绑定默认地址是一样的 主要就是调用bind/listen
             /* Bind IPv4 address. */
             fds[*count] = anetTcpServer(server.neterr, port, server.bindaddr[j],
                                         server.tcp_backlog);
@@ -2702,6 +2730,7 @@ int listenToPort(int port, int *fds, int *count) {
                 continue;
             return C_ERR;
         }
+        // 将socket设置成非阻塞模式
         anetNonBlock(NULL, fds[*count]);
         (*count)++;
     }
@@ -2749,7 +2778,7 @@ void resetServerStats(void) {
 
 /**
  * 启动服务器
- * 此时可能已经切换成一个后台进程在执行任务了
+ * 此时可能已经切换成一个后台进程在执行任务了  (守护模式下)
  */
 void initServer(void) {
     int j;
@@ -2762,13 +2791,18 @@ void initServer(void) {
 
     // 是否启用系统日志
     if (server.syslog_enabled) {
+        // param1 主要是标注作用 类型于java线程名的作用
+        // param2 是日志系统相关的一些参数 LOG_PID 表明日志消息中会携带进程id
+        // param3 标明日志类型  有关日志系统相关的api先不做深入了解
         openlog(server.syslog_ident, LOG_PID | LOG_NDELAY | LOG_NOWAIT,
                 server.syslog_facility);
     }
 
     /* Initialization after setting defaults from the config system. */
+    // 主要是做一些初始化工作 某些字段初始化成radix或者链表结构  radix的优点是节省内存 但是在插入/删除时耗时会比hash桶要大
     server.aof_state = server.aof_enabled ? AOF_ON : AOF_OFF;
     server.hz = server.config_hz;
+    // 获取此时正在运行的进程id
     server.pid = getpid();
     server.current_client = NULL;
     server.fixed_time_expire = 0;
@@ -2788,13 +2822,18 @@ void initServer(void) {
     server.clients_paused = 0;
     server.system_memory_size = zmalloc_get_memory_size();
 
+    // 专门监听tls请求相关的端口
     if (server.tls_port && tlsConfigure(&server.tls_ctx_config) == C_ERR) {
         serverLog(LL_WARNING, "Failed to configure TLS. Check logs for more info.");
         exit(1);
     }
 
+    // 对shared内部的一些属性进行初始化设置
     createSharedObjects();
+    // 调整允许打开文件的数量限制
     adjustOpenFilesLimit();
+
+    // 之前服务器只是进行一些初始化工作  现在开始创建事件循环
     server.el = aeCreateEventLoop(server.maxclients + CONFIG_FDSET_INCR);
     if (server.el == NULL) {
         serverLog(LL_WARNING,
@@ -2802,9 +2841,12 @@ void initServer(void) {
                   strerror(errno));
         exit(1);
     }
+    // redis下有多个db 这里只是分配空间以存储db对象
     server.db = zmalloc(sizeof(redisDb) * server.dbnum);
 
     /* Open the TCP listening socket for the user commands. */
+
+    // 绑定端口 并开始监听连接事件
     if (server.port != 0 &&
         listenToPort(server.port, server.ipfd, &server.ipfd_count) == C_ERR)
         exit(1);

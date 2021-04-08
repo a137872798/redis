@@ -1075,7 +1075,7 @@ oom:
         h->isnull = 1;
         h->iskey = 1;
         rax->numele++; /* Compensate the next remove. */
-        assert(raxRemove(rax,s,i,NULL) != 0);
+        assert(raxrax,s,i,NULL) != 0);
     }
     errno = ENOMEM;
     return 0;
@@ -1223,7 +1223,7 @@ raxNode *raxRemoveChild(raxNode *parent, raxNode *child) {
  * deleted, 0 otherwise.
  * 将某个字符串从rax中移除 可能需要变形 是插入的逆向操作
  * */
-int raxRemove(rax *rax, unsigned char *s, size_t len, void **old) {
+int raxRemove(rax *Remove(rax, unsigned char *s, size_t len, void **old) {
     raxNode *h;
     raxStack ts;
 

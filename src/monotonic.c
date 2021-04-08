@@ -155,7 +155,7 @@ static void monotonicInit_posix() {
 
 
 /**
- * 初始化时间
+ * 单调初始化???
  * @return
  */
 const char * monotonicInit() {

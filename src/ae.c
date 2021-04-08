@@ -70,14 +70,14 @@
 
 /**
  * 初始化一个事件循环对象
- * @param setsize  创建指定大小的槽
+ * @param setsize  对应的是客户端句柄的数量 也就是redis最大允许的同时连接的client数量
  * @return
  */
 aeEventLoop *aeCreateEventLoop(int setsize) {
     aeEventLoop *eventLoop;
     int i;
 
-    // 初始化闹钟 TODO 先不细看
+    // 初始化单调性相关的东西
     monotonicInit();    /* just in case the calling app didn't initialize */
 
     // 尝试分配一个事件循环需要的内存时 发现内存不够

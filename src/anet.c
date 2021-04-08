@@ -615,11 +615,11 @@ static int anetV6Only(char *err, int s) {
 }
 
 /**
- * 开启服务器
+ * 将服务器绑定在某个地址上
  * @param err
  * @param port
- * @param bindaddr
- * @param af
+ * @param bindaddr  绑定地址
+ * @param af   操作类型 ip4/ip6
  * @param backlog
  * @return
  */
@@ -630,12 +630,17 @@ static int _anetTcpServer(char *err, int port, char *bindaddr, int af, int backl
     struct addrinfo hints, *servinfo, *p;
 
     snprintf(_port,6,"%d",port);
+
+    // 将addrinfo的内存重置
     memset(&hints,0,sizeof(hints));
     hints.ai_family = af;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;    /* No effect if bindaddr != NULL */
+
+    // 当指定的地址为*时 相当于没有指定
     if (bindaddr && !strcmp("*", bindaddr))
         bindaddr = NULL;
+    // 忽略ip6
     if (af == AF_INET6 && bindaddr && !strcmp("::*", bindaddr))
         bindaddr = NULL;
 
@@ -644,12 +649,16 @@ static int _anetTcpServer(char *err, int port, char *bindaddr, int af, int backl
         anetSetError(err, "%s", gai_strerror(rv));
         return ANET_ERR;
     }
+
+    // 这里返回的 addrinfo是一组数据
     for (p = servinfo; p != NULL; p = p->ai_next) {
         // 基于地址结构体 创建套接字
         if ((s = socket(p->ai_family,p->ai_socktype,p->ai_protocol)) == -1)
             continue;
 
+        // 忽略 ip6
         if (af == AF_INET6 && anetV6Only(err,s) == ANET_ERR) goto error;
+        // 为套接字设置可重用选项
         if (anetSetReuseAddr(err,s) == ANET_ERR) goto error;
         // 创建套接字后 开始监听连接  这里只是设置监听模式  真正连接是调用 accept方法
         if (anetListen(err,s,p->ai_addr,p->ai_addrlen,backlog) == ANET_ERR) s = ANET_ERR;

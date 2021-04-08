@@ -38,6 +38,10 @@
 
 /* ===================== Creation and parsing of objects ==================== */
 
+/**
+ * type 表明了数据体的类型
+ * ptr 代表对象的数据
+ */
 robj *createObject(int type, void *ptr) {
     robj *o = zmalloc(sizeof(*o));
     o->type = type;
@@ -47,6 +51,7 @@ robj *createObject(int type, void *ptr) {
 
     /* Set the LRU to the current lruclock (minutes resolution), or
      * alternatively the LFU counter. */
+    // TODO 有关lru相关的先放一边
     if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
         o->lru = (LFUGetTimeInMinutes()<<8) | LFU_INIT_VAL;
     } else {
