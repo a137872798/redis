@@ -150,8 +150,11 @@ typedef struct rax {
  * a list of parent nodes to the caller. The nodes do not have a "parent"
  * field for space concerns, so we use the auxiliary stack when needed. */
 #define RAX_STACK_STATIC_ITEMS 32
+// 这个栈结构是存储中途遇到的所有节点
 typedef struct raxStack {
+    // 存储经过的所有节点
     void **stack; /* Points to static_items or an heap allocated array. */
+    // 此时内部有多少元素 以及支持存储多少元素
     size_t items, maxitems; /* Number of items contained and total space. */
     /* Up to RAXSTACK_STACK_ITEMS items we avoid to allocate on the heap
      * and use this static array of pointers instead. */

@@ -46,7 +46,9 @@
 
 /* This is a special pointer that is guaranteed to never have the same value
  * of a radix tree node. It's used in order to report "not found" error without
- * requiring the function to have multiple return values. */
+ * requiring the function to have multiple return values.
+ * 当某个key不存在于rax中时 会返回该字符串
+ * */
 void *raxNotFound = (void*)"rax-not-found-pointer";
 
 /* -------------------------------- Debugging ------------------------------ */
@@ -101,8 +103,11 @@ static inline void raxStackInit(raxStack *ts) {
     ts->oom = 0;
 }
 
-/* Push an item into the stack, returns 1 on success, 0 on out of memory. */
+/* Push an item into the stack, returns 1 on success, 0 on out of memory.
+ * 将某个节点设置到栈结构中
+ * */
 static inline int raxStackPush(raxStack *ts, void *ptr) {
+    // 扩容逻辑
     if (ts->items == ts->maxitems) {
         if (ts->stack == ts->static_items) {
             ts->stack = rax_malloc(sizeof(void*)*ts->maxitems*2);
@@ -130,7 +135,9 @@ static inline int raxStackPush(raxStack *ts, void *ptr) {
 }
 
 /* Pop an item from the stack, the function returns NULL if there are no
- * items to pop. */
+ * items to pop.
+ * 将某个节点从栈结构中弹出 并返回上一个节点
+ * */
 static inline void *raxStackPop(raxStack *ts) {
     if (ts->items == 0) return NULL;
     ts->items--;
@@ -251,7 +258,7 @@ raxNode *raxReallocForData(raxNode *n, void *data) {
 }
 
 /* Set the node auxiliary data to the specified pointer.
- * 将某个数据设置到子节点上  子节点必然不是压缩节点
+ * 将某个数据设置到子节点上
  * */
 void raxSetData(raxNode *n, void *data) {
     // 如果此时节点已经可以存储value了 就代表存在一个该节点通往根节点上匹配整条路径上字符的key
@@ -559,7 +566,7 @@ static inline size_t raxLowWalk(rax *rax, unsigned char *s, size_t len, raxNode 
 
         // 这时代表匹配到了前缀 需要寻找下个节点  同时如果在某个节点匹配失败了 那么外部传入的指针就会指向最后一个尝试匹配的节点(匹配成功指向子节点)
 
-        // 先假设ts是NULL 不需要处理
+        // 在执行移除操作时 会携带一个stack对象 在往下寻找节点的过程中经过的所有节点都会被设置进去
         if (ts) raxStackPush(ts,h); /* Save stack of parent nodes. */
         // 定位到下一个子节点的起始偏移量
         raxNode **children = raxNodeFirstChildPtr(h);
@@ -1052,7 +1059,9 @@ int raxGenericInsert(rax *rax, unsigned char *s, size_t len, void *data, void **
     if (newh == NULL) goto oom;
     h = newh;
     if (!h->iskey) rax->numele++;
+    // 在set过程中 会间接将h.iskey设置成true
     raxSetData(h,data);
+    // 更新子节点信息
     memcpy(parentlink,&h,sizeof(h));
     return 1; /* Element inserted. */
 
@@ -1086,21 +1095,28 @@ int raxInsert(rax *rax, unsigned char *s, size_t len, void *data, void **old) {
 /* Non overwriting insert function: this if an element with the same key
  * exists, the value is not updated and the function returns 0.
  * This is a just a wrapper for raxGenericInsert(). */
+// 尝试插入节点  当key已经存在时不进行覆盖
 int raxTryInsert(rax *rax, unsigned char *s, size_t len, void *data, void **old) {
     return raxGenericInsert(rax,s,len,data,old,0);
 }
 
 /* Find a key in the rax, returns raxNotFound special void pointer value
  * if the item was not found, otherwise the value associated with the
- * item is returned. */
+ * item is returned.
+ * 从rax中找到与key匹配的节点
+ * */
 void *raxFind(rax *rax, unsigned char *s, size_t len) {
     raxNode *h;
 
     debugf("### Lookup: %.*s\n", (int)len, s);
     int splitpos = 0;
     size_t i = raxLowWalk(rax,s,len,&h,NULL,&splitpos,NULL);
+    // 代表没有找到完全匹配的前缀 或者找到的节点.iskey为false 代表链路上字符串不是一个key
+    // h->iscompr && splitpos != 0 代表未完全匹配某个压缩节点 必然不是key(否则该压缩节点肯定要分裂)
+    // 当  h->iscompr && splitpos == 0 时代表此时子节点是一个压缩节点 节点上关联的数据就是前面链路字符串作为key相关的value
     if (i != len || (h->iscompr && splitpos != 0) || !h->iskey)
         return raxNotFound;
+    // 此时确保h就是子节点 key相关的数据会绑定在该节点上
     return raxGetData(h);
 }
 
@@ -1123,12 +1139,15 @@ raxNode **raxFindParentLink(raxNode *parent, raxNode *child) {
 /* Low level child removal from node. The new node pointer (after the child
  * removal) is returned. Note that this function does not fix the pointer
  * of the parent node in its parent, so this task is up to the caller.
- * The function never fails for out of memory. */
+ * The function never fails for out of memory.
+ * 将某个节点从父节点移除
+ * */
 raxNode *raxRemoveChild(raxNode *parent, raxNode *child) {
     debugnode("raxRemoveChild before", parent);
     /* If parent is a compressed node (having a single child, as for definition
      * of the data structure), the removal of the child consists into turning
      * it into a normal node without children. */
+    // 如果父节点是一个压缩节点 当唯一的子节点被移除时 压缩信息也没必要保存了 (压缩节点数据的有效性就是通过子节点来体现的 当子节点不存在时这部分数据已经无效了)
     if (parent->iscompr) {
         void *data = NULL;
         if (parent->iskey) data = raxGetData(parent);
@@ -1145,6 +1164,7 @@ raxNode *raxRemoveChild(raxNode *parent, raxNode *child) {
      *
      * 1. To start we seek the first element in both the children
      *    pointers and edge bytes in the node. */
+    // 如果父节点是一个分岔节点 找到对应的分支 并移除
     raxNode **cp = raxNodeFirstChildPtr(parent);
     raxNode **c = cp;
     unsigned char *e = parent->data;
@@ -1155,14 +1175,17 @@ raxNode *raxRemoveChild(raxNode *parent, raxNode *child) {
         raxNode *aux;
         memcpy(&aux,c,sizeof(aux));
         if (aux == child) break;
+        // 一个对应data中子节点的下标 一个对应data中子节点指针的下标
         c++;
         e++;
     }
 
     /* 3. Remove the edge and the pointer by memmoving the remaining children
      *    pointer and edge bytes one position before. */
+    // 计算尾部需要拷贝的数据长度
     int taillen = parent->size - (e - parent->data) - 1;
     debugf("raxRemoveChild tail len: %d\n", taillen);
+    // 拷贝自要删除的节点开始到末尾的数据
     memmove(e,e+1,taillen);
 
     /* Compute the shift, that is the amount of bytes we should move our
@@ -1174,6 +1197,7 @@ raxNode *raxRemoveChild(raxNode *parent, raxNode *child) {
     size_t shift = ((parent->size+4) % sizeof(void*)) == 1 ? sizeof(void*) : 0;
 
     /* Move the children pointers before the deletion point. */
+    // 有数据迁移的必要
     if (shift)
         memmove(((char*)cp)-shift,cp,(parent->size-taillen-1)*sizeof(raxNode**));
 
@@ -1196,20 +1220,29 @@ raxNode *raxRemoveChild(raxNode *parent, raxNode *child) {
 }
 
 /* Remove the specified item. Returns 1 if the item was found and
- * deleted, 0 otherwise. */
+ * deleted, 0 otherwise.
+ * 将某个字符串从rax中移除 可能需要变形 是插入的逆向操作
+ * */
 int raxRemove(rax *rax, unsigned char *s, size_t len, void **old) {
     raxNode *h;
     raxStack ts;
 
     debugf("### Delete: %.*s\n", (int)len, s);
+    // 删除操作需要借助 stack对象
     raxStackInit(&ts);
     int splitpos = 0;
+    // 首先确保当前字符对应的key存在于rax中
     size_t i = raxLowWalk(rax,s,len,&h,NULL,&splitpos,&ts);
+
+    // 代表key不存在 与之前get的判断逻辑一样
     if (i != len || (h->iscompr && splitpos != 0) || !h->iskey) {
+        // 此时释放之前存储的节点
         raxStackFree(&ts);
         return 0;
     }
+    // 代表需要获取旧数据
     if (old) *old = raxGetData(h);
+    // 当成功找到key时 返回的h节点指向的是子节点 清除iskey标识
     h->iskey = 0;
     rax->numele--;
 
@@ -1222,24 +1255,32 @@ int raxRemove(rax *rax, unsigned char *s, size_t len, void **old) {
     int trycompress = 0; /* Will be set to 1 if we should try to optimize the
                             tree resulting from the deletion. */
 
+    // 检测是否需要对rax结构进行变形
+    // 子节点长度为0 此时子节点已经没有存在的必要了(既没有存储共享前缀信息 也没有存储分岔信息)
     if (h->size == 0) {
         debugf("Key deleted in node without children. Cleanup needed.\n");
         raxNode *child = NULL;
+        // 循环检测是否满足移除条件  直到回到header节点
         while(h != rax->head) {
             child = h;
             debugf("Freeing child %p [%.*s] key:%d\n", (void*)child,
                 (int)child->size, (char*)child->data, child->iskey);
             rax_free(child);
             rax->numnodes--;
+            // 弹出之前访问过的节点  raxNode之间是一个单向结构 所以需要借助一个额外的栈对象
             h = raxStackPop(&ts);
              /* If this node has more then one child, or actually holds
               * a key, stop here. */
+             // 当遇到了iskey为true 此时本节点不能移除 需要作为父节点的标记节点  或者本节点是一个分岔节点 并且还有其他分支
             if (h->iskey || (!h->iscompr && h->size != 1)) break;
         }
+        // 代表至少移除了一个节点
         if (child) {
             debugf("Unlinking child %p from parent %p\n",
                 (void*)child, (void*)h);
+            // 此时需要将本节点从rax结构中剥离 也就是做一些清理工作 比如此时节点是一个分岔节点 需要减少size 以及缩小data
             raxNode *new = raxRemoveChild(h,child);
+            // 如果节点本身没有变化 代表内存重分配失败
             if (new != h) {
                 raxNode *parent = raxStackPeek(&ts);
                 raxNode **parentlink;
@@ -1248,16 +1289,20 @@ int raxRemove(rax *rax, unsigned char *s, size_t len, void **old) {
                 } else {
                     parentlink = raxFindParentLink(parent,h);
                 }
+                // 更新父节点下指针信息
                 memcpy(parentlink,&new,sizeof(new));
             }
 
             /* If after the removal the node has just a single child
-             * and is not a key, we need to try to compress it. */
+             * and is not a key, we need to try to compress it.
+             * 此时分岔节点下如果只有一条分支了 可以尝试将它与父节点进行合并 注意这里要确保iskey为0
+             * */
             if (new->size == 1 && new->iskey == 0) {
                 trycompress = 1;
                 h = new;
             }
         }
+        // 子节点只有一条分支或者是压缩节点时 可以尝试与父节点进行合并
     } else if (h->size == 1) {
         /* If the node had just one child, after the removal of the key
          * further compression with adjacent nodes is potentially possible. */
@@ -1266,6 +1311,7 @@ int raxRemove(rax *rax, unsigned char *s, size_t len, void **old) {
 
     /* Don't try node compression if our nodes pointers stack is not
      * complete because of OOM while executing raxLowWalk() */
+    // 忽略内存不足的情况
     if (trycompress && ts.oom) trycompress = 0;
 
     /* Recompression: if trycompress is true, 'h' points to a radix tree node
