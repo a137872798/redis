@@ -2857,7 +2857,7 @@ void initServer(void) {
         exit(1);
 
     /* Open the listening Unix domain socket. */
-    // 这种特化于unix的先忽略  尽然不用传端口号...
+    // 这种特化于unix的先忽略  竟然不用传端口号...
     if (server.unixsocket != NULL) {
         unlink(server.unixsocket); /* don't care if this fails */
         server.sofd = anetUnixServer(server.neterr, server.unixsocket,

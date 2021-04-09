@@ -1154,7 +1154,7 @@ int hex_digit_to_int(char c) {
  * input string is empty, or NULL if the input contains unbalanced
  * quotes or closed quotes followed by non space characters
  * as in: "foo"bar or "foo'
- * 将传入的字符串 通过args进行拆分
+ * 将字符串拆分成几个部分  line指向结果数组   argc 对应数组长度
  */
 sds *sdssplitargs(const char *line, int *argc) {
     const char *p = line;
