@@ -227,6 +227,9 @@ void spt_init(int argc, char *argv[]) {
 #define SPT_MAXTITLE 255
 #endif
 
+/**
+ * 设置一个标题信息
+ */
 void setproctitle(const char *fmt, ...) {
     char buf[SPT_MAXTITLE + 1]; /* use buffer in case argv[0] is passed */
     va_list ap;

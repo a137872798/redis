@@ -186,37 +186,49 @@ int clusterLoadConfig(char *filename) {
          * */
         n = clusterLookupNode(argv[0]);
         if (!n) {
+            // 代表该节点还没有设置到dict中 创建一个新的集群节点
+            // 这里只是初始化 还没有设置各种属性
             n = createClusterNode(argv[0],0);
             clusterAddNode(n);
         }
         /* Address and port */
+        // 默认下一个参数是ip+port 并进行拆分
         if ((p = strrchr(argv[1],':')) == NULL) {
             sdsfreesplitres(argv,argc);
             goto fmterr;
         }
+        // 这里是清理掉ip port还在
         *p = '\0';
+        // 将ip信息填充到node上
         memcpy(n->ip,argv[1],strlen(argv[1])+1);
         char *port = p+1;
+        // 检测在port中是否存在 @
         char *busp = strchr(port,'@');
         if (busp) {
             *busp = '\0';
             busp++;
         }
+        // 将port 转换成int类型
         n->port = atoi(port);
         /* In older versions of nodes.conf the "@busport" part is missing.
          * In this case we set it to the default offset of 10000 from the
          * base port. */
+        // 兼容性相关的 忽略
         n->cport = busp ? atoi(busp) : n->port + CLUSTER_PORT_INCR;
 
         /* Parse flags */
+        // 之后是 flags信息 应该是描述节点的
         p = s = argv[2];
         while(p) {
             p = strchr(s,',');
+            // 此时找到了第一个拆分点 将该字符指定成\0
             if (p) *p = '\0';
+            // 代表某个节点对应本机
             if (!strcasecmp(s,"myself")) {
                 serverAssert(server.cluster->myself == NULL);
                 myself = server.cluster->myself = n;
                 n->flags |= CLUSTER_NODE_MYSELF;
+                // 代表某个节点被指定为master 照理说应该是通过某种选举算法自行选举的 也许可以强制指定吧
             } else if (!strcasecmp(s,"master")) {
                 n->flags |= CLUSTER_NODE_MASTER;
             } else if (!strcasecmp(s,"slave")) {
@@ -232,34 +244,46 @@ int clusterLoadConfig(char *filename) {
                 n->flags |= CLUSTER_NODE_NOADDR;
             } else if (!strcasecmp(s,"nofailover")) {
                 n->flags |= CLUSTER_NODE_NOFAILOVER;
+                // 代表没有flags信息
             } else if (!strcasecmp(s,"noflags")) {
                 /* nothing to do */
             } else {
                 serverPanic("Unknown flag in redis cluster config file");
             }
+            // 指向","后面的字符串
             if (p) s = p+1;
         }
 
         /* Get master if any. Set the master and populate master's
-         * slave list. */
+         * slave list.
+         * 下一个参数 可能是一个增加/减少的参数  '-'代表减少什么
+         * */
         if (argv[3][0] != '-') {
+            // 这里认为这个参数是指定了集群中的master节点
             master = clusterLookupNode(argv[3]);
             if (!master) {
                 master = createClusterNode(argv[3],0);
                 clusterAddNode(master);
             }
+            // 本节点将成为该master的slave节点
             n->slaveof = master;
+            // 为master节点增加一个 slave节点
             clusterNodeAddSlave(master,n);
         }
 
         /* Set ping sent / pong received timestamps */
+        // 是否要更新心跳时间戳
         if (atoi(argv[4])) n->ping_sent = mstime();
         if (atoi(argv[5])) n->pong_received = mstime();
 
-        /* Set configEpoch for this node. */
+        /* Set configEpoch for this node.
+         * 代表为该节点指定了任期信息 默认是0
+         * */
         n->configEpoch = strtoull(argv[6],NULL,10);
 
-        /* Populate hash slots served by this instance. */
+        /* Populate hash slots served by this instance.
+         * 从 argv[8]开始 剩余的数据是存储在slot中的
+         * */
         for (j = 8; j < argc; j++) {
             int start, stop;
 
@@ -269,8 +293,10 @@ int clusterLoadConfig(char *filename) {
                 char direction;
                 clusterNode *cn;
 
+                // 找到 - 第一次出现的位置
                 p = strchr(argv[j],'-');
                 serverAssert(p != NULL);
+                // 这样操作后 访问 p[1] 就能够得到 '-' 后面的数据了 相当于是一个模板操作
                 *p = '\0';
                 direction = p[1]; /* Either '>' or '<' */
                 slot = atoi(argv[j]+1);
@@ -278,12 +304,14 @@ int clusterLoadConfig(char *filename) {
                     sdsfreesplitres(argv,argc);
                     goto fmterr;
                 }
+                // 移动3位后得到node名字
                 p += 3;
                 cn = clusterLookupNode(p);
                 if (!cn) {
                     cn = createClusterNode(p,0);
                     clusterAddNode(cn);
                 }
+                // 将节点设置到slot中 TODO 此时还不知道这个slot怎么用
                 if (direction == '>') {
                     server.cluster->migrating_slots_to[slot] = cn;
                 } else {
@@ -292,9 +320,11 @@ int clusterLoadConfig(char *filename) {
                 continue;
             } else if ((p = strchr(argv[j],'-')) != NULL) {
                 *p = '\0';
+                // 从第一个值到 "-" 后面的值
                 start = atoi(argv[j]);
                 stop = atoi(p+1);
             } else {
+                // 代表该配置项不是一个范围  所以起点和终点一样
                 start = stop = atoi(argv[j]);
             }
             if (start < 0 || start >= CLUSTER_SLOTS ||
@@ -303,12 +333,15 @@ int clusterLoadConfig(char *filename) {
                 sdsfreesplitres(argv,argc);
                 goto fmterr;
             }
+            // 将n设置到 slot中
             while(start <= stop) clusterAddSlot(n, start++);
         }
 
         sdsfreesplitres(argv,argc);
     }
-    /* Config sanity check */
+    /* Config sanity check
+     * 当前server 必须知道自己是哪个节点
+     * */
     if (server.cluster->myself == NULL) goto fmterr;
 
     zfree(line);
@@ -318,7 +351,9 @@ int clusterLoadConfig(char *filename) {
 
     /* Something that should never happen: currentEpoch smaller than
      * the max epoch found in the nodes configuration. However we handle this
-     * as some form of protection against manual editing of critical files. */
+     * as some form of protection against manual editing of critical files.
+     * 如果此时集群中某个节点此时的任期 超过了 cluster.epoch 那么更新任期
+     * */
     if (clusterGetMaxEpoch() > server.cluster->currentEpoch) {
         server.cluster->currentEpoch = clusterGetMaxEpoch();
     }
@@ -343,23 +378,31 @@ fmterr:
  * new one. Since we have the full payload to write available we can use
  * a single write to write the whole file. If the pre-existing file was
  * bigger we pad our payload with newlines that are anyway ignored and truncate
- * the file afterward. */
+ * the file afterward.
+ * 将当前集群信息持久化
+ * @param do_fsync
+ * */
 int clusterSaveConfig(int do_fsync) {
     sds ci;
     size_t content_size;
     struct stat sb;
     int fd;
 
+    // 因为此时即将保存集群配置 所以把save_config的标识移除
     server.cluster->todo_before_sleep &= ~CLUSTER_TODO_SAVE_CONFIG;
 
     /* Get the nodes description and concatenate our "vars" directive to
-     * save currentEpoch and lastVoteEpoch. */
+     * save currentEpoch and lastVoteEpoch.
+     * 要生成 节点的描述信息 handshake节点忽略
+     * */
     ci = clusterGenNodesDescription(CLUSTER_NODE_HANDSHAKE);
+    // 这里只是输出描述信息
     ci = sdscatprintf(ci,"vars currentEpoch %llu lastVoteEpoch %llu\n",
         (unsigned long long) server.cluster->currentEpoch,
         (unsigned long long) server.cluster->lastVoteEpoch);
     content_size = sdslen(ci);
 
+    // 注意这里是写入 and 创建权限 也就是如果文件不存在 则进行创建
     if ((fd = open(server.cluster_configfile,O_WRONLY|O_CREAT,0644))
         == -1) goto err;
 
@@ -370,8 +413,10 @@ int clusterSaveConfig(int do_fsync) {
             memset(ci+content_size,'\n',sb.st_size-content_size);
         }
     }
+    // 将描述信息写入到集群文件中
     if (write(fd,ci,sdslen(ci)) != (ssize_t)sdslen(ci)) goto err;
     if (do_fsync) {
+        // 因为即将进行刷盘 所以将标识去除 这里的sleep 推测是事件循环的等待
         server.cluster->todo_before_sleep &= ~CLUSTER_TODO_FSYNC_CONFIG;
         fsync(fd);
     }
@@ -391,6 +436,10 @@ err:
     return -1;
 }
 
+/**
+ * 保存集群文件
+ * @param do_fsync 是否同步刷盘
+ */
 void clusterSaveConfigOrDie(int do_fsync) {
     if (clusterSaveConfig(do_fsync) == -1) {
         serverLog(LL_WARNING,"Fatal: can't update cluster config file.");
@@ -450,7 +499,9 @@ int clusterLockConfig(char *filename) {
 /* Some flags (currently just the NOFAILOVER flag) may need to be updated
  * in the "myself" node based on the current configuration of the node,
  * that may change at runtime via CONFIG SET. This function changes the
- * set of flags in myself->flags accordingly. */
+ * set of flags in myself->flags accordingly.
+ * 更新flags信息
+ * */
 void clusterUpdateMyselfFlags(void) {
     int oldflags = myself->flags;
     int nofailover = server.cluster_slave_no_failover ?
@@ -458,6 +509,7 @@ void clusterUpdateMyselfFlags(void) {
     myself->flags &= ~CLUSTER_NODE_NOFAILOVER;
     myself->flags |= nofailover;
     if (myself->flags != oldflags) {
+        // 追加更新状态 和 存储集群配置文件的任务
         clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG|
                              CLUSTER_TODO_UPDATE_STATE);
     }
@@ -509,7 +561,9 @@ void clusterInit(void) {
      * */
     if (clusterLoadConfig(server.cluster_configfile) == C_ERR) {
         /* No configuration found. We will just use the random name provided
-         * by the createClusterNode() function. */
+         * by the createClusterNode() function.
+         * 如果没有集群配置文件 会尝试自动加入集群 并且声明自己是leader节点
+         * */
         myself = server.cluster->myself =
             createClusterNode(NULL,CLUSTER_NODE_MYSELF|CLUSTER_NODE_MASTER);
         serverLog(LL_NOTICE,"No cluster configuration found, I'm %.40s",
@@ -517,6 +571,7 @@ void clusterInit(void) {
         clusterAddNode(myself);
         saveconf = 1;
     }
+    // 保存集群配置文件
     if (saveconf) clusterSaveConfigOrDie(1);
 
     /* We need a listening TCP port for our cluster messaging needs. */
@@ -534,6 +589,7 @@ void clusterInit(void) {
                    "lower than 55535.");
         exit(1);
     }
+    // 这个可能是集群内部连接监听的端口号 在业务port的基础上增加了一个偏移量
     if (listenToPort(port+CLUSTER_PORT_INCR,
         server.cfd,&server.cfd_count) == C_ERR)
     {
@@ -541,6 +597,7 @@ void clusterInit(void) {
     } else {
         int j;
 
+        // 在事件循环中注册accept事件
         for (j = 0; j < server.cfd_count; j++) {
             if (aeCreateFileEvent(server.el, server.cfd[j], AE_READABLE,
                 clusterAcceptHandler, NULL) == AE_ERR)
@@ -550,21 +607,28 @@ void clusterInit(void) {
     }
 
     /* The slots -> keys map is a radix tree. Initialize it here. */
+    // 集群slot 到底指的是什么 ???
     server.cluster->slots_to_keys = raxNew();
     memset(server.cluster->slots_keys_count,0,
            sizeof(server.cluster->slots_keys_count));
 
     /* Set myself->port / cport to my listening ports, we'll just need to
-     * discover the IP address via MEET messages. */
+     * discover the IP address via MEET messages.
+     * 设置端口号
+     * */
     myself->port = port;
     myself->cport = port+CLUSTER_PORT_INCR;
+
+    // 这个集群总线端口是什么  是监听集群内消息的端口么
     if (server.cluster_announce_port)
         myself->port = server.cluster_announce_port;
     if (server.cluster_announce_bus_port)
         myself->cport = server.cluster_announce_bus_port;
 
+    // 当发生故障时 手动切换的时间限制 推测与选举有关 比如在这个时间段内 如果某节点丢失 不会重新选举 (给予这些时间让运维人员手动重启)
     server.cluster->mf_end = 0;
     resetManualFailover();
+    // 更新flags信息
     clusterUpdateMyselfFlags();
 }
 
@@ -767,29 +831,40 @@ unsigned int keyHashSlot(char *key, int keylen) {
  * receive the first pong).
  *
  * The node is created and returned to the user, but it is not automatically
- * added to the nodes hash table. */
+ * added to the nodes hash table.
+ * 创建一个新的集群节点
+ * */
 clusterNode *createClusterNode(char *nodename, int flags) {
     clusterNode *node = zmalloc(sizeof(*node));
 
     if (nodename)
         memcpy(node->name, nodename, CLUSTER_NAMELEN);
     else
+        // 如果没有指定节点的名字 随机生成一个
         getRandomHexChars(node->name, CLUSTER_NAMELEN);
+    // 获取当前系统时间 并设置到node上
     node->ctime = mstime();
     node->configEpoch = 0;
     node->flags = flags;
+    // 将所有slot置空
     memset(node->slots,0,sizeof(node->slots));
     node->numslots = 0;
     node->numslaves = 0;
     node->slaves = NULL;
     node->slaveof = NULL;
+
+    // 应该是最后一次发送心跳 以及收到心跳的时间 redis中leader节点需要负责检测其他节点是否存活
     node->ping_sent = node->pong_received = 0;
+
+    // 记录每个节点收到的数据量
     node->data_received = 0;
     node->fail_time = 0;
     node->link = NULL;
+    // 将ip信息置空 这时只知道节点的名字 还需要在之后的方法中进行补充
     memset(node->ip,0,sizeof(node->ip));
     node->port = 0;
     node->cport = 0;
+    // 记录错误报告
     node->fail_reports = listCreate();
     node->voted_time = 0;
     node->orphaned_time = 0;
@@ -913,6 +988,9 @@ int clusterNodeRemoveSlave(clusterNode *master, clusterNode *slave) {
     return C_ERR;
 }
 
+/**
+ * 为master增加一个slave节点
+ */
 int clusterNodeAddSlave(clusterNode *master, clusterNode *slave) {
     int j;
 
@@ -960,7 +1038,9 @@ void freeClusterNode(clusterNode *n) {
     zfree(n);
 }
 
-/* Add a node to the nodes hash table */
+/* Add a node to the nodes hash table
+ * 将node插入到字典中
+ * */
 int clusterAddNode(clusterNode *node) {
     int retval;
 
@@ -1044,12 +1124,15 @@ void clusterRenameNode(clusterNode *node, char *newname) {
  * -------------------------------------------------------------------------- */
 
 /* Return the greatest configEpoch found in the cluster, or the current
- * epoch if greater than any node configEpoch. */
+ * epoch if greater than any node configEpoch.
+ * 获取此时集群中最大的任期
+ * */
 uint64_t clusterGetMaxEpoch(void) {
     uint64_t max = 0;
     dictIterator *di;
     dictEntry *de;
 
+    // 每个节点可能通过读取集群配置文件设置了任期时间
     di = dictGetSafeIterator(server.cluster->nodes);
     while((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
@@ -3392,7 +3475,9 @@ void clusterHandleSlaveMigration(int max_slaves) {
  * as all the state about manual failover is cleared.
  *
  * The function can be used both to initialize the manual failover state at
- * startup or to abort a manual failover in progress. */
+ * startup or to abort a manual failover in progress.
+ * 重置手动处理故障时的相关属性
+ * */
 void resetManualFailover(void) {
     if (server.cluster->mf_end && clientsArePaused()) {
         server.clients_pause_end_time = 0;
@@ -3815,7 +3900,9 @@ int clusterNodeGetSlotBit(clusterNode *n, int slot) {
 /* Add the specified slot to the list of slots that node 'n' will
  * serve. Return C_OK if the operation ended with success.
  * If the slot is already assigned to another instance this is considered
- * an error and C_ERR is returned. */
+ * an error and C_ERR is returned.
+ * 将节点设置到集群的某个slot中
+ * */
 int clusterAddSlot(clusterNode *n, int slot) {
     if (server.cluster->slots[slot]) return C_ERR;
     clusterNodeSetSlotBit(n,slot);
@@ -4084,16 +4171,21 @@ static struct redisNodeFlags redisNodeFlagsTable[] = {
 };
 
 /* Concatenate the comma separated list of node flags to the given SDS
- * string 'ci'. */
+ * string 'ci'.
+ * 将 flags转换成字符串
+ * */
 sds representClusterNodeFlags(sds ci, uint16_t flags) {
     size_t orig_len = sdslen(ci);
+    // size代表总计存在多少种标识
     int i, size = sizeof(redisNodeFlagsTable)/sizeof(struct redisNodeFlags);
     for (i = 0; i < size; i++) {
         struct redisNodeFlags *nodeflag = redisNodeFlagsTable + i;
+        // 如果存在该标识 就拼接  对应解析集群配置文件时 按","拆分的逻辑
         if (flags & nodeflag->flag) ci = sdscat(ci, nodeflag->name);
     }
     /* If no flag was added, add the "noflags" special flag. */
     if (sdslen(ci) == orig_len) ci = sdscat(ci,"noflags,");
+    // 去掉最后一个”,“
     sdsIncrLen(ci,-1); /* Remove trailing comma. */
     return ci;
 }
@@ -4101,7 +4193,9 @@ sds representClusterNodeFlags(sds ci, uint16_t flags) {
 /* Generate a csv-alike representation of the specified cluster node.
  * See clusterGenNodesDescription() top comment for more information.
  *
- * The function returns the string representation as an SDS string. */
+ * The function returns the string representation as an SDS string.
+ * 生成节点的描述信息
+ * */
 sds clusterGenNodeDescription(clusterNode *node) {
     int j, start;
     sds ci;
@@ -4113,7 +4207,9 @@ sds clusterGenNodeDescription(clusterNode *node) {
         node->port,
         node->cport);
 
-    /* Flags */
+    /* Flags
+     * 将flag信息转换成字符串
+     * */
     ci = representClusterNodeFlags(ci, node->flags);
 
     /* Slave of... or just "-" */
@@ -4178,7 +4274,9 @@ sds clusterGenNodeDescription(clusterNode *node) {
  *
  * The representation obtained using this function is used for the output
  * of the CLUSTER NODES function, and as format for the cluster
- * configuration file (nodes.conf) for a given node. */
+ * configuration file (nodes.conf) for a given node.
+ * 生成的描述信息会存储到 集群配置文件中 正好与loadConfig的逻辑相对应
+ * */
 sds clusterGenNodesDescription(int filter) {
     sds ci = sdsempty(), ni;
     dictIterator *di;
@@ -4188,7 +4286,9 @@ sds clusterGenNodesDescription(int filter) {
     while((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
 
+        // 代表本节点会被过滤 不用生成它的描述信息
         if (node->flags & filter) continue;
+        // 将节点描述信息拼接起来
         ni = clusterGenNodeDescription(node);
         ci = sdscatsds(ci,ni);
         sdsfree(ni);

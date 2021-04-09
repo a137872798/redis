@@ -2781,6 +2781,7 @@ void resetServerStats(void) {
 /**
  * 启动服务器
  * 此时可能已经切换成一个后台进程在执行任务了  (守护模式下)
+ * 主要就是监听端口 将socket事件 注册到事件循环上 初始化集群信息(也会监听集群相关的端口)
  */
 void initServer(void) {
     int j;
@@ -3019,11 +3020,15 @@ void initServer(void) {
         server.maxmemory_policy = MAXMEMORY_NO_EVICTION;
     }
 
-    // 初始化集群
+    // 初始化集群 这里主要是加载集群配置 并且监听某些端口 (如果之前没有集群配置文件 那么手动创建)
     if (server.cluster_enabled) clusterInit();
+    // 初始化脚本缓存 内部只是dict+list
     replicationScriptCacheInit();
+    // 跟lua脚本有关 先忽略
     scriptingInit(1);
+    // 为server.slowlog相关的属性设置默认值
     slowlogInit();
+    // 初始化延迟相关的东西
     latencyMonitorInit();
 }
 
@@ -4690,14 +4695,19 @@ void linuxMemoryWarnings(void) {
 }
 #endif /* __linux__ */
 
+/**
+ * 创建进程文件
+ */
 void createPidFile(void) {
     /* If pidfile requested, but no pidfile defined, use
      * default pidfile path */
+    // 如果没有指定进程文件 就使用默认的文件名
     if (!server.pidfile) server.pidfile = zstrdup(CONFIG_DEFAULT_PID_FILE);
 
     /* Try to write the pid file in a best-effort way. */
     FILE *fp = fopen(server.pidfile, "w");
     if (fp) {
+        // 文件存储了此时运行redis的进程号
         fprintf(fp, "%d\n", (int) getpid());
         fclose(fp);
     }
@@ -4982,9 +4992,14 @@ void redisOutOfMemoryHandler(size_t allocation_size) {
     serverPanic("Redis aborting for OUT OF MEMORY");
 }
 
+/**
+ * 设置标题信息 先忽略
+ * @param title
+ */
 void redisSetProcTitle(char *title) {
 #ifdef USE_SETPROCTITLE
     char *server_mode = "";
+    // 集群模式和哨兵模式看来是冲突的
     if (server.cluster_enabled) server_mode = " [cluster]";
     else if (server.sentinel_mode) server_mode = " [sentinel]";
 
@@ -5273,17 +5288,23 @@ int main(int argc, char **argv) {
 
     // 启动服务器
     initServer();
+    // 如果此时是后台进程在运行  或者设置了pid文件
     if (background || server.pidfile) createPidFile();
+    // 设置标题信息
     redisSetProcTitle(argv[0]);
+    // 将某些信息输出到控制台 先忽略
     redisAsciiArt();
+    // 检查backlog配置是否有效 如果无效打印日志
     checkTcpBacklogSettings();
 
+    // 如果没有使用哨兵模式
     if (!server.sentinel_mode) {
         /* Things not needed when running in Sentinel mode. */
         serverLog(LL_WARNING, "Server initialized");
 #ifdef __linux__
         linuxMemoryWarnings();
 #endif
+        // 某些模块在解析配置文件时被存储到server.module_queue中 这里尝试加载它们
         moduleLoadFromQueue();
         ACLLoadUsersAtStartup();
         InitServerLast();

@@ -2889,7 +2889,9 @@ void refreshGoodSlavesCount(void) {
  *    in the master sometimes.
  */
 
-/* Initialize the script cache, only called at startup. */
+/* Initialize the script cache, only called at startup.
+ * 初始化脚本缓存  replication的职责应该就是将请求同步到集群中其他节点
+ * */
 void replicationScriptCacheInit(void) {
     server.repl_scriptcache_size = 10000;
     server.repl_scriptcache_dict = dictCreate(&replScriptCacheDictType,NULL);

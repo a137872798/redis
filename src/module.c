@@ -7300,14 +7300,18 @@ void moduleInitModulesSystem(void) {
  * The function aborts the server on errors, since to start with missing
  * modules is not considered sane: clients may rely on the existence of
  * given commands, loading AOF also may need some modules to exist, and
- * if this instance is a slave, it must understand commands from master. */
+ * if this instance is a slave, it must understand commands from master.
+ * 在解析配置文件时 可能会将某些模块设置到server的queue中 这里尝试加载这些模块
+ * */
 void moduleLoadFromQueue(void) {
     listIter li;
     listNode *ln;
 
+    // 基于queue初始化迭代器
     listRewind(server.loadmodule_queue,&li);
     while((ln = listNext(&li))) {
         struct moduleLoadQueueEntry *loadmod = ln->value;
+        // 通过路径 参数信息加载模块
         if (moduleLoad(loadmod->path,(void **)loadmod->argv,loadmod->argc)
             == C_ERR)
         {
@@ -7351,8 +7355,11 @@ void moduleUnregisterCommands(struct RedisModule *module) {
 }
 
 /* Load a module and initialize it. On success C_OK is returned, otherwise
- * C_ERR is returned. */
+ * C_ERR is returned.
+ * 在指定了某个module的路径后 根据参数信息进行加载
+ * */
 int moduleLoad(const char *path, void **module_argv, int module_argc) {
+    // 这里声明了一个函数指针
     int (*onload)(void *, void **, int);
     void *handle;
     RedisModuleCtx ctx = REDISMODULE_CTX_INIT;
