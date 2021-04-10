@@ -5304,8 +5304,9 @@ int main(int argc, char **argv) {
 #ifdef __linux__
         linuxMemoryWarnings();
 #endif
-        // 某些模块在解析配置文件时被存储到server.module_queue中 这里尝试加载它们
+        // 某些模块在解析配置文件时被存储到server.module_queue中 这里尝试加载它们 TODO 内部还涉及到了事件监听器 回调函数等
         moduleLoadFromQueue();
+        // 开始加载acl的用户 在初始化过程中 一开始会设置一个默认用户 具备全部权限
         ACLLoadUsersAtStartup();
         InitServerLast();
         loadDataFromDisk();

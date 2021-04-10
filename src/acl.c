@@ -252,13 +252,16 @@ user *ACLCreateUser(const char *name, size_t namelen) {
 /* This function should be called when we need an unlinked "fake" user
  * we can use in order to validate ACL rules or for other similar reasons.
  * The user will not get linked to the Users radix tree. The returned
- * user should be released with ACLFreeUser() as usually. */
+ * user should be released with ACLFreeUser() as usually.
+ * */
 user *ACLCreateUnlinkedUser(void) {
     char username[64];
     for (int j = 0; ; j++) {
+        // 生成无规则用户名
         snprintf(username,sizeof(username),"__fakeuser:%d__",j);
         user *fakeuser = ACLCreateUser(username,strlen(username));
         if (fakeuser == NULL) continue;
+        // 插入用户后 会立即进行移除
         int retval = raxRemove(Users,(unsigned char*) username,
                                strlen(username),NULL);
         serverAssert(retval != 0);
@@ -1221,28 +1224,38 @@ int ACLAppendUserForLoading(sds *argv, int argc, int *argc_err) {
 
 /* This function will load the configured users appended to the server
  * configuration via ACLAppendUserForLoading(). On loading errors it will
- * log an error and return C_ERR, otherwise C_OK will be returned. */
+ * log an error and return C_ERR, otherwise C_OK will be returned.
+ * 通过配置文件的信息填充acl.users信息
+ * */
 int ACLLoadConfiguredUsers(void) {
     listIter li;
     listNode *ln;
     listRewind(UsersToLoad,&li);
     while ((ln = listNext(&li)) != NULL) {
+
+        // 每个user信息由一组数组组成
         sds *aclrules = listNodeValue(ln);
+        // 第一个字符串对应用户名字
         sds username = aclrules[0];
 
+        // 检测是否出现了空格
         if (ACLStringHasSpaces(aclrules[0],sdslen(aclrules[0]))) {
             serverLog(LL_WARNING,"Spaces not allowed in ACL usernames");
             return C_ERR;
         }
 
+        // 通过解析待加载的用户信息 生成user对象并填充到server.user中
         user *u = ACLCreateUser(username,sdslen(username));
         if (!u) {
+            // 如果存在旧用户信息 重置信息
             u = ACLGetUserByName(username,sdslen(username));
             serverAssert(u != NULL);
             ACLSetUser(u,"reset",-1);
         }
 
-        /* Load every rule defined for this user. */
+        /* Load every rule defined for this user.
+         * 读取剩余的信息 并设置到用户上
+         * */
         for (int j = 1; aclrules[j]; j++) {
             if (ACLSetUser(u,aclrules[j],sdslen(aclrules[j])) != C_OK) {
                 char *errmsg = ACLSetUserStringError();
@@ -1254,7 +1267,9 @@ int ACLLoadConfiguredUsers(void) {
         }
 
         /* Having a disabled user in the configuration may be an error,
-         * warn about it without returning any error to the caller. */
+         * warn about it without returning any error to the caller.
+         * 如果该用户设置成 disable 打印日志
+         * */
         if (u->flags & USER_FLAG_DISABLED) {
             serverLog(LL_NOTICE, "The user '%s' is disabled (there is no "
                                  "'on' modifier in the user description). Make "
@@ -1287,12 +1302,16 @@ int ACLLoadConfiguredUsers(void) {
  *
  * At the end of the process, if no errors were found in the whole file then
  * NULL is returned. Otherwise an SDS string describing in a single line
- * a description of all the issues found is returned. */
+ * a description of all the issues found is returned.
+ * 从acl配置文件中 解析数据生成user
+ * */
 sds ACLLoadFromFile(const char *filename) {
     FILE *fp;
     char buf[1024];
 
-    /* Open the ACL file. */
+    /* Open the ACL file.
+     * 仅以read方式打开
+     * */
     if ((fp = fopen(filename,"r")) == NULL) {
         sds errors = sdscatprintf(sdsempty(),
             "Error loading ACLs, opening file '%s': %s",
@@ -1302,6 +1321,7 @@ sds ACLLoadFromFile(const char *filename) {
 
     /* Load the whole file as a single string in memory. */
     sds acls = sdsempty();
+    // 按行读取数据 进行拼接  sds具备自动扩容功能
     while(fgets(buf,sizeof(buf),fp) != NULL)
         acls = sdscat(acls,buf);
     fclose(fp);
@@ -1309,33 +1329,44 @@ sds ACLLoadFromFile(const char *filename) {
     /* Split the file into lines and attempt to load each line. */
     int totlines;
     sds *lines, errors = sdsempty();
+    // 通过解析换行符 判断总计有多少行数据 并将结果设置到 totlines上
     lines = sdssplitlen(acls,strlen(acls),"\n",1,&totlines);
+
     sdsfree(acls);
 
     /* We need a fake user to validate the rules before making changes
-     * to the real user mentioned in the ACL line. */
+     * to the real user mentioned in the ACL line.
+     * 这里创建了一个虚假用户 并且该用户不会存在于 acl.user(rax) 中
+     * */
     user *fakeuser = ACLCreateUnlinkedUser();
 
     /* We do all the loading in a fresh instance of the Users radix tree,
      * so if there are errors loading the ACL file we can rollback to the
-     * old version. */
+     * old version.
+     * */
     rax *old_users = Users;
+    // 当acl模块被初始化时 会创建一个默认用户 具备全部的权限
     user *old_default_user = DefaultUser;
+
+    // 这里重置了 user/defaultUser 并通过2个old指针记录旧数据
     Users = raxNew();
     ACLInitDefaultUser();
 
-    /* Load each line of the file. */
+    /* Load each line of the file.
+     * 按行解析数据
+     * */
     for (int i = 0; i < totlines; i++) {
         sds *argv;
         int argc;
         int linenum = i+1;
 
+        // 裁剪掉无效的转义符
         lines[i] = sdstrim(lines[i]," \t\r\n");
 
-        /* Skip blank lines */
+        /* Skip blank lines 代表是空行 */
         if (lines[i][0] == '\0') continue;
 
-        /* Split into arguments */
+        /* Split into arguments 将字符串拆分后 设置到参数列表中 */
         argv = sdssplitargs(lines[i],&argc);
         if (argv == NULL) {
             errors = sdscatprintf(errors,
@@ -1350,7 +1381,9 @@ sds ACLLoadFromFile(const char *filename) {
             continue;
         }
 
-        /* The line should start with the "user" keyword. */
+        /* The line should start with the "user" keyword.
+         * 代表该行配置无效
+         * */
         if (strcmp(argv[0],"user") || argc < 2) {
             errors = sdscatprintf(errors,
                      "%s:%d should start with user keyword followed "
@@ -1372,6 +1405,8 @@ sds ACLLoadFromFile(const char *filename) {
          * the rules are able to apply cleanly. */
         ACLSetUser(fakeuser,"reset",-1);
         int j;
+
+        // 这里认为每行数据应该分为2部分 一个是用户名 后面跟随的是参数信息
         for (j = 2; j < argc; j++) {
             if (ACLSetUser(fakeuser,argv[j],sdslen(argv[j])) != C_OK) {
                 char *errmsg = ACLSetUserStringError();
@@ -1501,8 +1536,12 @@ cleanup:
  * loaded, and we are ready to start, in order to load the ACLs either from
  * the pending list of users defined in redis.conf, or from the ACL file.
  * The function will just exit with an error if the user is trying to mix
- * both the loading methods. */
+ * both the loading methods.
+ * 加载acl用户
+ * */
 void ACLLoadUsersAtStartup(void) {
+    // 这里只能出现一种情况 要么从配置文件中加载user信息  要么从UsersToLoad中加载用户信息 不能同时设置
+    // 或者 二者都没设置
     if (server.acl_filename[0] != '\0' && listLength(UsersToLoad) != 0) {
         serverLog(LL_WARNING,
             "Configuring Redis with users defined in redis.conf and at "
@@ -1513,12 +1552,14 @@ void ACLLoadUsersAtStartup(void) {
         exit(1);
     }
 
+    // 通过解析UsersToLoad中的数据 生成user并设置到server中
     if (ACLLoadConfiguredUsers() == C_ERR) {
         serverLog(LL_WARNING,
             "Critical error while loading ACLs. Exiting.");
         exit(1);
     }
 
+    // 解析配置文件
     if (server.acl_filename[0] != '\0') {
         sds errors = ACLLoadFromFile(server.acl_filename);
         if (errors) {

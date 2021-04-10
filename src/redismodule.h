@@ -178,7 +178,9 @@ typedef uint64_t RedisModuleTimerID;
  * are modified from the user's sperspective, to invalidate WATCH. */
 #define REDISMODULE_OPTION_NO_IMPLICIT_SIGNAL_MODIFIED (1<<1)
 
-/* Server events definitions. */
+/* Server events definitions.
+ * 集中可能发生的模块事件
+ * */
 #define REDISMODULE_EVENT_REPLICATION_ROLE_CHANGED 0
 #define REDISMODULE_EVENT_PERSISTENCE 1
 #define REDISMODULE_EVENT_FLUSHDB 2
@@ -188,7 +190,9 @@ typedef uint64_t RedisModuleTimerID;
 #define REDISMODULE_EVENT_REPLICA_CHANGE 6
 #define REDISMODULE_EVENT_MASTER_LINK_CHANGE 7
 #define REDISMODULE_EVENT_CRON_LOOP 8
+// 模块发生了变化 比如添加了一个新的模块
 #define REDISMODULE_EVENT_MODULE_CHANGE 9
+//
 #define REDISMODULE_EVENT_LOADING_PROGRESS 10
 
 typedef struct RedisModuleEvent {
@@ -273,6 +277,7 @@ static const RedisModuleEvent
 #define REDISMODULE_SUBEVENT_FLUSHDB_START 0
 #define REDISMODULE_SUBEVENT_FLUSHDB_END 1
 
+// 代表某个模块被加载
 #define REDISMODULE_SUBEVENT_MODULE_LOADED 0
 #define REDISMODULE_SUBEVENT_MODULE_UNLOADED 1
 

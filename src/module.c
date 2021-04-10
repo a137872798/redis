@@ -345,14 +345,21 @@ typedef struct RedisModuleServerInfoData {
 /* Server events hooks data structures and defines: this modules API
  * allow modules to subscribe to certain events in Redis, such as
  * the start and end of an RDB or AOF save, the change of role in replication,
- * and similar other events. */
-
+ * and similar other events.
+ * 代表某个模块事件监听器
+ * */
 typedef struct RedisModuleEventListener {
+    // 该监听器针对的是哪个模块
     RedisModule *module;
+    // 针对的是哪个事件
     RedisModuleEvent event;
+    // 触发的回调函数
     RedisModuleEventCallback callback;
 } RedisModuleEventListener;
 
+/**
+ * 这里存储了所有的事件监听器
+ */
 list *RedisModule_EventListeners; /* Global list of all the active events. */
 unsigned long long ModulesInHooks = 0; /* Total number of modules in hooks
                                           callbacks right now. */
@@ -580,7 +587,9 @@ int RM_GetApi(const char *funcname, void **targetPtrPtr) {
 }
 
 /* Helper function for when a command callback is called, in order to handle
- * details needed to correctly replicate commands. */
+ * details needed to correctly replicate commands.
+ * 执行回调函数
+ * */
 void moduleHandlePropagationAfterCommandCallback(RedisModuleCtx *ctx) {
     client *c = ctx->client;
 
@@ -614,8 +623,11 @@ void moduleHandlePropagationAfterCommandCallback(RedisModuleCtx *ctx) {
     }
 }
 
-/* Free the context after the user function was called. */
+/* Free the context after the user function was called.
+ * 回收上下文对象
+ * */
 void moduleFreeContext(RedisModuleCtx *ctx) {
+    // 在回收上下文前要执行一系列的回调函数
     moduleHandlePropagationAfterCommandCallback(ctx);
     autoMemoryCollect(ctx);
     poolAllocRelease(ctx);
@@ -1678,8 +1690,9 @@ unsigned long long RM_GetClientId(RedisModuleCtx *ctx) {
  * a client, it populates the client info structure with the appropriate
  * fields depending on the version provided. If the version is not valid
  * then REDISMODULE_ERR is returned. Otherwise the function returns
- * REDISMODULE_OK and the structure pointed by 'ci' gets populated. */
-
+ * REDISMODULE_OK and the structure pointed by 'ci' gets populated.
+ * 代表本次发生的是client变化的事件
+ * */
 int modulePopulateClientInfoStructure(void *ci, client *client, int structver) {
     if (structver != 1) return REDISMODULE_ERR;
 
@@ -1698,6 +1711,7 @@ int modulePopulateClientInfoStructure(void *ci, client *client, int structver) {
         ci1->flags |= REDISMODULE_CLIENTINFO_FLAG_BLOCKED;
 
     int port;
+    // 连接到某个地址
     connPeerToString(client->conn,ci1->addr,sizeof(ci1->addr),&port);
     ci1->port = port;
     ci1->db = client->db->id;
@@ -7088,22 +7102,30 @@ int RM_SubscribeToServerEvent(RedisModuleCtx *ctx, RedisModuleEvent event, Redis
  * to return the structure with more information to the callback.
  *
  * 'eid' and 'subid' are just the main event ID and the sub event associated
- * with the event, depending on what exactly happened. */
+ * with the event, depending on what exactly happened.
+ * 代表某个模块事件被触发
+ * @param *data 代表模块本身
+ * */
 void moduleFireServerEvent(uint64_t eid, int subid, void *data) {
     /* Fast path to return ASAP if there is nothing to do, avoiding to
      * setup the iterator and so forth: we want this call to be extremely
      * cheap if there are no registered modules. */
+    // 如果没有设置监听器 直接返回
     if (listLength(RedisModule_EventListeners) == 0) return;
 
     listIter li;
     listNode *ln;
     listRewind(RedisModule_EventListeners,&li);
+    // 遍历监听器
     while((ln = listNext(&li))) {
         RedisModuleEventListener *el = ln->value;
+        // 要求事件id匹配
         if (el->event.id == eid) {
+            // 这里生成一个临时的上下文
             RedisModuleCtx ctx = REDISMODULE_CTX_INIT;
             ctx.module = el->module;
 
+            // 如果inhook为0 共用module的client 否则新建一个client并使用
             if (ModulesInHooks == 0) {
                 ctx.client = moduleFreeContextReusedClient;
             } else {
@@ -7113,6 +7135,7 @@ void moduleFireServerEvent(uint64_t eid, int subid, void *data) {
             }
 
             void *moduledata = NULL;
+            // 描述模块client/replication/moduleChange 信息
             RedisModuleClientInfoV1 civ1;
             RedisModuleReplicationInfoV1 riv1;
             RedisModuleModuleChangeV1 mcv1;
@@ -7120,9 +7143,11 @@ void moduleFireServerEvent(uint64_t eid, int subid, void *data) {
              * up to the specific event setup to change it when it makes
              * sense. For instance for FLUSHDB events we select the correct
              * DB automatically. */
+            // 设置client.db
             selectDb(ctx.client, 0);
 
             /* Event specific context and data pointer setup. */
+            // 根据不同的事件 填充不同的结构体 并将moduledata指针指向数据块
             if (eid == REDISMODULE_EVENT_CLIENT_CHANGE) {
                 modulePopulateClientInfoStructure(&civ1,data,
                                                   el->event.dataver);
@@ -7362,11 +7387,17 @@ int moduleLoad(const char *path, void **module_argv, int module_argc) {
     // 这里声明了一个函数指针
     int (*onload)(void *, void **, int);
     void *handle;
+
+    // 初始化一个空的模块上下文对象
     RedisModuleCtx ctx = REDISMODULE_CTX_INIT;
+    // 在初始化模块时 会创建一个client对象
     ctx.client = moduleFreeContextReusedClient;
+
+    // 将client.db 指向 server.db[id]
     selectDb(ctx.client, 0);
 
     struct stat st;
+    // 忽略统计逻辑
     if (stat(path, &st) == 0)
     {   // this check is best effort
         if (!(st.st_mode & (S_IXUSR  | S_IXGRP | S_IXOTH))) {
@@ -7375,11 +7406,14 @@ int moduleLoad(const char *path, void **module_argv, int module_argc) {
         }
     }
 
+    // 通过模块名的路径 定位到一个动态库
     handle = dlopen(path,RTLD_NOW|RTLD_LOCAL);
+    // 打开失败
     if (handle == NULL) {
         serverLog(LL_WARNING, "Module %s failed to load: %s", path, dlerror());
         return C_ERR;
     }
+    // 要求这个动态库必须包含RedisModule_OnLoad函数   dlsym 就是从库下找到某个函数
     onload = (int (*)(void *, void **, int))(unsigned long) dlsym(handle,"RedisModule_OnLoad");
     if (onload == NULL) {
         dlclose(handle);
@@ -7388,6 +7422,7 @@ int moduleLoad(const char *path, void **module_argv, int module_argc) {
             "symbol. Module not loaded.",path);
         return C_ERR;
     }
+    // 使用相关参数调用该函数
     if (onload((void*)&ctx,module_argv,module_argc) == REDISMODULE_ERR) {
         if (ctx.module) {
             moduleUnregisterCommands(ctx.module);
@@ -7402,15 +7437,20 @@ int moduleLoad(const char *path, void **module_argv, int module_argc) {
     }
 
     /* Redis module loaded! Register it. */
+    // 当完成了module的初始化后 将module添加到字典中 这样redis服务器就可以根据自己需要调用module下的函数了
     dictAdd(modules,ctx.module->name,ctx.module);
     ctx.module->blocked_clients = 0;
+    // 有了handle后 只要有函数名就可以获得函数指针 也就可以调用函数
     ctx.module->handle = handle;
     serverLog(LL_NOTICE,"Module '%s' loaded from %s",ctx.module->name,path);
-    /* Fire the loaded modules event. */
+    /* Fire the loaded modules event.
+     * 当某个模块加载完成后 要触发一个事件  TODO 有关事件的处理逻辑先不看 要先知道会存入什么样的事件监听器
+     * */
     moduleFireServerEvent(REDISMODULE_EVENT_MODULE_CHANGE,
                           REDISMODULE_SUBEVENT_MODULE_LOADED,
                           ctx.module);
 
+    // 回收上下文对象
     moduleFreeContext(&ctx);
     return C_OK;
 }
