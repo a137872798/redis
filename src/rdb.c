@@ -1959,12 +1959,15 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key) {
 }
 
 /* Mark that we are loading in the global state and setup the fields
- * needed to provide loading stats. */
+ * needed to provide loading stats.
+ * 打上一个标记位 代表此时正在加载数据 可能此时就不会生成rdb文件了
+ * */
 void startLoading(size_t size, int rdbflags) {
     /* Load the DB */
     server.loading = 1;
     server.loading_start_time = time(NULL);
     server.loading_loaded_bytes = 0;
+    // 代表总计要加载多少数据
     server.loading_total_bytes = size;
 
     /* Fire the loading modules start event. */
@@ -1975,14 +1978,18 @@ void startLoading(size_t size, int rdbflags) {
         subevent = REDISMODULE_SUBEVENT_LOADING_REPL_START;
     else
         subevent = REDISMODULE_SUBEVENT_LOADING_RDB_START;
+    // 触发事件监听器  TODO 有关监听器的逻辑之后看
     moduleFireServerEvent(REDISMODULE_EVENT_LOADING,subevent,NULL);
 }
 
 /* Mark that we are loading in the global state and setup the fields
  * needed to provide loading stats.
- * 'filename' is optional and used for rdb-check on error */
+ * 'filename' is optional and used for rdb-check on error
+ * 开始从文件中读取数据
+ * */
 void startLoadingFile(FILE *fp, char* filename, int rdbflags) {
     struct stat sb;
+    // fileno 获取某个打开文件的文件描述符 fstat将描述符信息转换成统计数据
     if (fstat(fileno(fp), &sb) == -1)
         sb.st_size = 0;
     rdbFileBeingLoaded = filename;

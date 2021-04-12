@@ -1295,7 +1295,9 @@ client *lookupClientByID(uint64_t id) {
  *
  * This function is called by threads, but always with handler_installed
  * set to 0. So when handler_installed is set to 0 the function must be
- * thread safe. */
+ * thread safe.
+ * 将数据写入到client的output缓冲区中
+ * */
 int writeToClient(client *c, int handler_installed) {
     ssize_t nwritten = 0, totwritten = 0;
     size_t objlen;
@@ -2901,9 +2903,16 @@ int io_threads_op;      /* IO_THREADS_OP_WRITE or IO_THREADS_OP_READ. */
 
 /* This is the list of clients each thread will serve when threaded I/O is
  * used. We spawn io_threads_num-1 threads, since one is the main thread
- * itself. */
+ * itself.
+ * 每个io线程会维护一个列表 用于存储待处理的client事件(read/write)
+ * */
 list *io_threads_list[IO_THREADS_MAX_NUM];
 
+/**
+ * io线程会执行下面的任务
+ * @param myid io线程在线程组的下标
+ * @return
+ */
 void *IOThreadMain(void *myid) {
     /* The ID is the thread number (from 0 to server.iothreads_num-1), and is
      * used by the thread to just manipulate a single sub-array of clients. */
@@ -2911,16 +2920,22 @@ void *IOThreadMain(void *myid) {
     char thdname[16];
 
     snprintf(thdname, sizeof(thdname), "io_thd_%ld", id);
+    // 设置线程名
     redis_set_thread_title(thdname);
+    // 设置cpu亲和 先忽略
     redisSetCpuAffinity(server.server_cpulist);
 
     while(1) {
-        /* Wait for start */
+        /* Wait for start
+         * 自旋
+         * */
         for (int j = 0; j < 1000000; j++) {
             if (io_threads_pending[id] != 0) break;
         }
 
-        /* Give the main thread a chance to stop this thread. */
+        /* Give the main thread a chance to stop this thread.
+         * 代表长时间的自旋依旧没有等到待处理任务   TODO
+         * */
         if (io_threads_pending[id] == 0) {
             pthread_mutex_lock(&io_threads_mutex[id]);
             pthread_mutex_unlock(&io_threads_mutex[id]);
@@ -2935,9 +2950,12 @@ void *IOThreadMain(void *myid) {
          * before we drop the pending count to 0. */
         listIter li;
         listNode *ln;
+        // list中存储了每个io线程接收到的client事件
         listRewind(io_threads_list[id],&li);
         while((ln = listNext(&li))) {
+            // 获取关联的client对象
             client *c = listNodeValue(ln);
+            // 将数据写入到目标client
             if (io_threads_op == IO_THREADS_OP_WRITE) {
                 writeToClient(c,0);
             } else if (io_threads_op == IO_THREADS_OP_READ) {
@@ -2953,12 +2971,16 @@ void *IOThreadMain(void *myid) {
     }
 }
 
-/* Initialize the data structures needed for threaded I/O. */
+/* Initialize the data structures needed for threaded I/O.
+ * 初始化io线程需要的各种结构体
+ * */
 void initThreadedIO(void) {
     io_threads_active = 0; /* We start with threads not active. */
 
     /* Don't spawn any thread if the user selected a single thread:
-     * we'll handle I/O directly from the main thread. */
+     * we'll handle I/O directly from the main thread.
+     * 看来redis 本身可以设置多个io线程 默认是1
+     * */
     if (server.io_threads_num == 1) return;
 
     if (server.io_threads_num > IO_THREADS_MAX_NUM) {
@@ -2967,17 +2989,22 @@ void initThreadedIO(void) {
         exit(1);
     }
 
-    /* Spawn and initialize the I/O threads. */
+    /* Spawn and initialize the I/O threads.
+     * */
     for (int i = 0; i < server.io_threads_num; i++) {
         /* Things we do for all the threads including the main thread. */
         io_threads_list[i] = listCreate();
+        // 下标为0对应的线程是main线程 不需要处理
         if (i == 0) continue; /* Thread 0 is the main thread. */
 
         /* Things we do only for the additional threads. */
         pthread_t tid;
+        // 创建等量的锁对象
         pthread_mutex_init(&io_threads_mutex[i],NULL);
+        // 每个线程此时待处理的数量
         io_threads_pending[i] = 0;
         pthread_mutex_lock(&io_threads_mutex[i]); /* Thread will be stopped. */
+        // 每条线程开始执行任务
         if (pthread_create(&tid,NULL,IOThreadMain,(void*)(long)i) != 0) {
             serverLog(LL_WARNING,"Fatal: Can't initialize IO thread.");
             exit(1);

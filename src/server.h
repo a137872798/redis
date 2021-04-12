@@ -1201,7 +1201,9 @@ struct redisServer {
     int aof_rewrite_perc;           /* Rewrite AOF if % growth is > M and... */
     off_t aof_rewrite_min_size;     /* the AOF file is at least N bytes. */
     off_t aof_rewrite_base_size;    /* AOF size on latest startup or rewrite. */
+    // aof文件的长度(大小)
     off_t aof_current_size;         /* AOF current size. */
+    // 对应aof文件上次刷盘的偏移量
     off_t aof_fsync_offset;         /* AOF offset which is already synced to disk. */
     int aof_flush_sleep;            /* Micros to sleep before flush. (used by tests) */
     int aof_rewrite_scheduled;      /* Rewrite once BGSAVE terminates. */

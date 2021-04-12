@@ -3,21 +3,27 @@
 #include "atomicvar.h"
 #include "cluster.h"
 
+// 有多少待释放的对象 以及总计释放了多少对象
 static redisAtomic size_t lazyfree_objects = 0;
 static redisAtomic size_t lazyfreed_objects = 0;
 
 /* Release objects from the lazyfree thread. It's just decrRefCount()
- * updating the count of objects to release. */
+ * updating the count of objects to release.
+ * 释放某个对象内存
+ * */
 void lazyfreeFreeObject(void *args[]) {
     robj *o = (robj *) args[0];
     decrRefCount(o);
+    // 修改统计数据
     atomicDecr(lazyfree_objects,1);
     atomicIncr(lazyfreed_objects,1);
 }
 
 /* Release a database from the lazyfree thread. The 'db' pointer is the
  * database which was substituted with a fresh one in the main thread
- * when the database was logically deleted. */
+ * when the database was logically deleted.
+ * 清空字典
+ * */
 void lazyfreeFreeDatabase(void *args[]) {
     dict *ht1 = (dict *) args[0];
     dict *ht2 = (dict *) args[1];
@@ -30,7 +36,9 @@ void lazyfreeFreeDatabase(void *args[]) {
 }
 
 /* Release the skiplist mapping Redis Cluster keys to slots in the
- * lazyfree thread. */
+ * lazyfree thread.
+ * 就是释放rax结构
+ * */
 void lazyfreeFreeSlotsMap(void *args[]) {
     rax *rt = args[0];
     size_t len = rt->numele;

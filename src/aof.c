@@ -656,7 +656,8 @@ void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int a
  * ------------------------------------------------------------------------- */
 
 /* In Redis commands are always executed in the context of a client, so in
- * order to load the append only file we need to create a fake client. */
+ * order to load the append only file we need to create a fake client.
+ * 创建一个虚拟的client 模拟并发起aof中的操作 */
 struct client *createAOFClient(void) {
     struct client *c = zmalloc(sizeof(*c));
 
@@ -705,7 +706,9 @@ void freeFakeClient(struct client *c) {
 
 /* Replay the append log file. On success C_OK is returned. On non fatal
  * error (the append only file is zero-length) C_ERR is returned. On
- * fatal error an error message is logged and the program exists. */
+ * fatal error an error message is logged and the program exists.
+ * 通过某个aof文件进行数据还原
+ * */
 int loadAppendOnlyFile(char *filename) {
     struct client *fakeClient;
     FILE *fp = fopen(filename,"r");
@@ -715,6 +718,7 @@ int loadAppendOnlyFile(char *filename) {
     off_t valid_up_to = 0; /* Offset of latest well-formed command loaded. */
     off_t valid_before_multi = 0; /* Offset before MULTI command loaded. */
 
+    // 打开文件失败
     if (fp == NULL) {
         serverLog(LL_WARNING,"Fatal error: can't open the append log file for reading: %s",strerror(errno));
         exit(1);
@@ -723,7 +727,9 @@ int loadAppendOnlyFile(char *filename) {
     /* Handle a zero-length AOF file as a special case. An empty AOF file
      * is a valid AOF because an empty server with AOF enabled will create
      * a zero length file at startup, that will remain like that if no write
-     * operation is received. */
+     * operation is received.
+     * 如果aof文件长度为空 代表之前还没有写入任何数据
+     * */
     if (fp && redis_fstat(fileno(fp),&sb) != -1 && sb.st_size == 0) {
         server.aof_current_size = 0;
         server.aof_fsync_offset = server.aof_current_size;
@@ -732,15 +738,22 @@ int loadAppendOnlyFile(char *filename) {
     }
 
     /* Temporarily disable AOF, to prevent EXEC from feeding a MULTI
-     * to the same file we're about to read. */
+     * to the same file we're about to read.
+     * 设置 aof_off 避免文件被并发访问
+     * */
     server.aof_state = AOF_OFF;
 
+    // 创建一个虚拟的client 用来模拟aof文件中的操作
     fakeClient = createAOFClient();
+    // 将rdb组件标记成 loading 同时触发监听器
     startLoadingFile(fp, filename, RDBFLAGS_AOF_PREAMBLE);
 
     /* Check if this AOF file has an RDB preamble. In that case we need to
-     * load the RDB file and later continue loading the AOF tail. */
+     * load the RDB file and later continue loading the AOF tail.
+     * 检测aof文件中是否有记录rdb的信息 如果有就代表该aof文件是以rdb中的数据作为基准点 记录之后追加的数据
+     * */
     char sig[5]; /* "REDIS" */
+    // 如果文件没有以
     if (fread(sig,1,5,fp) != 5 || memcmp(sig,"REDIS",5) != 0) {
         /* No RDB preamble, seek back at 0 offset. */
         if (fseek(fp,0,SEEK_SET) == -1) goto readerr;

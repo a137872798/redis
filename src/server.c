@@ -3036,11 +3036,17 @@ void initServer(void) {
  * are loaded).
  * Specifically, creation of threads due to a race bug in ld.so, in which
  * Thread Local Storage initialization collides with dlopen call.
- * see: https://sourceware.org/bugzilla/show_bug.cgi?id=19329 */
+ * see: https://sourceware.org/bugzilla/show_bug.cgi?id=19329
+ * 某些初始化工作必须等到所有模块加载完毕
+ * */
 void InitServerLast() {
+    // 开启各种后台线程  负责文件关闭/持久化/释放对象
     bioInit();
+    // 初始化io线程 负责处理client相关的读写事件
     initThreadedIO();
+    // 设置线程内存总开销
     set_jemalloc_bg_thread(server.jemalloc_bg_thread);
+    // 计算此时已经使用的内存
     server.initial_memory_usage = zmalloc_used_memory();
 }
 
@@ -4943,9 +4949,13 @@ int checkForSentinelMode(int argc, char **argv) {
     return 0;
 }
 
-/* Function called at startup to load RDB or AOF file in memory. */
+/* Function called at startup to load RDB or AOF file in memory.
+ * 从磁盘中恢复之前的数据
+ * */
 void loadDataFromDisk(void) {
     long long start = ustime();
+
+    // 通过aof文件恢复数据 实际上内部还会判断是否需要加载rdb文件
     if (server.aof_state == AOF_ON) {
         if (loadAppendOnlyFile(server.aof_filename) == C_OK)
             serverLog(LL_NOTICE, "DB loaded from append only file: %.3f seconds", (float) (ustime() - start) / 1000000);
@@ -5307,8 +5317,12 @@ int main(int argc, char **argv) {
         // 某些模块在解析配置文件时被存储到server.module_queue中 这里尝试加载它们 TODO 内部还涉及到了事件监听器 回调函数等
         moduleLoadFromQueue();
         // 开始加载acl的用户 在初始化过程中 一开始会设置一个默认用户 具备全部权限
+        // 这里是从UsersToLoad或者acl配置文件中加载用户信息
         ACLLoadUsersAtStartup();
+
+        // server某些组件的初始化 必须先确保module加载完毕 这里就是进行一些最后的初始化
         InitServerLast();
+        // 从磁盘中恢复之前的数据
         loadDataFromDisk();
         if (server.cluster_enabled) {
             if (verifyClusterConfigWithData() == C_ERR) {

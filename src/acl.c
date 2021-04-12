@@ -1382,7 +1382,7 @@ sds ACLLoadFromFile(const char *filename) {
         }
 
         /* The line should start with the "user" keyword.
-         * 代表该行配置无效
+         * acl配置 每行应当以user开头
          * */
         if (strcmp(argv[0],"user") || argc < 2) {
             errors = sdscatprintf(errors,
@@ -1406,7 +1406,7 @@ sds ACLLoadFromFile(const char *filename) {
         ACLSetUser(fakeuser,"reset",-1);
         int j;
 
-        // 这里认为每行数据应该分为2部分 一个是用户名 后面跟随的是参数信息
+        // 这里认为每行参数应该是  user username 各种配置值...
         for (j = 2; j < argc; j++) {
             if (ACLSetUser(fakeuser,argv[j],sdslen(argv[j])) != C_OK) {
                 char *errmsg = ACLSetUserStringError();
@@ -1426,9 +1426,12 @@ sds ACLLoadFromFile(const char *filename) {
         }
 
         /* We can finally lookup the user and apply the rule. If the
-         * user already exists we always reset it to start. */
+         * user already exists we always reset it to start.
+         * 使用用户名 创建user对象
+         * */
         user *u = ACLCreateUser(argv[1],sdslen(argv[1]));
         if (!u) {
+            // 如果用户信息已存储 修改成重置状态
             u = ACLGetUserByName(argv[1],sdslen(argv[1]));
             serverAssert(u != NULL);
             ACLSetUser(u,"reset",-1);
@@ -1437,11 +1440,13 @@ sds ACLLoadFromFile(const char *filename) {
         /* Note that the same rules already applied to the fake user, so
          * we just assert that everything goes well: it should. */
         for (j = 2; j < argc; j++)
+            // 这里使用配置项更新用户信息
             serverAssert(ACLSetUser(u,argv[j],sdslen(argv[j])) == C_OK);
 
         sdsfreesplitres(argv,argc);
     }
 
+    // 释放虚假用户内存
     ACLFreeUser(fakeuser);
     sdsfreesplitres(lines,totlines);
     DefaultUser = old_default_user; /* This pointer must never change. */
@@ -1451,11 +1456,15 @@ sds ACLLoadFromFile(const char *filename) {
         /* The default user pointer is referenced in different places: instead
          * of replacing such occurrences it is much simpler to copy the new
          * default user configuration in the old one. */
+        // 这里假定配置文件中 包含默认用户的配置项
         user *new = ACLGetUserByName("default",7);
         serverAssert(new != NULL);
+        // 用从配置文件中解析的默认用户信息去设置DefaultUser指针
         ACLCopyUser(DefaultUser,new);
+        // 这里是更正维护的指针关系  Users中default的指针应该就是DefaultUser
         ACLFreeUser(new);
         raxInsert(Users,(unsigned char*)"default",7,DefaultUser,NULL);
+        // old_user中default指针与DefaultUser指针是同一个 不能释放内存  所以要先从rax中移除 这样就不会被 ACLFreeUsersSet干扰
         raxRemove(old_users,(unsigned char*)"default",7,NULL);
         ACLFreeUsersSet(old_users);
         sdsfree(errors);
@@ -1559,7 +1568,7 @@ void ACLLoadUsersAtStartup(void) {
         exit(1);
     }
 
-    // 解析配置文件
+    // 解析配置文件 从中读取user/defaultUser信息 并填充到acl相关容器中
     if (server.acl_filename[0] != '\0') {
         sds errors = ACLLoadFromFile(server.acl_filename);
         if (errors) {

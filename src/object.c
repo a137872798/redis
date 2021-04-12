@@ -363,7 +363,12 @@ void incrRefCount(robj *o) {
     }
 }
 
+/**
+ * 减少引用计数
+ * @param o
+ */
 void decrRefCount(robj *o) {
+    // 代表本次引用计数归0 会触发释放操作
     if (o->refcount == 1) {
         switch(o->type) {
         case OBJ_STRING: freeStringObject(o); break;
