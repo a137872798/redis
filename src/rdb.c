@@ -47,6 +47,9 @@
 /* This macro is called when RDB read failed (possibly a short read) */
 #define rdbReportReadError(...) rdbReportError(0, __LINE__,__VA_ARGS__)
 
+/**
+ * 记录此时正在加载的rdb文件的名字
+ */
 char* rdbFileBeingLoaded = NULL; /* used for rdb checking on read error */
 extern int rdbCheckMode;
 void rdbCheckError(const char *fmt, ...);
@@ -2007,12 +2010,16 @@ void loadingProgress(off_t pos) {
         server.stat_peak_memory = zmalloc_used_memory();
 }
 
-/* Loading finished */
+/* Loading finished
+ * 代表服务器的数据恢复阶段(加载阶段) 结束
+ * */
 void stopLoading(int success) {
     server.loading = 0;
     rdbFileBeingLoaded = NULL;
 
-    /* Fire the loading modules end event. */
+    /* Fire the loading modules end event.
+     * 触发监听器 spring也有这种全局事件监听器 它是怎么实现的呢
+     * */
     moduleFireServerEvent(REDISMODULE_EVENT_LOADING,
                           success?
                             REDISMODULE_SUBEVENT_LOADING_ENDED:
@@ -2392,15 +2399,20 @@ eoferr:
  * output is initialized and finalized.
  *
  * If you pass an 'rsi' structure initialied with RDB_SAVE_OPTION_INIT, the
- * loading code will fiil the information fields in the structure. */
+ * loading code will fiil the information fields in the structure.
+ * 加载rdb文件中的数据 并填充到saveInfo中
+ * */
 int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     FILE *fp;
     rio rdb;
     int retval;
 
     if ((fp = fopen(filename,"r")) == NULL) return C_ERR;
+    // 标记开始加载数据
     startLoadingFile(fp, filename,rdbflags);
+    // 根据文件数据初始化 rio结构
     rioInitWithFile(&rdb,fp);
+    // 该方法结束后 认为已经从rdb中恢复了数据
     retval = rdbLoadRio(&rdb,rdbflags,rsi);
     fclose(fp);
     stopLoading(retval==C_OK);

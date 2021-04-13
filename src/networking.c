@@ -712,8 +712,11 @@ void addReplyBool(client *c, int b) {
 /* A null array is a concept that no longer exists in RESP3. However
  * RESP2 had it, so API-wise we have this call, that will emit the correct
  * RESP2 protocol, however for RESP3 the reply will always be just the
- * Null type "_\r\n". */
+ * Null type "_\r\n".
+ * 恢复空数组给client
+ * */
 void addReplyNullArray(client *c) {
+    // 这个好像是响应体的版本号
     if (c->resp == 2) {
         addReplyProto(c,"*-1\r\n",5);
     } else {

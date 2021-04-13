@@ -33,14 +33,20 @@
 
 /* Check if this blocked client timedout (does nothing if the client is
  * not blocked right now). If so send a reply, unblock it, and return 1.
- * Otherwise 0 is returned and no operation is performed. */
+ * Otherwise 0 is returned and no operation is performed.
+ * 检查client是否超时
+ * */
 int checkBlockedClientTimeout(client *c, mstime_t now) {
+    // 此时client处于block状态 并且timeout < now
     if (c->flags & CLIENT_BLOCKED &&
         c->bpop.timeout != 0
         && c->bpop.timeout < now)
     {
-        /* Handle blocking operation specific timeout. */
+        /* Handle blocking operation specific timeout.
+         * 将超时信息反馈给client
+         * */
         replyToBlockedClientTimedOut(c);
+        // 解除阻塞状态
         unblockClient(c);
         return 1;
     } else {
@@ -101,8 +107,11 @@ void encodeTimeoutKey(unsigned char *buf, uint64_t timeout, client *c) {
 }
 
 /* Given a key encoded with encodeTimeoutKey(), resolve the fields and write
- * the timeout into *toptr and the client pointer into *cptr. */
+ * the timeout into *toptr and the client pointer into *cptr.
+ * 从buf中读取数据并将 超时时间和 client信息解析出来设置到指针中
+ * */
 void decodeTimeoutKey(unsigned char *buf, uint64_t *toptr, client **cptr) {
+    // 内部的数据分为2部分 前8byte是超时时间 后面是client
     memcpy(toptr,buf,sizeof(*toptr));
     *toptr = ntohu64(*toptr);
     memcpy(cptr,buf+8,sizeof(*cptr));
@@ -132,20 +141,28 @@ void removeClientFromTimeoutTable(client *c) {
 }
 
 /* This function is called in beforeSleep() in order to unblock clients
- * that are waiting in blocking operations with a timeout set. */
+ * that are waiting in blocking operations with a timeout set.
+ * 处理那些阻塞超时的client
+ * */
 void handleBlockedClientsTimeout(void) {
+    // 看来 timeout_table 中记录了所有超时client
     if (raxSize(server.clients_timeout_table) == 0) return;
     uint64_t now = mstime();
     raxIterator ri;
     raxStart(&ri,server.clients_timeout_table);
+    // 定位到"^" 可能是一个特殊的标记位
     raxSeek(&ri,"^",NULL,0);
 
     while(raxNext(&ri)) {
         uint64_t timeout;
         client *c;
+        // 从key中解析出该key对应的client 以及超时时间
         decodeTimeoutKey(ri.key,&timeout,&c);
+        // 代表还未超时
         if (timeout >= now) break; /* All the timeouts are in the future. */
+        // 移除掉client的标记位
         c->flags &= ~CLIENT_IN_TO_TABLE;
+        //
         checkBlockedClientTimeout(c,now);
         raxRemove(server.clients_timeout_table,ri.key,ri.key_len,NULL);
         raxSeek(&ri,"^",NULL,0);

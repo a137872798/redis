@@ -4621,7 +4621,9 @@ void RM_SetDisconnectCallback(RedisModuleBlockedClient *bc, RedisModuleDisconnec
  * however it is possible that while the module was doing work for the
  * blocked client, it was terminated by Redis (for timeout or other reasons).
  * When this happens the RedisModuleBlockedClient structure in the queue
- * will have the 'client' field set to NULL. */
+ * will have the 'client' field set to NULL.
+ * 使用module来解除client阻塞
+ * */
 void moduleHandleBlockedClients(void) {
     listNode *ln;
     RedisModuleBlockedClient *bc;

@@ -719,6 +719,7 @@ int loadAppendOnlyFile(char *filename) {
     struct redis_stat sb;
     int old_aof_state = server.aof_state;
     long loops = 0;
+    // 记录读取到上一条command时文件的偏移量
     off_t valid_up_to = 0; /* Offset of latest well-formed command loaded. */
     off_t valid_before_multi = 0; /* Offset before MULTI command loaded. */
 
@@ -792,8 +793,11 @@ int loadAppendOnlyFile(char *filename) {
          * 每当轮询1000次后 触发一次下面的逻辑
          * */
         if (!(loops++ % 1000)) {
+            // 更新server记录的已经加载的偏移量
             loadingProgress(ftello(fp));
+            // TODO 目前还不知道是干嘛
             processEventsWhileBlocked();
+            // TODO 好像是进行flush的
             processModuleLoadingProgressEvent(1);
         }
 
@@ -822,7 +826,7 @@ int loadAppendOnlyFile(char *filename) {
         fakeClient->argc = argc;
         fakeClient->argv = argv;
 
-        // 从fp中读取robj对象 并设置到argv中
+        // 从fp中读取robj对象 并设置到argv中  等长的好处是简化读取逻辑
         for (j = 0; j < argc; j++) {
             /* Parse the argument len. */
             // 继续从fp中读取数据到buffer
@@ -889,10 +893,13 @@ int loadAppendOnlyFile(char *filename) {
         {
             queueMultiCommand(fakeClient);
         } else {
-            // 通过client处理单个指令
+            // 通过client处理单个指令  每个command对象内部都有一个函数 (接收一个client 并将数据发往服务器)
+            // 此时认为aof的数据已经发送到server 并写入到存储层中了
             cmd->proc(fakeClient);
         }
 
+
+        // 一些状态断言 因为fakeclient 应该不会发生reply/block
         /* The fake client should not have a reply */
         serverAssert(fakeClient->bufpos == 0 &&
                      listLength(fakeClient->reply) == 0);
@@ -901,18 +908,26 @@ int loadAppendOnlyFile(char *filename) {
         serverAssert((fakeClient->flags & CLIENT_BLOCKED) == 0);
 
         /* Clean up. Command code may have changed argv/argc so we use the
-         * argv/argc of the client instead of the local variables. */
+         * argv/argc of the client instead of the local variables.
+         * 释放之前的参数
+         * */
         freeFakeClientArgv(fakeClient);
         fakeClient->cmd = NULL;
+        // 记录此时文件的游标
         if (server.aof_load_truncated) valid_up_to = ftello(fp);
+        // 如果设置了加载延迟 会使得进程睡眠一定时间
         if (server.key_load_delay)
             usleep(server.key_load_delay);
     }
 
+    // 此时所有aof中记录的操作已经通过 fakeClient发送到server并处理了 应该就是写入到redis的存储系统中
+
     /* This point can only be reached when EOF is reached without errors.
      * If the client is in the middle of a MULTI/EXEC, handle it as it was
      * a short read, even if technically the protocol is correct: we want
-     * to remove the unprocessed tail and continue. */
+     * to remove the unprocessed tail and continue.
+     * 代表有未完成的操作 抛出异常
+     * */
     if (fakeClient->flags & CLIENT_MULTI) {
         serverLog(LL_WARNING,
             "Revert incomplete MULTI/EXEC transaction in AOF file");
@@ -920,17 +935,23 @@ int loadAppendOnlyFile(char *filename) {
         goto uxeof;
     }
 
+    // 这里代表数据加载完毕 是一个正常的结束情况
 loaded_ok: /* DB loaded, cleanup and return C_OK to the caller. */
     fclose(fp);
     freeFakeClient(fakeClient);
+    // 恢复aof状态 这样本服务器就可以继续写入 aof数据了
     server.aof_state = old_aof_state;
+    // 代表加载阶段结束
     stopLoading(1);
+    // 更新aof文件此时的大小
     aofUpdateCurrentSize();
+    // 更新相关偏移量
     server.aof_rewrite_base_size = server.aof_current_size;
     server.aof_fsync_offset = server.aof_current_size;
     return C_OK;
 
 readerr: /* Read error. If feof(fp) is true, fall through to unexpected EOF. */
+    // 代表非正常退出
     if (!feof(fp)) {
         if (fakeClient) freeFakeClient(fakeClient); /* avoid valgrind warning */
         fclose(fp);
@@ -938,6 +959,8 @@ readerr: /* Read error. If feof(fp) is true, fall through to unexpected EOF. */
         exit(1);
     }
 
+
+    // TODO 有关截断的逻辑先忽略
 uxeof: /* Unexpected AOF end of file. */
     if (server.aof_load_truncated) {
         serverLog(LL_WARNING,"!!! Warning: short read while loading the AOF file !!!");
@@ -1715,6 +1738,7 @@ void aofUpdateCurrentSize(void) {
     struct redis_stat sb;
     mstime_t latency;
 
+    // 设置latency时间
     latencyStartMonitor(latency);
     if (redis_fstat(server.aof_fd,&sb) == -1) {
         serverLog(LL_WARNING,"Unable to obtain the AOF file length. stat: %s",
@@ -1722,6 +1746,7 @@ void aofUpdateCurrentSize(void) {
     } else {
         server.aof_current_size = sb.st_size;
     }
+    // 记录耗时 并加入到样本数据中
     latencyEndMonitor(latency);
     latencyAddSampleIfNeeded("aof-fstat",latency);
 }

@@ -2089,43 +2089,61 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
 /* This function gets called every time Redis is entering the
  * main loop of the event driven library, that is, before to sleep
- * for ready file descriptors. */
+ * for ready file descriptors.
+ * 在事件循环sleep前执行的函数
+ * */
 void beforeSleep(struct aeEventLoop *eventLoop) {
     UNUSED(eventLoop);
 
-    /* Handle precise timeouts of blocked clients. */
+    /* Handle precise timeouts of blocked clients.
+     * 处理那些 阻塞超时的client
+     * */
     handleBlockedClientsTimeout();
 
-    /* We should handle pending reads clients ASAP after event loop. */
+    /* We should handle pending reads clients ASAP after event loop.
+     * 处理已经准备好的read事件
+     * */
     handleClientsWithPendingReadsUsingThreads();
 
-    /* Handle TLS pending data. (must be done before flushAppendOnlyFile) */
+    /* Handle TLS pending data. (must be done before flushAppendOnlyFile)
+     * TLS层的逻辑先不看
+     * */
     tlsProcessPendingData();
 
-    /* If tls still has pending unread data don't sleep at all. */
+    /* If tls still has pending unread data don't sleep at all.
+     * TODO
+     * */
     aeSetDontWait(server.el, tlsHasPendingData());
 
     /* Call the Redis Cluster before sleep function. Note that this function
      * may change the state of Redis Cluster (from ok to fail or vice versa),
      * so it's a good idea to call it before serving the unblocked clients
-     * later in this function. */
+     * later in this function.
+     * 触发beforeSleep函数
+     * */
     if (server.cluster_enabled) clusterBeforeSleep();
 
     /* Run a fast expire cycle (the called function will return
-     * ASAP if a fast cycle is not needed). */
+     * ASAP if a fast cycle is not needed).
+     * 激活过期循环 推测是检测当前有哪些key已经过期
+     * */
     if (server.active_expire_enabled && server.masterhost == NULL)
         activeExpireCycle(ACTIVE_EXPIRE_CYCLE_FAST);
 
     /* Unblock all the clients blocked for synchronous replication
-     * in WAIT. */
+     * in WAIT. 处理所有等待数据复写的client */
     if (listLength(server.clients_waiting_acks))
         processClientsWaitingReplicas();
 
     /* Check if there are clients unblocked by modules that implement
-     * blocking commands. */
+     * blocking commands.
+     * 当设置了module的情况下 使用module来解除client的阻塞
+     * */
     if (moduleCount()) moduleHandleBlockedClients();
 
-    /* Try to process pending commands for clients that were just unblocked. */
+    /* Try to process pending commands for clients that were just unblocked.
+     * 找到这组需要解除block的client 并进行处理
+     * */
     if (listLength(server.unblocked_clients))
         processUnblockedClients();
 
@@ -4961,15 +4979,20 @@ void loadDataFromDisk(void) {
 
     // 通过aof文件恢复数据 实际上内部还会判断是否需要加载rdb文件
     if (server.aof_state == AOF_ON) {
+        // 此时通过读取aof文件 完成了数据恢复 内部会生成一个fakeClient对象 读取aof中的数据并模拟client发送请求到server的过程
         if (loadAppendOnlyFile(server.aof_filename) == C_OK)
             serverLog(LL_NOTICE, "DB loaded from append only file: %.3f seconds", (float) (ustime() - start) / 1000000);
     } else {
+        // 代表只使用了 rdb进行持久化
         rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
+        // 从 rdbLoad返回后 已经从rdb文件中加载完了数据
         if (rdbLoad(server.rdb_filename, &rsi, RDBFLAGS_NONE) == C_OK) {
             serverLog(LL_NOTICE, "DB loaded from disk: %.3f seconds",
                       (float) (ustime() - start) / 1000000);
 
-            /* Restore the replication ID / offset from the RDB file. */
+            /* Restore the replication ID / offset from the RDB file.
+             * 如果开启了集群模式 并且rdb文件中记录了repl_id 从rdb文件中恢复集群中的id
+             * */
             if ((server.masterhost ||
                  (server.cluster_enabled &&
                   nodeIsSlave(server.cluster->myself))) &&
@@ -4984,10 +5007,14 @@ void loadDataFromDisk(void) {
                 server.master_repl_meaningful_offset = rsi.repl_offset;
                 /* If we are a slave, create a cached master from this
                  * information, in order to allow partial resynchronizations
-                 * with masters. */
+                 * with masters.
+                 * TODO 缓存master信息
+                 * */
                 replicationCacheMasterUsingMyself();
+                // 将master的db 指向 server.db[repl_stream_db]
                 selectDb(server.cached_master, rsi.repl_stream_db);
             }
+            // 进行数据恢复时失败 退出程序
         } else if (errno != ENOENT) {
             serverLog(LL_WARNING, "Fatal error loading the DB: %s. Exiting.", strerror(errno));
             exit(1);
@@ -5326,9 +5353,11 @@ int main(int argc, char **argv) {
 
         // server某些组件的初始化 必须先确保module加载完毕 这里就是进行一些最后的初始化
         InitServerLast();
-        // 从磁盘中恢复之前的数据
+        // 从磁盘中恢复之前的数据  这里涉及到 aof/rdb fakeClient/command 等结构
         loadDataFromDisk();
+        // 检测是否开启集群模式
         if (server.cluster_enabled) {
+            // 检验master节点下 集群所有slot是否已设置 如果未设置 进行填充 并且对集群文件进行持久化
             if (verifyClusterConfigWithData() == C_ERR) {
                 serverLog(LL_WARNING,
                           "You can't have keys in a DB different than DB 0 when in "
@@ -5336,6 +5365,7 @@ int main(int argc, char **argv) {
                 exit(1);
             }
         }
+        // 根据此时准备好的连接数 打印日志 应该是3次握手中收到了第一个连接请求 在服务端还需要调用accept才会真正建立连接(阻塞)
         if (server.ipfd_count > 0 || server.tlsfd_count > 0)
             serverLog(LL_NOTICE, "Ready to accept connections");
         if (server.sofd > 0)
@@ -5348,22 +5378,29 @@ int main(int argc, char **argv) {
                 redisCommunicateSystemd("STATUS=Waiting for MASTER <-> REPLICA sync\n");
             }
         }
+        // TODO 先忽略哨兵模式  现在redis一般应该是使用集群模式 会自动选举
     } else {
         InitServerLast();
         sentinelIsRunning();
     }
 
-    /* Warning the user about suspicious maxmemory setting. */
+    /* Warning the user about suspicious maxmemory setting.
+     * 检测此时redis设置的内存是否合理 不合理的情况 打印日志
+     * */
     if (server.maxmemory > 0 && server.maxmemory < 1024 * 1024) {
         serverLog(LL_WARNING,
                   "WARNING: You specified a maxmemory value that is less than 1MB (current value is %llu bytes). Are you sure this is what you really want?",
                   server.maxmemory);
     }
 
+    // 设置cpu亲和性
     redisSetCpuAffinity(server.server_cpulist);
+    // 跟时间循环sleep的前后设置函数
     aeSetBeforeSleepProc(server.el, beforeSleep);
     aeSetAfterSleepProc(server.el, afterSleep);
+    // 主线程开启事件循环
     aeMain(server.el);
+    // 此时已经从事件循环中退出 删除el
     aeDeleteEventLoop(server.el);
     return 0;
 }

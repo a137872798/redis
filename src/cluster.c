@@ -3158,6 +3158,7 @@ void clusterFailoverReplaceYourMaster(void) {
  * 1) To check if we are able to perform a failover, is our data updated?
  * 2) Try to get elected by masters.
  * 3) Perform the failover informing all the other nodes.
+ *
  */
 void clusterHandleSlaveFailover(void) {
     mstime_t data_age;
@@ -3789,18 +3790,26 @@ void clusterCron(void) {
  * events. It is useful to perform operations that must be done ASAP in
  * reaction to events fired but that are not safe to perform inside event
  * handlers, or to perform potentially expansive tasks that we need to do
- * a single time before replying to clients. */
+ * a single time before replying to clients.
+ * 在事件循环sleep前 执行的函数
+ * */
 void clusterBeforeSleep(void) {
     /* Handle failover, this is needed when it is likely that there is already
-     * the quorum from masters in order to react fast. */
+     * the quorum from masters in order to react fast.
+     * 代表在新的一轮开始前 要做一些故障转移
+     * */
     if (server.cluster->todo_before_sleep & CLUSTER_TODO_HANDLE_FAILOVER)
         clusterHandleSlaveFailover();
 
-    /* Update the cluster state. */
+    /* Update the cluster state.
+     * 进行一些集群状态的更新
+     * */
     if (server.cluster->todo_before_sleep & CLUSTER_TODO_UPDATE_STATE)
         clusterUpdateState();
 
-    /* Save the config, possibly using fsync. */
+    /* Save the config, possibly using fsync.
+     * 代表需要对集群配置进行持久化
+     * */
     if (server.cluster->todo_before_sleep & CLUSTER_TODO_SAVE_CONFIG) {
         int fsync = server.cluster->todo_before_sleep &
                     CLUSTER_TODO_FSYNC_CONFIG;
@@ -3808,7 +3817,9 @@ void clusterBeforeSleep(void) {
     }
 
     /* Reset our flags (not strictly needed since every single function
-     * called for flags set should be able to clear its flag). */
+     * called for flags set should be able to clear its flag).
+     * 代表本轮事件循环在sleep前针对cluster要做的事已经全部完成了
+     * */
     server.cluster->todo_before_sleep = 0;
 }
 
@@ -4076,32 +4087,50 @@ void clusterUpdateState(void) {
  *
  * The function also uses the logging facility in order to warn the user
  * about desynchronizations between the data we have in memory and the
- * cluster configuration. */
+ * cluster configuration.
+ * 如果此时以集群模式开启redis 需要进行参数检验
+ * */
 int verifyClusterConfigWithData(void) {
     int j;
     int update_config = 0;
 
     /* Return ASAP if a module disabled cluster redirections. In that case
-     * every master can store keys about every possible hash slot. */
+     * every master can store keys about every possible hash slot.
+     * 如果集群禁用了 重定向功能 也就是集群内部不会转发请求 那么期望每个server自己存储所有hashSlot信息 这样方便快速定位数据
+     * 记得es 在发起请求时也是通过一个hash函数确定数据会发往哪个节点 或者从哪个节点读取数据
+     * 如果集群不支持重定向 就不需要检查了
+     * */
     if (server.cluster_module_flags & CLUSTER_MODULE_FLAG_NO_REDIRECTION)
         return C_OK;
 
     /* If this node is a slave, don't perform the check at all as we
-     * completely depend on the replication stream. */
+     * completely depend on the replication stream.
+     * slave节点 不需要检测  什么时候知道自己是否是slave节点的呢
+     * */
     if (nodeIsSlave(myself)) return C_OK;
 
-    /* Make sure we only have keys in DB0. */
+    // 此时本节点是master节点
+
+    /* Make sure we only have keys in DB0.
+     * 这里要求只有db0存储了数据
+     * */
     for (j = 1; j < server.dbnum; j++) {
         if (dictSize(server.db[j].dict)) return C_ERR;
     }
 
     /* Check that all the slots we see populated memory have a corresponding
-     * entry in the cluster table. Otherwise fix the table. */
+     * entry in the cluster table. Otherwise fix the table.
+     * 默认redis集群总计有 16384 个slot
+     * */
     for (j = 0; j < CLUSTER_SLOTS; j++) {
+
+        // 跳过不包含key的slot TODO 这些数据是什么时候填充进去的???
         if (!countKeysInSlot(j)) continue; /* No keys in this slot. */
         /* Check if we are assigned to this slot or if we are importing it.
          * In both cases check the next slot as the configuration makes
-         * sense. */
+         * sense.
+         * 代表有关该slot的路由信息已经存在 比如该slot由master节点占有 或者占据该slot的节点信息已知
+         * */
         if (server.cluster->slots[j] == myself ||
             server.cluster->importing_slots_from[j] != NULL) continue;
 
@@ -4111,17 +4140,21 @@ int verifyClusterConfigWithData(void) {
 
         update_config++;
         /* Case A: slot is unassigned. Take responsibility for it. */
+        // 如果轮询到的某个slot
         if (server.cluster->slots[j] == NULL) {
             serverLog(LL_WARNING, "I have keys for unassigned slot %d. "
                                     "Taking responsibility for it.",j);
+            // 使用本节点占据 slot
             clusterAddSlot(myself,j);
         } else {
+            // 如果该节点不属于master 那么 master需要知道 哪个节点占据了这个slot 方便之后进行重定向
             serverLog(LL_WARNING, "I have keys for slot %d, but the slot is "
                                     "assigned to another node. "
                                     "Setting it to importing state.",j);
             server.cluster->importing_slots_from[j] = server.cluster->slots[j];
         }
     }
+    // 代表配置文件发生了变化
     if (update_config) clusterSaveConfigOrDie(1);
     return C_OK;
 }

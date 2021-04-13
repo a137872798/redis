@@ -142,7 +142,9 @@ void queueClientForReprocessing(client *c) {
 }
 
 /* Unblock a client calling the right function depending on the kind
- * of operation the client is blocking for. */
+ * of operation the client is blocking for.
+ * 解除client的阻塞状态
+ * */
 void unblockClient(client *c) {
     if (c->btype == BLOCKED_LIST ||
         c->btype == BLOCKED_ZSET ||
@@ -168,8 +170,11 @@ void unblockClient(client *c) {
 
 /* This function gets called when a blocked client timed out in order to
  * send it a reply of some kind. After this function is called,
- * unblockClient() will be called with the same client as argument. */
+ * unblockClient() will be called with the same client as argument.
+ * 将超时信息反馈给client  TODO 先不细看
+ * */
 void replyToBlockedClientTimedOut(client *c) {
+    // btype代表哪类操作被阻塞
     if (c->btype == BLOCKED_LIST ||
         c->btype == BLOCKED_ZSET ||
         c->btype == BLOCKED_STREAM) {
@@ -597,7 +602,9 @@ void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeo
 }
 
 /* Unblock a client that's waiting in a blocking operation such as BLPOP.
- * You should never call this function directly, but unblockClient() instead. */
+ * You should never call this function directly, but unblockClient() instead.
+ * 解除client阻塞状态
+ * */
 void unblockClientWaitingData(client *c) {
     dictEntry *de;
     dictIterator *di;

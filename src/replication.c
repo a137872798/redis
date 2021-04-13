@@ -2763,7 +2763,9 @@ long long adjustMeaningfulReplOffset() {
  * Assuming this instance was previously the master instance of the new master,
  * the new master will accept its replication ID, and potentiall also the
  * current offset if no data was lost during the failover. So we use our
- * current replication ID and offset in order to synthesize a cached master. */
+ * current replication ID and offset in order to synthesize a cached master.
+ * 缓存master信息
+ * */
 void replicationCacheMasterUsingMyself(void) {
     serverLog(LL_NOTICE,
         "Before turning into a replica, using my own master parameters "
@@ -3044,7 +3046,9 @@ void unblockClientWaitingReplicas(client *c) {
 }
 
 /* Check if there are clients blocked in WAIT that can be unblocked since
- * we received enough ACKs from slaves. */
+ * we received enough ACKs from slaves.
+ * 处理所有等待数据复写的client
+ * */
 void processClientsWaitingReplicas(void) {
     long long last_offset = 0;
     int last_numreplicas = 0;
