@@ -987,7 +987,9 @@ struct redisMemOverhead {
  * Currently the only use is to select a DB at load time, useful in
  * replication in order to make sure that chained slaves (slaves of slaves)
  * select the correct DB and are able to accept the stream coming from the
- * top-level master. */
+ * top-level master.
+ * 存储了 rdb的描述信息 比如rdb数据存在于哪里
+ * */
 typedef struct rdbSaveInfo {
     /* Used saving and loading. */
     int repl_stream_db;  /* DB to select in server.master client. */
@@ -1123,7 +1125,9 @@ struct redisServer {
     off_t loading_loaded_bytes;
     time_t loading_start_time;
     off_t loading_process_events_interval_bytes;
-    /* Fast pointers to often looked up command */
+    /* Fast pointers to often looked up command
+     * 一些比较常用的commond 通过直接指针维护
+     * */
     struct redisCommand *delCommand, *multiCommand, *lpushCommand,
                         *lpopCommand, *rpopCommand, *zpopminCommand,
                         *zpopmaxCommand, *sremCommand, *execCommand,

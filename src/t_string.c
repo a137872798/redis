@@ -176,6 +176,10 @@ int getGenericCommand(client *c) {
     }
 }
 
+/**
+ * 每个command命令 都包含了通过client发送数据到server的逻辑
+ * @param c
+ */
 void getCommand(client *c) {
     getGenericCommand(c);
 }

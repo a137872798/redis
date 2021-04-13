@@ -39,6 +39,8 @@
 /* ===================== Creation and parsing of objects ==================== */
 
 /**
+ * redis中存储的数据 都被称为 redisObject robj
+ * 比如是一个 redisString类型 ptr指针会指向一个sds结构
  * type 表明了数据体的类型
  * ptr 代表对象的数据
  */

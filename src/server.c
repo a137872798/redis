@@ -3200,7 +3200,11 @@ void redisOpArrayFree(redisOpArray *oa) {
 }
 
 /* ====================== Commands lookup and execution ===================== */
-
+/**
+ * 根据sds.name找到对应redis命令
+ * @param name
+ * @return
+ */
 struct redisCommand *lookupCommand(sds name) {
     return dictFetchValue(server.commands, name);
 }

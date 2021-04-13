@@ -52,7 +52,9 @@ struct _rio {
      * all the data that was read or written so far. The method should be
      * designed so that can be called with the current checksum, and the buf
      * and len fields pointing to the new block of data to add to the checksum
-     * computation. */
+     * computation.
+     * 这是一个更新校验和的函数
+     * */
     void (*update_cksum)(struct _rio *, const void *buf, size_t len);
 
     /* The current checksum and flags (see RIO_FLAG_*) */
@@ -116,17 +118,31 @@ static inline size_t rioWrite(rio *r, const void *buf, size_t len) {
     return 1;
 }
 
+/**
+ * 尝试从 rio结构中读取len长度的数据 并写入到buf中
+ * @param r
+ * @param buf
+ * @param len
+ * @return
+ */
 static inline size_t rioRead(rio *r, void *buf, size_t len) {
+    // 如果之前记录无数据可读取 就不会触发 read api  因为read是一个内核态操作 比较耗时 所以这样能节省开销
     if (r->flags & RIO_FLAG_READ_ERROR) return 0;
     while (len) {
+        // 如果有指定单次读取的最大长度 且本次读取长度超过了最大长度  也就是分多次读取
         size_t bytes_to_read = (r->max_processing_chunk && r->max_processing_chunk < len) ? r->max_processing_chunk : len;
+
+        // 代表无数据可读取
         if (r->read(r,buf,bytes_to_read) == 0) {
             r->flags |= RIO_FLAG_READ_ERROR;
             return 0;
         }
+        // 如果设置了校验和函数  调用并更新校验和
         if (r->update_cksum) r->update_cksum(r,buf,bytes_to_read);
+        // 移动buf的起始指针 避免数据覆盖
         buf = (char*)buf + bytes_to_read;
         len -= bytes_to_read;
+        // 使用该rio结构处理过多少数据
         r->processed_bytes += bytes_to_read;
     }
     return 1;

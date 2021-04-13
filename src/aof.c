@@ -688,6 +688,10 @@ struct client *createAOFClient(void) {
     return c;
 }
 
+/**
+ * 释放参数
+ * @param c
+ */
 void freeFakeClientArgv(struct client *c) {
     int j;
 
@@ -753,7 +757,7 @@ int loadAppendOnlyFile(char *filename) {
      * 检测aof文件中是否有记录rdb的信息 如果有就代表该aof文件是以rdb中的数据作为基准点 记录之后追加的数据
      * */
     char sig[5]; /* "REDIS" */
-    // 如果文件没有以
+    // 如果文件没有以 REDIS开头 代表与rdb文件无关 需要seek到0的位置
     if (fread(sig,1,5,fp) != 5 || memcmp(sig,"REDIS",5) != 0) {
         /* No RDB preamble, seek back at 0 offset. */
         if (fseek(fp,0,SEEK_SET) == -1) goto readerr;
@@ -763,6 +767,7 @@ int loadAppendOnlyFile(char *filename) {
 
         serverLog(LL_NOTICE,"Reading RDB preamble from AOF file...");
         if (fseek(fp,0,SEEK_SET) == -1) goto readerr;
+        // 通过该文件信息 初始化rdb文件  文件本身数据的读写是通过rio
         rioInitWithFile(&rdb,fp);
         if (rdbLoadRio(&rdb,RDBFLAGS_AOF_PREAMBLE,NULL) != C_OK) {
             serverLog(LL_WARNING,"Error reading the RDB preamble of the AOF file, AOF loading aborted");
@@ -772,7 +777,9 @@ int loadAppendOnlyFile(char *filename) {
         }
     }
 
-    /* Read the actual AOF file, in REPL format, command by command. */
+    /* Read the actual AOF file, in REPL format, command by command.
+     * 此时才开始真正读取 aof数据
+     * */
     while(1) {
         int argc, j;
         unsigned long len;
@@ -781,54 +788,77 @@ int loadAppendOnlyFile(char *filename) {
         sds argsds;
         struct redisCommand *cmd;
 
-        /* Serve the clients from time to time */
+        /* Serve the clients from time to time
+         * 每当轮询1000次后 触发一次下面的逻辑
+         * */
         if (!(loops++ % 1000)) {
             loadingProgress(ftello(fp));
             processEventsWhileBlocked();
             processModuleLoadingProgressEvent(1);
         }
 
+        // 每次读取128长度的数据
         if (fgets(buf,sizeof(buf),fp) == NULL) {
             if (feof(fp))
                 break;
             else
                 goto readerr;
         }
+        // 看来每次写入也是以128为一个单位  并且首字符要求必须是 *
         if (buf[0] != '*') goto fmterr;
+        // 相当于是空数据 这种情况是不允许的
         if (buf[1] == '\0') goto readerr;
+        // 第一个有效字符代表参数的数量
         argc = atoi(buf+1);
         if (argc < 1) goto fmterr;
 
         /* Load the next command in the AOF as our fake client
-         * argv. */
+         * argv.
+         * 写入到redis中的每个数据中包含多个(至少一个)redisObject(robj)
+         * */
         argv = zmalloc(sizeof(robj*)*argc);
+
+        // 看来client每次都是以redisObject为单位向server写入数据
         fakeClient->argc = argc;
         fakeClient->argv = argv;
 
+        // 从fp中读取robj对象 并设置到argv中
         for (j = 0; j < argc; j++) {
             /* Parse the argument len. */
+            // 继续从fp中读取数据到buffer
             char *readres = fgets(buf,sizeof(buf),fp);
+
+            // 这2种属于异常情况
             if (readres == NULL || buf[0] != '$') {
                 fakeClient->argc = j; /* Free up to j-1. */
+                // 将之前设置到client中的参数释放
                 freeFakeClientArgv(fakeClient);
                 if (readres == NULL)
                     goto readerr;
                 else
                     goto fmterr;
             }
+
+            // 将此时buf中的第一个字符转换成一个长度信息
             len = strtol(buf+1,NULL,10);
 
-            /* Read it into a string object. */
+            /* Read it into a string object.
+             * 构建等大的 sds结构
+             * */
             argsds = sdsnewlen(SDS_NOINIT,len);
+
+            // 将数据填充到sds中  如果失败 释放client之前的参数
             if (len && fread(argsds,len,1,fp) == 0) {
                 sdsfree(argsds);
                 fakeClient->argc = j; /* Free up to j-1. */
                 freeFakeClientArgv(fakeClient);
                 goto readerr;
             }
+
+            // 填充 argv
             argv[j] = createObject(OBJ_STRING,argsds);
 
-            /* Discard CRLF. */
+            /* Discard CRLF. 丢弃回车和换行符 */
             if (fread(buf,2,1,fp) == 0) {
                 fakeClient->argc = j+1; /* Free up to j. */
                 freeFakeClientArgv(fakeClient);
@@ -837,6 +867,7 @@ int loadAppendOnlyFile(char *filename) {
         }
 
         /* Command lookup */
+        // 此时已经完成了一个指令的数据填充  sds无法对应到有效的指令时 退出系统
         cmd = lookupCommand(argv[0]->ptr);
         if (!cmd) {
             serverLog(LL_WARNING,
@@ -845,15 +876,20 @@ int loadAppendOnlyFile(char *filename) {
             exit(1);
         }
 
+        // 如果本次cmd是一个复合命令
         if (cmd == server.multiCommand) valid_before_multi = valid_up_to;
 
-        /* Run the command in the context of a fake client */
+        /* Run the command in the context of a fake client
+         * 设置client此时执行的指令 以及上一个执行的指令
+         * */
         fakeClient->cmd = fakeClient->lastcmd = cmd;
+        // TODO 先忽略组合指令
         if (fakeClient->flags & CLIENT_MULTI &&
             fakeClient->cmd->proc != execCommand)
         {
             queueMultiCommand(fakeClient);
         } else {
+            // 通过client处理单个指令
             cmd->proc(fakeClient);
         }
 

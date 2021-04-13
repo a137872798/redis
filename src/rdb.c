@@ -92,7 +92,9 @@ int rdbSaveType(rio *rdb, unsigned char type) {
 
 /* Load a "type" in RDB format, that is a one byte unsigned integer.
  * This function is not only used to load object types, but also special
- * "types" like the end-of-file type, the EXPIRE type, and so forth. */
+ * "types" like the end-of-file type, the EXPIRE type, and so forth.
+ * 加载type字段
+ * */
 int rdbLoadType(rio *rdb) {
     unsigned char type;
     if (rioRead(rdb,&type,1) == 0) return -1;
@@ -1996,7 +1998,9 @@ void startLoadingFile(FILE *fp, char* filename, int rdbflags) {
     startLoading(sb.st_size, rdbflags);
 }
 
-/* Refresh the loading progress info */
+/* Refresh the loading progress info
+ * 刷新已经加载的信息
+ * */
 void loadingProgress(off_t pos) {
     server.loading_loaded_bytes = pos;
     if (server.stat_peak_memory < zmalloc_used_memory())
@@ -2038,19 +2042,31 @@ void stopSaving(int success) {
 }
 
 /* Track loading progress in order to serve client's from time to time
-   and if needed calculate rdb checksum  */
+   and if needed calculate rdb checksum
+   跟踪进度 同时更新校验和
+   @param 数据会被更新该对象中
+   @param 存储数据的buffer
+   @param 要读取多少数据
+   */
 void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
+    // 代表开启了rdb校验和
     if (server.rdb_checksum)
+        // 更新 r.checksum
         rioGenericUpdateChecksum(r, buf, len);
+    // 代表 processed_bytes + len 没有越界
     if (server.loading_process_events_interval_bytes &&
         (r->processed_bytes + len)/server.loading_process_events_interval_bytes > r->processed_bytes/server.loading_process_events_interval_bytes)
     {
         /* The DB can take some non trivial amount of time to load. Update
          * our cached time since it is used to create and update the last
-         * interaction time with clients and for other important things. */
+         * interaction time with clients and for other important things.
+         * 更新 server.time
+         * */
         updateCachedTime(0);
+        // TODO 看来进度要上报给master?
         if (server.masterhost && server.repl_state == REPL_STATE_TRANSFER)
             replicationSendNewlineToMaster();
+        // 更新已经加载的数据量
         loadingProgress(r->processed_bytes);
         processEventsWhileBlocked();
         processModuleLoadingProgressEvent(0);
@@ -2058,23 +2074,35 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
 }
 
 /* Load an RDB file from the rio stream 'rdb'. On success C_OK is returned,
- * otherwise C_ERR is returned and 'errno' is set accordingly. */
+ * otherwise C_ERR is returned and 'errno' is set accordingly.
+ * 从rio中读取数据 该结构与rdb文件有关
+ *
+ * */
 int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
     uint64_t dbid;
     int type, rdbver;
+    // 每个db 对象实际上就是一个字典 这个key应该是namespace 在jedis的api中都要指定namespace + key + value
     redisDb *db = server.db+0;
     char buf[1024];
 
+    // 初始化更新校验和的函数
     rdb->update_cksum = rdbLoadProgressCallback;
+    // 每次最多处理多少数据
     rdb->max_processing_chunk = server.loading_process_events_interval_bytes;
+
+    // 这里读取固定的长度9 TODO 在读取过程中 还会触发 progress事件 先忽略处理逻辑
     if (rioRead(rdb,buf,9) == 0) goto eoferr;
+    // 设置终止标记 这样buf就可以使用字符串的api了  算是c本身的特性
     buf[9] = '\0';
+    // 要求前5个字符必须是redis
     if (memcmp(buf,"REDIS",5) != 0) {
         serverLog(LL_WARNING,"Wrong signature trying to load DB from file");
         errno = EINVAL;
         return C_ERR;
     }
+    // 将下一个字符转换成数字
     rdbver = atoi(buf+5);
+    // 这是rdb文件结构的版本号吧
     if (rdbver < 1 || rdbver > RDB_VERSION) {
         serverLog(LL_WARNING,"Can't handle RDB format version %d",rdbver);
         errno = EINVAL;
@@ -2085,14 +2113,20 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
     long long lru_idle = -1, lfu_freq = -1, expiretime = -1, now = mstime();
     long long lru_clock = LRU_CLOCK();
 
+    // 开始加载文件中的数据 并且转换成rdb结构
     while(1) {
         sds key;
         robj *val;
 
-        /* Read type. */
+        /* Read type.
+         * 读取一个byte 代表type
+         * */
         if ((type = rdbLoadType(rdb)) == -1) goto eoferr;
 
-        /* Handle special types. */
+        /* Handle special types.
+         * 这里检测type类型 某些类型可能标志着数据写入错误
+         * TODO 下面具体的读取逻辑先不看 等到不同的写入时 再进行比较
+         * */
         if (type == RDB_OPCODE_EXPIRETIME) {
             /* EXPIRETIME: load an expire associated with the next key
              * to load. Note that after loading an expire we need to

@@ -123,7 +123,9 @@ static size_t rioFileWrite(rio *r, const void *buf, size_t len) {
     return retval;
 }
 
-/* Returns 1 or 0 for success/failure. */
+/* Returns 1 or 0 for success/failure.
+ * 从一个rio流中读取 len长度的数据 并写入到buf中
+ * */
 static size_t rioFileRead(rio *r, void *buf, size_t len) {
     return fread(buf,len,1,r->io.file.fp);
 }
@@ -140,6 +142,7 @@ static int rioFileFlush(rio *r) {
 }
 
 static const rio rioFileIO = {
+        // 这些函数会赋值到 rio对象中
     rioFileRead,
     rioFileWrite,
     rioFileTell,
@@ -152,6 +155,11 @@ static const rio rioFileIO = {
     { { NULL, 0 } } /* union for io-specific vars */
 };
 
+/**
+ * 通过rio对象 对文件进行读写操作
+ * @param r
+ * @param fp
+ */
 void rioInitWithFile(rio *r, FILE *fp) {
     *r = rioFileIO;
     r->io.file.fp = fp;
@@ -383,7 +391,9 @@ void rioFreeFd(rio *r) {
 /* ---------------------------- Generic functions ---------------------------- */
 
 /* This function can be installed both in memory and file streams when checksum
- * computation is needed. */
+ * computation is needed.
+ * 更新校验和信息
+ * */
 void rioGenericUpdateChecksum(rio *r, const void *buf, size_t len) {
     r->cksum = crc64(r->cksum,buf,len);
 }
