@@ -2300,17 +2300,17 @@ void createSharedObjects(void) {
 void initServerConfig(void) {
     int j;
 
-    // 这里初始化 server的时间信息
+    // 更新server此时的时间信息
     updateCachedTime(1);
     // 生成一个随机的16进制字符设置到 runid中
     getRandomHexChars(server.runid, CONFIG_RUN_ID_SIZE);
     // 在末尾追加 终止符号
     server.runid[CONFIG_RUN_ID_SIZE] = '\0';
-    // 初始化副本id
+    // 使用一个随机数初始化副本id
     changeReplicationId();
-    // 清空2号副本id
+    // 清空replid2
     clearReplicationId2();
-    // 每秒调用次数??? 默认为10
+    // 每秒调用次数
     server.hz = CONFIG_DEFAULT_HZ; /* Initialize it ASAP, even if it may get
                                       updated later after loading the config.
                                       This value may be used before the server
@@ -2325,54 +2325,59 @@ void initServerConfig(void) {
     server.bindaddr_count = 0;
     // socket权限 默认是0
     server.unixsocketperm = CONFIG_DEFAULT_UNIX_SOCKET_PERM;
+    // 开启的连接数量
     server.ipfd_count = 0;
     server.tlsfd_count = 0;
+    // 此时管理的socket套接字
     server.sofd = -1;
     server.active_expire_enabled = 1;
     // 客户端缓冲区大小
     server.client_max_querybuf_len = PROTO_MAX_QUERYBUF_LEN;
     server.saveparams = NULL;
-    // 代表此时还没有进行加载
+    // 代表此时还没有从 aof/rdb中恢复数据
     server.loading = 0;
-    // 返回一个字符串的副本指针
+    // 默认情况下 logfile指向 ""
     server.logfile = zstrdup(CONFIG_DEFAULT_LOGFILE);
     // 刚启动时 aof处于关闭状态
     server.aof_state = AOF_OFF;
     server.aof_rewrite_base_size = 0;
     server.aof_rewrite_scheduled = 0;
     server.aof_flush_sleep = 0;
-    // 获取当前时间
+    // 将最近一次刷盘时间置空
     server.aof_last_fsync = time(NULL);
     server.aof_rewrite_time_last = -1;
     server.aof_rewrite_time_start = -1;
-    // 初始化时 rewrite对应的状态为成功
+    // 最近一次aof操作成功
     server.aof_lastbgrewrite_status = C_OK;
+    // 当计数值不为0 代表等待刷盘
     server.aof_delayed_fsync = 0;
     server.aof_fd = -1;
+    // aof每次操作会指定一个db
     server.aof_selected_db = -1; /* Make sure the first time will not match */
     server.aof_flush_postponed_start = 0;
     server.pidfile = NULL;
     server.active_defrag_running = 0;
     server.notify_keyspace_events = 0;
     server.blocked_clients = 0;
-    // 将blocks数组清空
+    // 代表此时没有被block的client  什么情况下client会被阻塞???
     memset(server.blocked_clients_by_type, 0,
            sizeof(server.blocked_clients_by_type));
     server.shutdown_asap = 0;
-    // 生成一个配置文件名的副本指针
+    // 默认的集群配置文件名为 nodes.config
     server.cluster_configfile = zstrdup(CONFIG_DEFAULT_CLUSTER_CONFIG_FILE);
+    // 默认集群模式允许重定向 以及进行故障转移
     server.cluster_module_flags = CLUSTER_MODULE_FLAG_NONE;
-    // 传入指定的字典定义对象 生成字典
+    // 初始化迁移缓存字典
     server.migrate_cached_sockets = dictCreate(&migrateCacheDictType, NULL);
     // 当前客户端的id
     server.next_client_id = 1; /* Client IDs, start from 1 .*/
-    // 事件循环相关的???
+    // 每次处理rdb文件的多少字节 不会一次性处理所有数据
     server.loading_process_events_interval_bytes = (1024 * 1024 * 2);
 
     // 跟lru相关 先放着
     server.lruclock = getLRUClock();
 
-    // 清空之前RDB相关的参数
+    // 清空有关刷盘的参数
     resetServerSaveParams();
 
     // 下面是一些刷盘参数 代表如果在指定的时间内超过多少次数据变化就刷盘
@@ -2383,6 +2388,7 @@ void initServerConfig(void) {
     /* Replication related */
     server.masterauth = NULL;
     server.masterhost = NULL;
+    // 这是redis的默认端口
     server.masterport = 6379;
     server.master = NULL;
     server.cached_master = NULL;
@@ -2403,11 +2409,9 @@ void initServerConfig(void) {
     server.repl_backlog_off = 0;
     server.repl_no_slaves_since = time(NULL);
 
-    // 上面重制了有关副本的属性
-
     /*
      * Client output buffer limits
-     * 这里按照不同的客户端类型 设置限流参数
+     * 这里按照不同的客户端类型 设置输出缓冲区限流参数
      * 目前3种类型 normal, slave, pubsub
      */
     for (j = 0; j < CLIENT_TYPE_OBUF_COUNT; j++)
@@ -2426,9 +2430,9 @@ void initServerConfig(void) {
      * initial configuration, since command names may be changed via
      * redis.conf using the rename-command directive.
      * 创建一个存储了所有指令的字典 有关指令的dictType是内置的
+     * 需要2个字典的理由是 redis.conf可能会为某个command重命名 这样就需要一个不受影响的字典
      * */
     server.commands = dictCreate(&commandTableDictType, NULL);
-    // 看来存在2种command
     server.orig_commands = dictCreate(&commandTableDictType, NULL);
     // 填充 command字典
     populateCommandTable();
@@ -2461,7 +2465,7 @@ void initServerConfig(void) {
      * Redis 5. However it is possible to revert it via redis.conf. */
     server.lua_always_replicate_commands = 1;
 
-    // 初始化配置项信息
+    // redis中配置项都是提前定义的 会存在一个init函数  通常就是将当前配置值赋值成配置项默认值
     initConfigValues();
 }
 
@@ -3120,7 +3124,7 @@ int populateCommandTableParseFlags(struct redisCommand *c, char *strflags) {
 
 /* Populates the Redis Command Table starting from the hard coded list
  * we have on top of redis.c file.
- * 开始填充redis指令hash桶
+ * 开始填充redisCommand字典
  */
 void populateCommandTable(void) {
     int j;
@@ -3133,8 +3137,9 @@ void populateCommandTable(void) {
         int retval1, retval2;
 
         /* Translate the command string flags description into an actual
-         * set of flags. */
-        // 将指令和描述信息填充到字典中
+         * set of flags.
+         * 解析command的描述信息并设置到command的flags中
+         * */
         if (populateCommandTableParseFlags(c, c->sflags) == C_ERR)
             serverPanic("Unsupported command flag");
 
@@ -3142,7 +3147,9 @@ void populateCommandTable(void) {
         // 将指令存储到字典中
         retval1 = dictAdd(server.commands, sdsnew(c->name), c);
         /* Populate an additional dictionary that will be unaffected
-         * by rename-command statements in redis.conf. */
+         * by rename-command statements in redis.conf.
+         * 因为redis.conf可能会为某些command重命名 所以这里要额外存在一个不受影响的map
+         * */
         retval2 = dictAdd(server.orig_commands, sdsnew(c->name), c);
         serverAssert(retval1 == DICT_OK && retval2 == DICT_OK);
     }
@@ -5136,7 +5143,7 @@ int main(int argc, char **argv) {
 
     /* We need to initialize our libraries, and the server configuration. */
 #ifdef INIT_SETPROCTITLE_REPLACEMENT
-    // 从命令行中加载启动参数
+    // 从命令行中加载启动参数 主要包含库以及server配置信息
     spt_init(argc, argv);
 #endif
     // 设置地域化仅影响字符集的比较
@@ -5156,17 +5163,16 @@ int main(int argc, char **argv) {
     uint8_t hashseed[16];
     // 生成随机种子 并设置到seed数组中
     getRandomBytes(hashseed, sizeof(hashseed));
-    // 将种子拷贝到 dict中的一个静态数组中(也就是该数组仅能够被dict.c访问)
+    // 将种子拷贝到 dict中的一个静态数组中(也就是hashseed仅能够被dict.c访问)
     dictSetHashFunctionSeed(hashseed);
-    // 检测是否开启了哨兵模式
+    // 检测是否开启了哨兵模式  哨兵模式就是借助一个哨兵节点监控redis集群的运行情况 并在master宕机时自动推举新的slave节点
     server.sentinel_mode = checkForSentinelMode(argc, argv);
     // 初始化 server 的配置信息
     initServerConfig();
     // ACL子系统必须被初始化 因为基础的网络层代码和客户端依赖于它 这里会设置一个默认用户 没有密码并且具备所有权限
     ACLInit(); /* The ACL subsystem must be initialized ASAP because the
                   basic networking code and client creation depends on it. */
-    // 初始化系统模块 主要就是初始化了一个内置于module的client对象 以及往module字典中插入了一系列api 同时在该方法的最后为
-    // 当前线程申请了一个互斥锁
+    // 初始化系统模块 主要就是初始化了一个内置于module的client对象 以及往module字典中插入了一系列api
     moduleInitModulesSystem();
 
     // 目前是NOOP
@@ -5185,7 +5191,7 @@ int main(int argc, char **argv) {
     /* We need to init sentinel right now as parsing the configuration file
      * in sentinel mode will have the effect of populating the sentinel
      * data structures with master nodes to monitor. */
-    // TODO 如果开启了哨兵模式 需要做一些初始化工作
+    // TODO 如果开启了哨兵模式 需要做一些初始化工作 先忽略哨兵模式
     if (server.sentinel_mode) {
         initSentinelConfig();
         initSentinel();

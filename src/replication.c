@@ -1284,7 +1284,9 @@ void changeReplicationId(void) {
 
 /* Clear (invalidate) the secondary replication ID. This happens, for
  * example, after a full resynchronization, when we start a new replication
- * history. */
+ * history.
+ * 清空 replid2
+ * */
 void clearReplicationId2(void) {
     memset(server.replid2,'0',sizeof(server.replid));
     server.replid2[CONFIG_RUN_ID_SIZE] = '\0';

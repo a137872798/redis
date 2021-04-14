@@ -455,12 +455,14 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
  *
  * The function returns the number of events processed.
  * @param flags 根据flags的信息 判断要处理哪些事件
+ * 当main线程在完成了server的初始化后 会开始执行事件循环
  * */
 int aeProcessEvents(aeEventLoop *eventLoop, int flags) {
     int processed = 0, numevents;
 
     /* Nothing to do? return ASAP
      * 如果不需要处理时间事件 和 文件事件 直接返回
+     * 对应定时任务 和 连接/读/写事件
      * */
     if (!(flags & AE_TIME_EVENTS) && !(flags & AE_FILE_EVENTS)) return 0;
 
@@ -468,19 +470,22 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags) {
      * file events to process as long as we want to process time
      * events, in order to sleep until the next time event is ready
      * to fire.
-     * 当此时事件循环中 注册了句柄 或者设置了阻塞模式 就可以处理
+     * maxfd 应该就是允许接收的句柄数量 == -1 代表不处理fileEvent
+     * 不包含 AE_DONT_WAIT 就代表允许调用select() 阻塞自身
      * */
     if (eventLoop->maxfd != -1 ||
+        // 如果设置了允许阻塞等待 才会进入下面的块 否则就是自旋直到有满足条件的时间事件
         ((flags & AE_TIME_EVENTS) && !(flags & AE_DONT_WAIT))) {
         int j;
         struct timeval tv, *tvp;
         long msUntilTimer = -1;
 
-        // 计算距离最新的时间事件还有多久触发
+        // 计算距离最近的时间事件还有多久触发
         if (flags & AE_TIME_EVENTS && !(flags & AE_DONT_WAIT))
             msUntilTimer = msUntilEarliestTimer(eventLoop);
 
-        // 这里是计算等待时长
+        // 这里是计算等待时长 是这样 select的阻塞时间 就是直到下一个时间事件触发
+        // 如果没有设置时间事件 就是传入-1 select阻塞直到接收到fileEvent
         if (msUntilTimer >= 0) {
             tv.tv_sec = msUntilTimer / 1000;
             tv.tv_usec = (msUntilTimer % 1000) * 1000;
@@ -488,7 +493,9 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags) {
         } else {
             /* If we have to check for events but need to return
              * ASAP because of AE_DONT_WAIT we need to set the timeout
-             * to zero */
+             * to zero
+             * 检测是否拒绝等待  是的话将时间重置成0
+             * */
             if (flags & AE_DONT_WAIT) {
                 tv.tv_sec = tv.tv_usec = 0;
                 tvp = &tv;
@@ -521,7 +528,9 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags) {
 
         // 挨个处理每个事件
         for (j = 0; j < numevents; j++) {
+            // 从poll返回后 会将事件填充到数组中
             aeFileEvent *fe = &eventLoop->events[eventLoop->fired[j].fd];
+            // 通过mask信息来判断本次事件类型
             int mask = eventLoop->fired[j].mask;
             int fd = eventLoop->fired[j].fd;
             int fired = 0; /* Number of events fired for current fd. */
@@ -537,9 +546,12 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags) {
              * This is useful when, for instance, we want to do things
              * in the beforeSleep() hook, like fsyncing a file to disk,
              * before replying to a client.
-             * 通常会先执行读事件 在执行写事件 如果设置了barrier 那么将处理顺序倒过来
+             * socket套接字对应的句柄的掩码
+             * 读写事件的处理顺序会根据掩码值进行反转
              * */
             int invert = fe->mask & AE_BARRIER;
+
+            // 下面的操作就是根据事件类型触发 read/write函数
 
             /* Note the "fe->mask & mask & ..." code: maybe an already
              * processed event removed an element that fired and we still
@@ -547,7 +559,6 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags) {
              *
              * Fire the readable event if the call sequence is not
              * inverted.
-             * 如果设置了读事件 执行函数
              * */
             if (!invert && fe->mask & mask & AE_READABLE) {
                 fe->rfileProc(eventLoop, fd, fe->clientData, mask);
@@ -580,7 +591,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags) {
         }
     }
     /* Check time events
-     * 如果允许执行时间事件 开始处理
+     * 找到所有满足时间条件的事件 进行处理
      * */
     if (flags & AE_TIME_EVENTS)
         processed += processTimeEvents(eventLoop);
