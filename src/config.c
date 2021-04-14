@@ -96,7 +96,7 @@ configEnum supervised_mode_enum[] = {
     {"upstart", SUPERVISED_UPSTART},
     {"systemd", SUPERVISED_SYSTEMD},
     {"auto", SUPERVISED_AUTODETECT},
-    {"no", SUPERVISED_NONE},
+    {"no", SUPERVISED_NONE},  // 这个是默认值
     {NULL, 0}
 };
 
@@ -146,6 +146,7 @@ clientBufferLimitsConfig clientBufferLimitsDefaults[CLIENT_TYPE_OBUF_COUNT] = {
  * 代表包含默认数据的配置项 并且该配置值类型为boolean
  * */
 typedef struct boolConfigData {
+    // 存储配置项值的指针 也就是通过操纵typeData指针 间接修改实际存储的配置值
     int *config; /* The pointer to the server config this value is stored in */
     const int default_value; /* The default value of the config on rewrite */
     int (*is_valid_fn)(int val, char **err); /* Optional function to check validity of new value (generic doc above) */
@@ -315,22 +316,30 @@ void resetServerSaveParams(void) {
     server.saveparamslen = 0;
 }
 
+/**
+ * 代表需要从这些地方加载额外的module
+ * @param path module所在的路径
+ * @param argv 调用该api时需要的参数列表
+ * @param argc 参数数量
+ */
 void queueLoadModule(sds path, sds *argv, int argc) {
     int i;
     struct moduleLoadQueueEntry *loadmod;
 
     loadmod = zmalloc(sizeof(struct moduleLoadQueueEntry));
+    // 这里对参数做了一层转换 将字符串转换成 redisString
     loadmod->argv = zmalloc(sizeof(robj*)*argc);
     loadmod->path = sdsnew(path);
     loadmod->argc = argc;
     for (i = 0; i < argc; i++) {
         loadmod->argv[i] = createRawStringObject(argv[i],sdslen(argv[i]));
     }
+    // 将待加载的module设置到队列中 在之后进行统一加载
     listAddNodeTail(server.loadmodule_queue,loadmod);
 }
 
 /**
- * 对此时已经设置的配置项进行初始化
+ * 对此时已经设置的配置项进行初始化 (很多配置项都有默认值)
  */
 void initConfigValues() {
     for (standardConfig *config = configs; config->name != NULL; config++) {
@@ -339,8 +348,7 @@ void initConfigValues() {
 }
 
 /**
- * 基于加载的字符串读取服务端配置
- * TODO 这里先不细看
+ * @config 内部存储的是从配置文件中读取的数据流 以及启动redis时传入的选项参数
  */
 void loadServerConfigFromString(char *config) {
     char *err = NULL;
@@ -348,19 +356,27 @@ void loadServerConfigFromString(char *config) {
     int slaveof_linenum = 0;
     sds *lines;
 
+    // 将配置信息按行拆解
     lines = sdssplitlen(config,strlen(config),"\n",1,&totlines);
 
+    // 遍历每行配置值
     for (i = 0; i < totlines; i++) {
         sds *argv;
         int argc;
 
+        // 记录的是行号
         linenum = i+1;
+        // 去掉无效符号
         lines[i] = sdstrim(lines[i]," \t\r\n");
 
-        /* Skip comments and blank lines */
+        /* Skip comments and blank lines
+         * 跳过注释 或者空行
+         * */
         if (lines[i][0] == '#' || lines[i][0] == '\0') continue;
 
-        /* Split into arguments */
+        /* Split into arguments
+         * 将单行配置信息拆分
+         * */
         argv = sdssplitargs(lines[i],&argc);
         if (argv == NULL) {
             err = "Unbalanced quotes in configuration line";
@@ -376,14 +392,17 @@ void loadServerConfigFromString(char *config) {
 
         /* Iterate the configs that are standard */
         int match = 0;
+        // 遍历所有已经存在的配置项 当匹配成功时 就尝试替换配置值
         for (standardConfig *config = configs; config->name != NULL; config++) {
             if ((!strcasecmp(argv[0],config->name) ||
+            // 当配置项别名匹配时 也允许替换
                 (config->alias && !strcasecmp(argv[0],config->alias))))
             {
                 if (argc != 2) {
                     err = "wrong number of arguments";
                     goto loaderr;
                 }
+                // 通过set函数进行替换
                 if (!config->interface.set(config->data, argv[1], 0, &err)) {
                     goto loaderr;
                 }
@@ -393,31 +412,38 @@ void loadServerConfigFromString(char *config) {
             }
         }
 
+        // 代表本次是一次配置项替换操作 处理下一个配置项
         if (match) {
             sdsfreesplitres(argv,argc);
             continue;
         }
 
-        /* Execute config directives */
+        /* Execute config directives
+         * 根据配置项名称 匹配server属性  如果是bind 后面跟随的就是server的bindaddr
+         * */
         if (!strcasecmp(argv[0],"bind") && argc >= 2) {
             int j, addresses = argc-1;
 
             if (addresses > CONFIG_BINDADDR_MAX) {
                 err = "Too many bind addresses specified"; goto loaderr;
             }
-            /* Free old bind addresses */
+            /* Free old bind addresses
+             * 先释放旧的数据
+             * */
             for (j = 0; j < server.bindaddr_count; j++) {
                 zfree(server.bindaddr[j]);
             }
             for (j = 0; j < addresses; j++)
                 server.bindaddr[j] = zstrdup(argv[j+1]);
             server.bindaddr_count = addresses;
+            // unix套接字 先忽略
         } else if (!strcasecmp(argv[0],"unixsocketperm") && argc == 2) {
             errno = 0;
             server.unixsocketperm = (mode_t)strtol(argv[1], NULL, 8);
             if (errno || server.unixsocketperm > 0777) {
                 err = "Invalid socket file permissions"; goto loaderr;
             }
+            // 如果是saveParam 解析后设置到server.saveparam中
         } else if (!strcasecmp(argv[0],"save")) {
             if (argc == 3) {
                 int seconds = atoi(argv[1]);
@@ -429,12 +455,14 @@ void loadServerConfigFromString(char *config) {
             } else if (argc == 2 && !strcasecmp(argv[1],"")) {
                 resetServerSaveParams();
             }
+            // 如果是dir开头 修改工作目录
         } else if (!strcasecmp(argv[0],"dir") && argc == 2) {
             if (chdir(argv[1]) == -1) {
                 serverLog(LL_WARNING,"Can't chdir to '%s': %s",
                     argv[1], strerror(errno));
                 exit(1);
             }
+            // 指定logfile的路径
         } else if (!strcasecmp(argv[0],"logfile") && argc == 2) {
             FILE *logfp;
 
@@ -451,10 +479,13 @@ void loadServerConfigFromString(char *config) {
                 }
                 fclose(logfp);
             }
+            // 可能配置文件是嵌套的
         } else if (!strcasecmp(argv[0],"include") && argc == 2) {
             loadServerConfig(argv[1],NULL);
+            // 设置client查询缓冲区大小
         } else if ((!strcasecmp(argv[0],"client-query-buffer-limit")) && argc == 2) {
              server.client_max_querybuf_len = memtoll(argv[1],NULL);
+             // 代表本节点是某个节点的slave 或者replica 从配置项中读取master信息
         } else if ((!strcasecmp(argv[0],"slaveof") ||
                     !strcasecmp(argv[0],"replicaof")) && argc == 3) {
             slaveof_linenum = linenum;
@@ -507,6 +538,7 @@ void loadServerConfigFromString(char *config) {
         } else if (!strcasecmp(argv[0],"cluster-config-file") && argc == 2) {
             zfree(server.cluster_configfile);
             server.cluster_configfile = zstrdup(argv[1]);
+            // 指定某个client 对应的buffer限制
         } else if (!strcasecmp(argv[0],"client-output-buffer-limit") &&
                    argc == 5)
         {
@@ -537,6 +569,7 @@ void loadServerConfigFromString(char *config) {
                 goto loaderr;
             }
             server.notify_keyspace_events = flags;
+            // 追加某些用户信息
         } else if (!strcasecmp(argv[0],"user") && argc >= 2) {
             int argc_err;
             if (ACLAppendUserForLoading(argv,argc,&argc_err) == C_ERR) {
@@ -547,8 +580,10 @@ void loadServerConfigFromString(char *config) {
                 err = buf;
                 goto loaderr;
             }
+            // 代表配置文件中包含了 要额外加载的module
         } else if (!strcasecmp(argv[0],"loadmodule") && argc >= 2) {
             queueLoadModule(argv[1],&argv[2],argc-2);
+            // TODO 有关哨兵的逻辑先忽略
         } else if (!strcasecmp(argv[0],"sentinel")) {
             /* argc == 1 is handled by main() as we need to enter the sentinel
              * mode ASAP. */
@@ -567,6 +602,7 @@ void loadServerConfigFromString(char *config) {
     }
 
     /* Sanity checks. */
+    // 此时已经解析完全部配置行  集群模式下不允许强制指定masterhost TODO 这里跟redis的实现有关
     if (server.cluster_enabled && server.masterhost) {
         linenum = slaveof_linenum;
         i = linenum-1;
@@ -593,7 +629,7 @@ loaderr:
  * Both filename and options can be NULL, in such a case are considered
  * empty. This way loadServerConfig can be used to just load a file or
  * just load a string.
- * 从配置文件或者参数中加载服务端配置
+ * 使用配置文件 或者 启动项参数修改server的属性
  * */
 void loadServerConfig(char *filename, char *options) {
     sds config = sdsempty();
@@ -613,16 +649,19 @@ void loadServerConfig(char *filename, char *options) {
                 exit(1);
             }
         }
+        // 按行读取数据 并将数据都拼接到config sds结构上
         while(fgets(buf,CONFIG_MAX_LINE+1,fp) != NULL)
             config = sdscat(config,buf);
         if (fp != stdin) fclose(fp);
     }
-    /* Append the additional options */
+    /* Append the additional options
+     * 将选项追加到sds后面
+     * */
     if (options) {
         config = sdscat(config,"\n");
         config = sdscat(config,options);
     }
-    // 基于读取出来的字符串加载服务端配置
+    // 基于读取出来的字符串更新服务端配置项
     loadServerConfigFromString(config);
     sdsfree(config);
 }

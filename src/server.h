@@ -913,7 +913,8 @@ typedef struct zset {
 } zset;
 
 /**
- * 缓冲区限流是什么???
+ * 根据不同的client类型 会使用不同的限流配置
+ * 每个限流配置中 包含了软限制和硬限制
  */
 typedef struct clientBufferLimitsConfig {
     unsigned long long hard_limit_bytes;
@@ -1056,7 +1057,7 @@ struct redisServer {
     int hz;                     /* serverCron() calls frequency in hertz */
     redisDb *db;
     /**
-     * 存储了服务器支持的所有指令的字典
+     * commandTable中的所有command以name作为key 会全部存储到commands中
      */
     dict *commands;             /* Command table */
     dict *orig_commands;        /* Command table before command renaming. */
@@ -1072,12 +1073,15 @@ struct redisServer {
     int sentinel_mode;          /* True if this instance is a Sentinel. 当前实例是否是一个哨兵 */
     size_t initial_memory_usage; /* Bytes used after initialization. */
     int always_show_logo;       /* Show logo even for non-stdout logging. */
-    /* Modules */
+    /* Modules
+     * 服务器下存储了很多模块 这些模块也被称为api redis有大量的内置api 也可以从外部引入api
+     * */
     dict *moduleapi;            /* Exported core APIs dictionary for modules. */
     dict *sharedapi;            /* Like moduleapi but containing the APIs that
                                    modules share with each other. */
     // 记录在启动阶段已经加载的所有模块
     list *loadmodule_queue;     /* List of modules to load at startup. */
+    // 代表管道的2端
     int module_blocked_pipe[2]; /* Pipe used to awake the event loop if a
                                    client blocked on a module command needs
                                    to be processed. */
@@ -1091,6 +1095,7 @@ struct redisServer {
     int bindaddr_count;         /* Number of addresses in server.bindaddr[] */
     char *unixsocket;           /* UNIX socket path */
     mode_t unixsocketperm;      /* UNIX socket permission */
+    // 代表绑定到本地端口的套接字
     int ipfd[CONFIG_BINDADDR_MAX]; /* TCP socket file descriptors */
     int ipfd_count;             /* Used slots in ipfd[] */
     int tlsfd[CONFIG_BINDADDR_MAX]; /* TLS socket file descriptors */
@@ -1191,6 +1196,7 @@ struct redisServer {
     int active_defrag_cycle_max;       /* maximal effort for defrag in CPU percentage */
     unsigned long active_defrag_max_scan_fields; /* maximum number of fields of set/hash/zset/list to process from within the main dict scan */
     _Atomic size_t client_max_querybuf_len; /* Limit for client query buffer length */
+    // 默认情况下 config.c 会设置一共有16个database
     int dbnum;                      /* Total number of configured DBs */
     int supervised;                 /* 1 if supervised, 0 otherwise. */
     int supervised_mode;            /* See SUPERVISED_* */

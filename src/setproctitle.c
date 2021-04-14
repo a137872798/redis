@@ -53,6 +53,9 @@
 // 环境变量本身是c内置的 全局变量
 extern char **environ;
 
+/**
+ * 存储环境变量/启动参数
+ */
 static struct {
     /* original value */
     const char *arg0;
@@ -156,7 +159,8 @@ static int spt_copyargs(int argc, char *argv[]) {
  * @param argv 参数数组
  */
 void spt_init(int argc, char *argv[]) {
-    // 获取环境变量2级指针 这是c内置的系统变量
+
+    // 获取环境变量的指针  2级指针就代表是一组string
     char **envp = environ;
     char *base, *end, *nul, *tmp;
     int i, error;
@@ -165,11 +169,12 @@ void spt_init(int argc, char *argv[]) {
     if (!(base = argv[0]))
         return;
 
-    // 对应 '\0' 的地址
+    // end 对应 '\0' 的地址
     nul = &base[strlen(base)];
     end = nul + 1;
 
     // 这里是在计算所有参数的总长度
+    // i >= argc && argv[i] 代表实际参数数量超过argc
     for (i = 0; i < argc || (i >= argc && argv[i]); i++) {
         if (!argv[i] || argv[i] < end)
             continue;

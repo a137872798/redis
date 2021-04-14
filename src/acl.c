@@ -1048,9 +1048,11 @@ int ACLAuthenticateUser(client *c, robj *username, robj *password) {
  * creates such an ID: it uses sequential IDs, reusing the same ID for the same
  * command name, so that a command retains the same ID in case of modules that
  * are unloaded and later reloaded.
- * 通过命令名称  兑换id
+ * 通过commandName兑换id
  * */
 unsigned long ACLGetCommandID(const char *cmdname) {
+
+    // 静态变量
     static rax *map = NULL;
     static unsigned long nextid = 0;
 
@@ -1064,6 +1066,7 @@ unsigned long ACLGetCommandID(const char *cmdname) {
         sdsfree(lowername);
         return (unsigned long)id;
     }
+    // id 是递增的
     raxInsert(map,(unsigned char*)lowername,strlen(lowername),
               (void*)nextid,NULL);
     sdsfree(lowername);
@@ -1192,17 +1195,24 @@ int ACLCheckCommandPerm(client *c, int *keyidxptr) {
  *
  * When an error is detected and C_ERR is returned, the function populates
  * by reference (if not set to NULL) the argc_err argument with the index
- * of the argv vector that caused the error. */
+ * of the argv vector that caused the error.
+ * @param argv 对应配置文件中信息 必须以user开头
+ * 当从配置文件中解析到user 信息后 会插入到acl中
+ * */
 int ACLAppendUserForLoading(sds *argv, int argc, int *argc_err) {
+    // 格式校验
     if (argc < 2 || strcasecmp(argv[0],"user")) {
         if (argc_err) *argc_err = 0;
         return C_ERR;
     }
 
     /* Try to apply the user rules in a fake user to see if they
-     * are actually valid. */
+     * are actually valid.
+     * 此时创建一个虚拟用户 该用户不会存放到 User rax结构中
+     * */
     user *fakeuser = ACLCreateUnlinkedUser();
 
+    // 从第3项开始 就是用户option信息  第2项 应该是username
     for (int j = 2; j < argc; j++) {
         if (ACLSetUser(fakeuser,argv[j],sdslen(argv[j])) == C_ERR) {
             if (errno != ENOENT) {
@@ -1213,10 +1223,13 @@ int ACLAppendUserForLoading(sds *argv, int argc, int *argc_err) {
         }
     }
 
-    /* Rules look valid, let's append the user to the list. */
+    /* Rules look valid, let's append the user to the list.
+     * 创建副本
+     * */
     sds *copy = zmalloc(sizeof(sds)*argc);
     for (int j = 1; j < argc; j++) copy[j-1] = sdsdup(argv[j]);
     copy[argc-1] = NULL;
+    // 将用户信息插入到 userstoLoad中
     listAddNodeTail(UsersToLoad,copy);
     ACLFreeUser(fakeuser);
     return C_OK;

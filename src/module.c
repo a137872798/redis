@@ -881,7 +881,8 @@ void RM_SetModuleAttribs(RedisModuleCtx *ctx, const char *name, int ver, int api
 }
 
 /* Return non-zero if the module name is busy.
- * Otherwise zero is returned. */
+ * Otherwise zero is returned.
+ * */
 int RM_IsModuleNameBusy(const char *name) {
     sds modulename = sdsnew(name);
     dictEntry *de = dictFind(modules,modulename);
@@ -7268,7 +7269,7 @@ int moduleRegisterApi(const char *funcname, void *funcptr) {
 void moduleRegisterCoreAPI(void);
 
 /**
- * 初始化所有系统模块
+ * 初始化模块系统
  */
 void moduleInitModulesSystem(void) {
     moduleUnblockedClients = listCreate();
@@ -7290,9 +7291,10 @@ void moduleInitModulesSystem(void) {
      * */
     moduleCommandFilters = listCreate();
 
-    // 往模块中注册核心api
+    // 将内置的api函数存储到 server.moduleapi中  name作为key 函数指针作为value
     moduleRegisterCoreAPI();
     // 尝试创建管道 管道是一种进程间通信的工具 [0]用于读取数据 [1]用于写入数据
+    // 此时blocked_pipe还没有被初始化
     if (pipe(server.module_blocked_pipe) == -1) {
         serverLog(LL_WARNING,
             "Can't create the pipe for module blocking commands: %s",
@@ -7301,21 +7303,22 @@ void moduleInitModulesSystem(void) {
     }
     /* Make the pipe non blocking. This is just a best effort aware mechanism
      * and we do not want to block not in the read nor in the write half. */
-    // 这里认为2个文件描述符对应的是底层的2个socket句柄 将io模型调整成非阻塞模式
+    // 将通道设置成非阻塞模式  这里认为数组中存储的是2个socket句柄
     anetNonBlock(NULL,server.module_blocked_pipe[0]);
     anetNonBlock(NULL,server.module_blocked_pipe[1]);
 
-    /* Create the timers radix tree. */
-    // 创建一个rax结构 用于存储定时任务 key是什么呢?
+    /* Create the timers radix tree.
+     * 初始化存储定时任务的结构
+     * */
     Timers = raxNew();
 
     /* Setup the event listeners data structures. */
-    // 内部存储了各种监听器
+    // 初始化模块事件监听器的容器  比如插入了用户自定义模块
     RedisModule_EventListeners = listCreate();
 
     /* Our thread-safe contexts GIL must start with already locked:
      * it is just unlocked when it's safe. */
-    // 上锁 这样此时其他线程就会在这里被阻塞
+    // 此时当前线程抢占了这个锁对象
     pthread_mutex_lock(&moduleGIL);
 }
 
@@ -7764,7 +7767,7 @@ int RM_ModuleTypeReplaceValue(RedisModuleKey *key, moduleType *mt, void *new_val
 void moduleRegisterCoreAPI(void) {
     server.moduleapi = dictCreate(&moduleAPIDictType,NULL);
     server.sharedapi = dictCreate(&moduleAPIDictType,NULL);
-    // 这里以apiname作为key fun作为value存储到module字典中
+    // 这里以apiname作为key RM_apiname 作为函数指针
     REGISTER_API(Alloc);
     REGISTER_API(Calloc);
     REGISTER_API(Realloc);
