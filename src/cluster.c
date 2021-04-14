@@ -311,7 +311,7 @@ int clusterLoadConfig(char *filename) {
                     cn = createClusterNode(p,0);
                     clusterAddNode(cn);
                 }
-                // 将节点设置到slot中 TODO 此时还不知道这个slot怎么用
+                // 代表slot所有权的变更
                 if (direction == '>') {
                     server.cluster->migrating_slots_to[slot] = cn;
                 } else {
@@ -389,6 +389,7 @@ int clusterSaveConfig(int do_fsync) {
     int fd;
 
     // 因为此时即将保存集群配置 所以把save_config的标识移除
+    // 每当执行一次事件循环时 如果处理的逻辑满足集群文件刷盘的条件 就会打上标记 便于在下一次循环之前对数据进行刷盘
     server.cluster->todo_before_sleep &= ~CLUSTER_TODO_SAVE_CONFIG;
 
     /* Get the nodes description and concatenate our "vars" directive to
@@ -466,7 +467,9 @@ int clusterLockConfig(char *filename) {
 #if !defined(__sun)
     /* To lock it, we need to open the file in a way it is created if
      * it does not exist, otherwise there is a race condition with other
-     * processes. */
+     * processes.
+     * 注意这里是集群文件不存在 则新建 集群文件会记录此时集群的状态信息
+     * */
     int fd = open(filename,O_WRONLY|O_CREAT,0644);
     if (fd == -1) {
         serverLog(LL_WARNING,
@@ -509,7 +512,8 @@ void clusterUpdateMyselfFlags(void) {
     myself->flags &= ~CLUSTER_NODE_NOFAILOVER;
     myself->flags |= nofailover;
     if (myself->flags != oldflags) {
-        // 追加更新状态 和 存储集群配置文件的任务
+        // 因为集群状态发生了改变 需要设置flag 在下次事件循环之前 会检测flag的标签值 并执行相关的操作
+        // 这里设置的状态是 需要对集群配置进行持久化 以及集群状态发生了改变
         clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG|
                              CLUSTER_TODO_UPDATE_STATE);
     }
@@ -543,21 +547,21 @@ void clusterInit(void) {
     }
     // 这里维护的是所有无法连接上的节点
     server.cluster->stats_pfail_nodes = 0;
-    // 集群节点数组 一开始全部重置成0
+    // 每次用户调用api时 key会根据一定的hash算法定位到某个slot下 而每个slot被一个server持有  初始化时 并不知道slot属于哪个节点
     memset(server.cluster->slots,0, sizeof(server.cluster->slots));
 
-    // 清空有关迁移/导入信息的数据
+    // 清空slot迁移的相关数据
     clusterCloseAllSlots();
 
     /* Lock the cluster config file to make sure every node uses
      * its own nodes.conf.
-     * 对集群配置文件上锁 (进程锁)
+     * 对集群配置文件上锁 (进程锁) 如果文件不存在则新建
      * */
     if (clusterLockConfig(server.cluster_configfile) == C_ERR)
         exit(1);
 
     /* Load or create a new nodes configuration.
-     * 加载集群配置文件
+     * 解析集群配置文件信息
      * */
     if (clusterLoadConfig(server.cluster_configfile) == C_ERR) {
         /* No configuration found. We will just use the random name provided
@@ -596,8 +600,7 @@ void clusterInit(void) {
         exit(1);
     } else {
         int j;
-
-        // 在事件循环中注册accept事件
+        // 在事件循环中注册accept事件  这里注册的是cfd(监听集群内部连接的socket句柄 同时使用的handler也与ipfd的不一样)
         for (j = 0; j < server.cfd_count; j++) {
             if (aeCreateFileEvent(server.el, server.cfd[j], AE_READABLE,
                 clusterAcceptHandler, NULL) == AE_ERR)
@@ -607,8 +610,9 @@ void clusterInit(void) {
     }
 
     /* The slots -> keys map is a radix tree. Initialize it here. */
-    // 集群slot 到底指的是什么 ???
+    // 记录此时存在于slot中的所有key  key的数据量可能会很大所以才采用这种数据结构 它的好处是可以进行变更  fst结构传入的数据有大小要求(该算法只允许插入的数据比之前都大 并且一旦冻结就无法修改)
     server.cluster->slots_to_keys = raxNew();
+    // 集群初始化时 还不清楚集群中存在哪些key
     memset(server.cluster->slots_keys_count,0,
            sizeof(server.cluster->slots_keys_count));
 
@@ -619,7 +623,7 @@ void clusterInit(void) {
     myself->port = port;
     myself->cport = port+CLUSTER_PORT_INCR;
 
-    // 这个集群总线端口是什么  是监听集群内消息的端口么
+    // 如果指定了集群消息总线的端口 进行覆盖  这2个端口默认为0
     if (server.cluster_announce_port)
         myself->port = server.cluster_announce_port;
     if (server.cluster_announce_bus_port)
@@ -4124,7 +4128,7 @@ int verifyClusterConfigWithData(void) {
      * */
     for (j = 0; j < CLUSTER_SLOTS; j++) {
 
-        // 跳过不包含key的slot TODO 这些数据是什么时候填充进去的???
+        // 当集群刚初始化时 每个slot内的key为0
         if (!countKeysInSlot(j)) continue; /* No keys in this slot. */
         /* Check if we are assigned to this slot or if we are importing it.
          * In both cases check the next slot as the configuration makes

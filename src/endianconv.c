@@ -68,7 +68,9 @@ void memrev32(void *p) {
 }
 
 /* Toggle the 64 bit unsigned integer pointed by *p from little endian to
- * big endian */
+ * big endian
+ * 将小端法改成大端法
+ * */
 void memrev64(void *p) {
     unsigned char *x = p, t;
 

@@ -128,7 +128,9 @@ int connHasReadHandler(connection *conn) {
     return conn->read_handler != NULL;
 }
 
-/* Associate a private data pointer with the connection */
+/* Associate a private data pointer with the connection
+ * 一般来说 data 就是client
+ * */
 void connSetPrivateData(connection *conn, void *data) {
     conn->private_data = data;
 }
@@ -389,6 +391,11 @@ int connBlock(connection *conn) {
     return anetBlock(NULL, conn->fd);
 }
 
+/**
+ * 将连接配置成非阻塞模式
+ * @param conn
+ * @return
+ */
 int connNonBlock(connection *conn) {
     if (conn->fd == -1) return C_ERR;
     return anetNonBlock(NULL, conn->fd);

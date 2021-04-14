@@ -33,6 +33,8 @@
 
 #define CONN_INFO_LEN   32
 
+// redis自己封装的conn对象 用于适配操作系统层接收到的连接
+
 struct aeEventLoop;
 typedef struct connection connection;
 
@@ -76,6 +78,7 @@ struct connection {
     ConnectionCallbackFunc conn_handler;
     ConnectionCallbackFunc write_handler;
     ConnectionCallbackFunc read_handler;
+    // socket文件句柄
     int fd;
 };
 

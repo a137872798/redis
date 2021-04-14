@@ -7387,6 +7387,7 @@ void moduleUnregisterCommands(struct RedisModule *module) {
 /* Load a module and initialize it. On success C_OK is returned, otherwise
  * C_ERR is returned.
  * 在指定了某个module的路径后 根据参数信息进行加载
+ * module_argv 中每个参数都是 redisString对象
  * */
 int moduleLoad(const char *path, void **module_argv, int module_argc) {
     // 这里声明了一个函数指针
@@ -7395,7 +7396,7 @@ int moduleLoad(const char *path, void **module_argv, int module_argc) {
 
     // 初始化一个空的模块上下文对象
     RedisModuleCtx ctx = REDISMODULE_CTX_INIT;
-    // 在初始化模块时 会创建一个client对象
+    // 在初始化模块时 会创建一个client对象  这里上下文的client指向的是那个可复用的client
     ctx.client = moduleFreeContextReusedClient;
 
     // 将client.db 指向 server.db[id]

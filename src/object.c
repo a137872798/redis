@@ -184,7 +184,9 @@ robj *createStringObjectFromLongLongForValue(long long value) {
  * however this results in loss of precision. Otherwise exp format is used
  * and the output of snprintf() is not modified.
  *
- * The 'humanfriendly' option is used for INCRBYFLOAT and HINCRBYFLOAT. */
+ * The 'humanfriendly' option is used for INCRBYFLOAT and HINCRBYFLOAT.
+ * @param humanfriendly 是否要求返回的字符串是 人类可以读懂的格式
+ * */
 robj *createStringObjectFromLongDouble(long double value, int humanfriendly) {
     char buf[MAX_LONG_DOUBLE_CHARS];
     int len = ld2string(buf,sizeof(buf),value,humanfriendly? LD_STR_HUMAN: LD_STR_AUTO);

@@ -796,11 +796,13 @@ typedef struct client {
     int multibulklen;       /* Number of multi bulk arguments left to read. */
     long bulklen;           /* Length of bulk argument in multi bulk request. */
     list *reply;            /* List of reply objects to send to the client. */
+    // reply中数据总长
     unsigned long long reply_bytes; /* Tot bytes of objects in reply list. */
     size_t sentlen;         /* Amount of bytes already sent in the current
                                buffer or object being sent. */
     time_t ctime;           /* Client creation time. */
     time_t lastinteraction; /* Time of the last interaction, used for timeout */
+    // 代表最近一次client缓冲区 达到soft限制的时间点
     time_t obuf_soft_limit_reached_time;
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
     int authenticated;      /* Needed when the default user requires auth. */
@@ -829,6 +831,7 @@ typedef struct client {
     dict *pubsub_channels;  /* channels a client is interested in (SUBSCRIBE) */
     list *pubsub_patterns;  /* patterns a client is interested in (SUBSCRIBE) */
     sds peerid;             /* Cached peer ID. */
+    // 维护client链表的尾节点
     listNode *client_list_node; /* list node in client list */
     RedisModuleUserChangedFunc auth_callback; /* Module callback to execute
                                                * when the authenticated user
@@ -919,6 +922,7 @@ typedef struct zset {
 typedef struct clientBufferLimitsConfig {
     unsigned long long hard_limit_bytes;
     unsigned long long soft_limit_bytes;
+    // 连续达到soft限制的时间间隔如果小于该值 忽略
     time_t soft_limit_seconds;
 } clientBufferLimitsConfig;
 
@@ -1101,16 +1105,20 @@ struct redisServer {
     int tlsfd[CONFIG_BINDADDR_MAX]; /* TLS socket file descriptors */
     int tlsfd_count;            /* Used slots in tlsfd[] */
     int sofd;                   /* Unix socket file descriptor */
+    // 针对集群内部节点开放的socket句柄
     int cfd[CONFIG_BINDADDR_MAX];/* Cluster bus listening socket */
     int cfd_count;              /* Used slots in cfd[] */
     list *clients;              /* List of active clients */
+    // 存储了所有需要关闭的client  他们一般是因为reply数据超过了缓冲区大小 reply应该是等待client回复的数据
     list *clients_to_close;     /* Clients to close asynchronously */
+    // 代表需要往这些client中写入数据
     list *clients_pending_write; /* There is to write or install handler. */
     list *clients_pending_read;  /* Client has pending read socket buffers. */
     list *slaves, *monitors;    /* List of slaves and MONITORs */
     client *current_client;     /* Current client executing the command. */
     rax *clients_timeout_table; /* Radix tree for blocked clients timeouts. */
     long fixed_time_expire;     /* If > 0, expire keys against server.mstime. */
+    // 通过clientid 能够检索到client对象 相比链表结构 查询耗时更少 这里的id用的是大端法
     rax *clients_index;         /* Active clients dictionary by client ID. */
     int clients_paused;         /* True if clients are currently paused */
     mstime_t clients_pause_end_time; /* Time when we undo clients_paused */

@@ -2973,7 +2973,7 @@ void initServer(void) {
      * operations incrementally, like clients timeout, eviction of unaccessed
      * expired keys and so forth.
      * 创建一个timeEvent对象 并设置到ae中
-     * TODO 注意之后触发的函数(serverCron) 但是事件循环在创建后并没有fork出新的进程，应该还是要再初始化完成后由当前进程轮询事件循环
+     * TODO 当执行 aeMain后 会先执行该定时任务
      * */
     if (aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL) == AE_ERR) {
         serverPanic("Can't create event loop timers.");
@@ -2983,6 +2983,7 @@ void initServer(void) {
     /* Create an event handler for accepting new connections in TCP and Unix
      * domain sockets.
      * 每个socket句柄被包装成一个 fileEvent对象 并存储在事件循环中
+     * 当接收到新的连接时 会使用acceptTcpHandler进行处理
      * */
     for (j = 0; j < server.ipfd_count; j++) {
         if (aeCreateFileEvent(server.el, server.ipfd[j], AE_READABLE,
@@ -3007,7 +3008,7 @@ void initServer(void) {
 
     /* Register a readable event for the pipe used to awake the event loop
      * when a blocked client in a module needs attention.
-     * 这里注册了一些阻塞通道
+     * 这里也将pipe的输入端注册到事件循环上
      * */
     if (aeCreateFileEvent(server.el, server.module_blocked_pipe[0], AE_READABLE,
                           moduleBlockedClientPipeReadable, NULL) == AE_ERR) {
@@ -3065,7 +3066,7 @@ void initServer(void) {
 void InitServerLast() {
     // 开启各种后台线程  负责文件关闭/持久化/释放对象
     bioInit();
-    // 初始化io线程 负责处理client相关的读写事件
+    // 初始化io线程 (负责与client的读写事件)
     initThreadedIO();
     // 设置线程内存总开销
     set_jemalloc_bg_thread(server.jemalloc_bg_thread);
@@ -5354,15 +5355,15 @@ int main(int argc, char **argv) {
 #ifdef __linux__
         linuxMemoryWarnings();
 #endif
-        // 某些模块在解析配置文件时被存储到server.module_queue中 这里尝试加载它们 TODO 内部还涉及到了事件监听器 回调函数等
+        // 某些模块在解析配置文件时被存储到server.module_queue中 这里尝试加载它们 TODO 内部还涉及到了事件监听器 此时先不去了解
         moduleLoadFromQueue();
         // 开始加载acl的用户 在初始化过程中 一开始会设置一个默认用户 具备全部权限
-        // 这里是从UsersToLoad或者acl配置文件中加载用户信息
+        // 这里是从UsersToLoad或者acl配置文件中加载用户信息   (在配置文件中可能会直接写入某个user信息 他们就存储在usersToLoad中 也可能在配置文件中指定了acl.config)
         ACLLoadUsersAtStartup();
 
         // server某些组件的初始化 必须先确保module加载完毕 这里就是进行一些最后的初始化
         InitServerLast();
-        // 从磁盘中恢复之前的数据  这里涉及到 aof/rdb fakeClient/command 等结构
+        // 从磁盘中恢复之前的数据  这里涉及到 aof/rdb fakeClient/command 等结构 TODO 因为主要写入逻辑是通过command的函数 这里先不细看
         loadDataFromDisk();
         // 检测是否开启集群模式
         if (server.cluster_enabled) {
@@ -5374,7 +5375,8 @@ int main(int argc, char **argv) {
                 exit(1);
             }
         }
-        // 根据此时准备好的连接数 打印日志 应该是3次握手中收到了第一个连接请求 在服务端还需要调用accept才会真正建立连接(阻塞)
+
+        // 代表该服务器开启了监听连接的套接字
         if (server.ipfd_count > 0 || server.tlsfd_count > 0)
             serverLog(LL_NOTICE, "Ready to accept connections");
         if (server.sofd > 0)
