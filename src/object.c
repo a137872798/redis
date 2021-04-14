@@ -80,7 +80,9 @@ robj *makeObjectShared(robj *o) {
 }
 
 /* Create a string object with encoding OBJ_ENCODING_RAW, that is a plain
- * string object where o->ptr points to a proper sds string. */
+ * string object where o->ptr points to a proper sds string.
+ * 将一个普通字符串 转换成 redisString
+ * */
 robj *createRawStringObject(const char *ptr, size_t len) {
     return createObject(OBJ_STRING, sdsnewlen(ptr,len));
 }

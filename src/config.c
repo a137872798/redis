@@ -96,7 +96,7 @@ configEnum supervised_mode_enum[] = {
     {"upstart", SUPERVISED_UPSTART},
     {"systemd", SUPERVISED_SYSTEMD},
     {"auto", SUPERVISED_AUTODETECT},
-    {"no", SUPERVISED_NONE},
+    {"no", SUPERVISED_NONE},  // 这个是默认值
     {NULL, 0}
 };
 
@@ -316,17 +316,25 @@ void resetServerSaveParams(void) {
     server.saveparamslen = 0;
 }
 
+/**
+ * 代表需要从这些地方加载额外的module
+ * @param path module所在的路径
+ * @param argv 调用该api时需要的参数列表
+ * @param argc 参数数量
+ */
 void queueLoadModule(sds path, sds *argv, int argc) {
     int i;
     struct moduleLoadQueueEntry *loadmod;
 
     loadmod = zmalloc(sizeof(struct moduleLoadQueueEntry));
+    // 这里对参数做了一层转换 将字符串转换成 redisString
     loadmod->argv = zmalloc(sizeof(robj*)*argc);
     loadmod->path = sdsnew(path);
     loadmod->argc = argc;
     for (i = 0; i < argc; i++) {
         loadmod->argv[i] = createRawStringObject(argv[i],sdslen(argv[i]));
     }
+    // 将待加载的module设置到队列中 在之后进行统一加载
     listAddNodeTail(server.loadmodule_queue,loadmod);
 }
 
@@ -572,8 +580,10 @@ void loadServerConfigFromString(char *config) {
                 err = buf;
                 goto loaderr;
             }
+            // 代表配置文件中包含了 要额外加载的module
         } else if (!strcasecmp(argv[0],"loadmodule") && argc >= 2) {
             queueLoadModule(argv[1],&argv[2],argc-2);
+            // TODO 有关哨兵的逻辑先忽略
         } else if (!strcasecmp(argv[0],"sentinel")) {
             /* argc == 1 is handled by main() as we need to enter the sentinel
              * mode ASAP. */
@@ -592,6 +602,7 @@ void loadServerConfigFromString(char *config) {
     }
 
     /* Sanity checks. */
+    // 此时已经解析完全部配置行  集群模式下不允许强制指定masterhost TODO 这里跟redis的实现有关
     if (server.cluster_enabled && server.masterhost) {
         linenum = slaveof_linenum;
         i = linenum-1;
@@ -650,7 +661,7 @@ void loadServerConfig(char *filename, char *options) {
         config = sdscat(config,"\n");
         config = sdscat(config,options);
     }
-    // 基于读取出来的字符串加载服务端配置
+    // 基于读取出来的字符串更新服务端配置项
     loadServerConfigFromString(config);
     sdsfree(config);
 }

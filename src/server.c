@@ -2790,7 +2790,7 @@ void resetServerStats(void) {
 void initServer(void) {
     int j;
 
-    // 这里注册一些信号处理器 当捕获到相关信号时触发函数 SIG_IGN 应该是忽略信号
+    // 这里注册一些信号处理器 当捕获到相关信号时触发函数 下面这2种信号会被忽略
     signal(SIGHUP, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
     // 安装处理终止/打断信号的处理器
@@ -2807,6 +2807,7 @@ void initServer(void) {
 
     /* Initialization after setting defaults from the config system. */
     // 主要是做一些初始化工作 某些字段初始化成radix或者链表结构  radix的优点是节省内存 但是在插入/删除时耗时会比hash桶要大
+    // 默认情况下aof_enabled为0  代表的意思是只使用aof
     server.aof_state = server.aof_enabled ? AOF_ON : AOF_OFF;
     server.hz = server.config_hz;
     // 获取此时正在运行的进程id
@@ -2829,7 +2830,7 @@ void initServer(void) {
     server.clients_paused = 0;
     server.system_memory_size = zmalloc_get_memory_size();
 
-    // 专门监听tls请求相关的端口
+    // 安全层端口
     if (server.tls_port && tlsConfigure(&server.tls_ctx_config) == C_ERR) {
         serverLog(LL_WARNING, "Failed to configure TLS. Check logs for more info.");
         exit(1);
@@ -2853,7 +2854,7 @@ void initServer(void) {
 
     /* Open the TCP listening socket for the user commands. */
 
-    // 绑定端口 并开始监听连接事件
+    // 绑定端口 并开始监听连接事件  默认端口为6379
     if (server.port != 0 &&
         listenToPort(server.port, server.ipfd, &server.ipfd_count) == C_ERR)
         exit(1);
@@ -4842,11 +4843,12 @@ static void sigShutdownHandler(int sig) {
      * on disk. */
     // 已经接收过中断信号 并继续收到时
     if (server.shutdown_asap && sig == SIGINT) {
+        // 代表用户坚持立即退出
         serverLogFromHandler(LL_WARNING, "You insist... exiting now.");
-        // 移除临时文件  临时文件名格式为 temp-(pid).rdb
+        // 移除rdb的临时文件  临时文件名格式为 temp-(pid).rdb
         rdbRemoveTempFile(getpid());
         exit(1); /* Exit with an error since this was not a clean shutdown. */
-        // 在服务器还处于加载过程中时 接收到中断信号 退出程序
+        // 此时服务器还处于数据恢复阶段 直接退出就好
     } else if (server.loading) {
         serverLogFromHandler(LL_WARNING, "Received shutdown signal during loading, exiting now.");
         exit(0);
@@ -5300,10 +5302,11 @@ int main(int argc, char **argv) {
         serverLog(LL_WARNING, "Configuration loaded");
     }
 
-    // TODO 是否使用监督模式
+    // 是否使用监督模式 默认为SUPERVISED_NONE 也就是不使用
     server.supervised = redisIsSupervised(server.supervised_mode);
     // 不阻塞当前线程 而是通过一条后台线程运行redis
     int background = server.daemonize && !server.supervised;
+    // 这里会分离出一个子进程 并且父进程会正常退出
     if (background) daemonize();
 
     // 启动服务器

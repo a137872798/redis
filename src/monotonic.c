@@ -155,7 +155,6 @@ static void monotonicInit_posix() {
 
 
 /**
- * 单调初始化???
  * @return
  */
 const char * monotonicInit() {
