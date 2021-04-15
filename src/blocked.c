@@ -131,6 +131,7 @@ void processUnblockedClients(void) {
  *    call processQueryBuffer*() on it.
  * 4. With this function instead we can put the client in a queue that will
  *    process it for queries ready to be executed at a safe time.
+ *    某个client 从阻塞状态解除了
  */
 void queueClientForReprocessing(client *c) {
     /* The client may already be into the unblocked list because of a previous

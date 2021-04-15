@@ -1100,12 +1100,17 @@ user *ACLGetUserByName(const char *name, size_t namelen) {
  * ACL_DENIED_CMD or ACL_DENIED_KEY is returned: the first in case the
  * command cannot be executed because the user is not allowed to run such
  * command, the second if the command is denied because the user is trying
- * to access keys that are not among the specified patterns. */
+ * to access keys that are not among the specified patterns.
+ * 检测client上挂载的用户是否有权限执行command
+ * */
 int ACLCheckCommandPerm(client *c, int *keyidxptr) {
     user *u = c->user;
+    // 此时要执行的command
     uint64_t id = c->cmd->id;
 
-    /* If there is no associated user, the connection can run anything. */
+    /* If there is no associated user, the connection can run anything.
+     * 没有关联用户 就具备全部权限
+     * */
     if (u == NULL) return ACL_OK;
 
     /* Check if the user can execute this command. */

@@ -680,6 +680,12 @@ int getLongDoubleFromObjectOrReply(client *c, robj *o, long double *target, cons
     return C_OK;
 }
 
+/**
+ * 获取 o->ptr的值 并认为它是一个longlong类型
+ * @param o
+ * @param target
+ * @return
+ */
 int getLongLongFromObject(robj *o, long long *target) {
     long long value;
 
@@ -699,6 +705,14 @@ int getLongLongFromObject(robj *o, long long *target) {
     return C_OK;
 }
 
+/**
+ * 从redisObject上获取 o->ptr的值
+ * @param c
+ * @param o
+ * @param target
+ * @param msg
+ * @return
+ */
 int getLongLongFromObjectOrReply(client *c, robj *o, long long *target, const char *msg) {
     long long value;
     if (getLongLongFromObject(o, &value) != C_OK) {

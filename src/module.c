@@ -316,7 +316,9 @@ typedef struct RedisModuleCommandFilter {
     int flags;
 } RedisModuleCommandFilter;
 
-/* Registered filters */
+/* Registered filters
+ * 在client执行command前要经过一组过滤器
+ * */
 static list *moduleCommandFilters;
 
 typedef void (*RedisModuleForkDoneHandler) (int exitcode, int bysignal, void *user_data);
@@ -6373,6 +6375,10 @@ int RM_UnregisterCommandFilter(RedisModuleCtx *ctx, RedisModuleCommandFilter *fi
     return REDISMODULE_OK;
 }
 
+/**
+ * 在使用client执行command之前 可能要经过一系列的过滤器
+ * @param c
+ */
 void moduleCallCommandFilters(client *c) {
     if (listLength(moduleCommandFilters) == 0) return;
 

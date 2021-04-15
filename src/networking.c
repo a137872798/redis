@@ -2120,8 +2120,11 @@ int processMultibulkBuffer(client *c) {
  * 在某个command执行完后调用
  * */
 void commandProcessed(client *c) {
+
+    // 如果最后一个调用的command函数是 ping函数
     int cmd_is_ping = c->cmd && c->cmd->proc == pingCommand;
     long long prev_offset = c->reploff;
+    // TODO
     if (c->flags & CLIENT_MASTER && !(c->flags & CLIENT_MULTI)) {
         /* Update the applied replication offset of our master. */
         c->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
@@ -2130,7 +2133,9 @@ void commandProcessed(client *c) {
     /* Don't reset the client structure for clients blocked in a
      * module blocking command, so that the reply callback will
      * still be able to access the client argv and argc field.
-     * The client will be reset in unblockClientFromModule(). */
+     * The client will be reset in unblockClientFromModule().
+     * 只要client 没有被阻塞 就重置client的某些属性
+     * */
     if (!(c->flags & CLIENT_BLOCKED) ||
         c->btype != BLOCKED_MODULE)
     {
@@ -2142,7 +2147,9 @@ void commandProcessed(client *c) {
      * to understand how much of the replication stream was actually
      * applied to the master state: this quantity, and its corresponding
      * part of the replication stream, will be propagated to the
-     * sub-replicas and to the replication backlog. */
+     * sub-replicas and to the replication backlog.
+     * TODO 有关主从的逻辑先忽略
+     * */
     if (c->flags & CLIENT_MASTER) {
         long long applied = c->reploff - prev_offset;
         long long prev_master_repl_meaningful_offset = server.master_repl_meaningful_offset;
@@ -2165,13 +2172,18 @@ void commandProcessed(client *c) {
  * 2. calls commandProcessed() if the command was handled.
  *
  * The function returns C_ERR in case the client was freed as a side effect
- * of processing the command, otherwise C_OK is returned. */
+ * of processing the command, otherwise C_OK is returned.
+ * 通过client执行某个command
+ * */
 int processCommandAndResetClient(client *c) {
     int deadclient = 0;
     server.current_client = c;
+    // TODO 执行命令的逻辑在server中实现 先不看
     if (processCommand(c) == C_OK) {
+        // 命令成功执行后 触发后置函数
         commandProcessed(c);
     }
+    // 失败时应该就会清楚这个标记
     if (server.current_client == NULL) deadclient = 1;
     server.current_client = NULL;
     /* freeMemoryIfNeeded may flush slave output buffers. This may
@@ -2183,18 +2195,28 @@ int processCommandAndResetClient(client *c) {
 /* This function is called every time, in the client structure 'c', there is
  * more query buffer to process, because we read more data from the socket
  * or because a client was blocked and later reactivated, so there could be
- * pending query buffer, already representing a full command, to process. */
+ * pending query buffer, already representing a full command, to process.
+ * 处理client内部的 querybuf 并转换成之后调用command需要的参数
+ * */
 void processInputBuffer(client *c) {
-    /* Keep processing while there is something in the input buffer */
+    /* Keep processing while there is something in the input buffer
+     * 只要缓冲区中还有数据就不断读取
+     * */
     while(c->qb_pos < sdslen(c->querybuf)) {
-        /* Return if clients are paused. */
+        /* Return if clients are paused.
+         * clientsArePaused 代表此时暂停对所有client的请求处理
+         * */
         if (!(c->flags & CLIENT_SLAVE) && clientsArePaused()) break;
 
-        /* Immediately abort if the client is in the middle of something. */
+        /* Immediately abort if the client is in the middle of something.
+         * 当前client处于阻塞状态也不会处理 可以理解为单client的暂停处理
+         * */
         if (c->flags & CLIENT_BLOCKED) break;
 
         /* Don't process more buffers from clients that have already pending
-         * commands to execute in c->argv. */
+         * commands to execute in c->argv.
+         * 此时正在处理client的上一条命令
+         * */
         if (c->flags & CLIENT_PENDING_COMMAND) break;
 
         /* Don't process input from the master while there is a busy script
@@ -2207,10 +2229,14 @@ void processInputBuffer(client *c) {
          * written to the client. Make sure to not let the reply grow after
          * this flag has been set (i.e. don't process more commands).
          *
-         * The same applies for clients we want to terminate ASAP. */
+         * The same applies for clients we want to terminate ASAP.
+         * 即将关闭的client 也不再处理
+         * */
         if (c->flags & (CLIENT_CLOSE_AFTER_REPLY|CLIENT_CLOSE_ASAP)) break;
 
-        /* Determine request type when unknown. */
+        /* Determine request type when unknown.
+         * 判断是否设置了请求方式
+         * */
         if (!c->reqtype) {
             if (c->querybuf[c->qb_pos] == '*') {
                 c->reqtype = PROTO_REQ_MULTIBULK;
@@ -2219,10 +2245,14 @@ void processInputBuffer(client *c) {
             }
         }
 
+        // 根据不同的请求方式 调用不同的处理方法
         if (c->reqtype == PROTO_REQ_INLINE) {
+            // 代表一次只传输一个执行一个command的参数
             if (processInlineBuffer(c) != C_OK) break;
             /* If the Gopher mode and we got zero or one argument, process
-             * the request in Gopher mode. */
+             * the request in Gopher mode.
+             * 忽略小白鼠调用方式  也就是试探性质的调用
+             * */
             if (server.gopher_enabled &&
                 ((c->argc == 1 && ((char*)(c->argv[0]->ptr))[0] == '/') ||
                   c->argc == 0))
@@ -2232,25 +2262,33 @@ void processInputBuffer(client *c) {
                 c->flags |= CLIENT_CLOSE_AFTER_REPLY;
                 break;
             }
+            // 解析多条command参数
         } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
             if (processMultibulkBuffer(c) != C_OK) break;
         } else {
             serverPanic("Unknown request type");
         }
 
-        /* Multibulk processing could see a <= 0 length. */
+        /* Multibulk processing could see a <= 0 length.
+         * 异常情况
+         * */
         if (c->argc == 0) {
             resetClient(c);
         } else {
             /* If we are in the context of an I/O thread, we can't really
              * execute the command here. All we can do is to flag the client
-             * as one that needs to process the command. */
+             * as one that needs to process the command.
+             * 因为这里是解析client传过来的数据  也就是io线程 command好像都会交给一条专门的线程来执行 所以数据填充完后就结束任务了
+             * 追加一个待执行command的标记
+             * */
             if (c->flags & CLIENT_PENDING_READ) {
                 c->flags |= CLIENT_PENDING_COMMAND;
                 break;
             }
 
-            /* We are finally ready to execute the command. */
+            /* We are finally ready to execute the command.
+             * 代表此时是执行command的线程 那么就可以通过之前解析出来的参数调用command
+             * */
             if (processCommandAndResetClient(c) == C_ERR) {
                 /* If the client is no longer valid, we avoid exiting this
                  * loop and trimming the client buffer later. So we return
@@ -2260,7 +2298,9 @@ void processInputBuffer(client *c) {
         }
     }
 
-    /* Trim to pos */
+    /* Trim to pos
+     * 丢弃pos之前的数据
+     * */
     if (c->qb_pos) {
         sdsrange(c->querybuf,c->qb_pos,-1);
         c->qb_pos = 0;
@@ -2278,7 +2318,9 @@ void readQueryFromClient(connection *conn) {
     size_t qblen;
 
     /* Check if we want to read from the client later when exiting from
-     * the event loop. This is the case if threaded I/O is enabled. */
+     * the event loop. This is the case if threaded I/O is enabled.
+     * 如果此时无法直接读取数据 需要等待io线程执行该方法
+     * */
     if (postponeClientRead(c)) return;
 
     readlen = PROTO_IOBUF_LEN;
@@ -2291,16 +2333,22 @@ void readQueryFromClient(connection *conn) {
     if (c->reqtype == PROTO_REQ_MULTIBULK && c->multibulklen && c->bulklen != -1
         && c->bulklen >= PROTO_MBULK_BIG_ARG)
     {
+        // 这个 计算出来是一个长度信息
         ssize_t remaining = (size_t)(c->bulklen+2)-sdslen(c->querybuf);
 
         /* Note that the 'remaining' variable may be zero in some edge case,
-         * for example once we resume a blocked client after CLIENT PAUSE. */
+         * for example once we resume a blocked client after CLIENT PAUSE.
+         * 应该是代表如果本次剩余长度小于默认要读取的数据长度  修改readlen
+         * */
         if (remaining > 0 && remaining < readlen) readlen = remaining;
     }
 
+    // 之前已经存储的长度
     qblen = sdslen(c->querybuf);
     if (c->querybuf_peak < qblen) c->querybuf_peak = qblen;
+    // 额外开辟readlen的长度
     c->querybuf = sdsMakeRoomFor(c->querybuf, readlen);
+    // 通过conn上绑定的fd 读取readlen长度的数据 并设置到qbuf中
     nread = connRead(c->conn, c->querybuf+qblen, readlen);
     if (nread == -1) {
         if (connGetState(conn) == CONN_STATE_CONNECTED) {
@@ -2314,6 +2362,7 @@ void readQueryFromClient(connection *conn) {
         serverLog(LL_VERBOSE, "Client closed connection");
         freeClientAsync(c);
         return;
+        // 如果当前是master节点 将数据存储到pending_qb中
     } else if (c->flags & CLIENT_MASTER) {
         /* Append the query buffer to the pending (not applied) buffer
          * of the master. We'll use this buffer later in order to have a
@@ -2323,9 +2372,11 @@ void readQueryFromClient(connection *conn) {
     }
 
     sdsIncrLen(c->querybuf,nread);
+    // 更新最近一次和该client交互的时间
     c->lastinteraction = server.unixtime;
     if (c->flags & CLIENT_MASTER) c->read_reploff += nread;
     server.stat_net_input_bytes += nread;
+    // 此时为单个client预设的buf空间超过了最大值  代表有过多的数据未消化
     if (sdslen(c->querybuf) > server.client_max_querybuf_len) {
         sds ci = catClientInfoString(sdsempty(),c), bytes = sdsempty();
 
@@ -2338,10 +2389,17 @@ void readQueryFromClient(connection *conn) {
     }
 
     /* There is more data in the client input buffer, continue parsing it
-     * in case to check if there is a full command to execute. */
+     * in case to check if there is a full command to execute.
+     * 处理从读取到qb中的数据
+     * */
      processInputBuffer(c);
 }
 
+/**
+ * 分别读取reply/qb此时的占用空间
+ * @param longest_output_list
+ * @param biggest_input_buffer
+ */
 void getClientsMaxBuffers(unsigned long *longest_output_list,
                           unsigned long *biggest_input_buffer) {
     client *c;
@@ -2370,7 +2428,9 @@ void getClientsMaxBuffers(unsigned long *longest_output_list,
  *
  * On failure the function still populates 'peerid' with the "?:0" string
  * in case you want to relax error checking or need to display something
- * anyway (see anetPeerToString implementation for more info). */
+ * anyway (see anetPeerToString implementation for more info).
+ * 将conn结构中绑定的对端信息  填充到变量上
+ * */
 void genClientPeerId(client *client, char *peerid,
                             size_t peerid_len) {
     if (client->flags & CLIENT_UNIX_SOCKET) {
@@ -2454,6 +2514,11 @@ sds catClientInfoString(sds s, client *client) {
         client->user ? client->user->name : "(superuser)");
 }
 
+/**
+ * 将匹配某个type的client信息输出
+ * @param type
+ * @return
+ */
 sds getAllClientsInfoString(int type) {
     listNode *ln;
     listIter li;
@@ -2478,13 +2543,17 @@ sds getAllClientsInfoString(int type) {
  * Setting an empty string as name has the effect of unsetting the
  * currently set name: the client will remain unnamed.
  *
- * This function is also used to implement the HELLO SETNAME option. */
+ * This function is also used to implement the HELLO SETNAME option.
+ * 释放client上绑定的原name 并设置一个新name
+ * */
 int clientSetNameOrReply(client *c, robj *name) {
     int len = sdslen(name->ptr);
     char *p = name->ptr;
 
     /* Setting the client name to an empty string actually removes
-     * the current name. */
+     * the current name.
+     * 代表本次只是一次清理工作
+     * */
     if (len == 0) {
         if (c->name) decrRefCount(c->name);
         c->name = NULL;
@@ -2502,12 +2571,17 @@ int clientSetNameOrReply(client *c, robj *name) {
             return C_ERR;
         }
     }
+    // 更新name属性
     if (c->name) decrRefCount(c->name);
     c->name = name;
     incrRefCount(name);
     return C_OK;
 }
 
+/**
+ * 处理一个client相关的command
+ * @param c
+ */
 void clientCommand(client *c) {
     listNode *ln;
     listIter li;
@@ -2533,9 +2607,11 @@ void clientCommand(client *c) {
 NULL
         };
         addReplyHelp(c, help);
+        // 本次想要获取的是client的id信息
     } else if (!strcasecmp(c->argv[1]->ptr,"id") && c->argc == 2) {
         /* CLIENT ID */
         addReplyLongLong(c,c->id);
+        // 获取满足type要求的所有client信息
     } else if (!strcasecmp(c->argv[1]->ptr,"list")) {
         /* CLIENT LIST */
         int type = -1;
@@ -2555,6 +2631,7 @@ NULL
         sdsfree(o);
     } else if (!strcasecmp(c->argv[1]->ptr,"reply") && c->argc == 3) {
         /* CLIENT REPLY ON|OFF|SKIP */
+        // 开启reply 代表允许向client写入数据  在prepareWrite中会判断
         if (!strcasecmp(c->argv[2]->ptr,"on")) {
             c->flags &= ~(CLIENT_REPLY_SKIP|CLIENT_REPLY_OFF);
             addReply(c,shared.ok);
@@ -2567,6 +2644,7 @@ NULL
             addReply(c,shared.syntaxerr);
             return;
         }
+        // 接收该client的命令去 关闭其他client
     } else if (!strcasecmp(c->argv[1]->ptr,"kill")) {
         /* CLIENT KILL <ip:port>
          * CLIENT KILL <option> [value] ... <option> [value] */
@@ -2577,6 +2655,7 @@ NULL
         int skipme = 1;
         int killed = 0, close_this_client = 0;
 
+        // ignore
         if (c->argc == 3) {
             /* Old style syntax: CLIENT KILL <addr> */
             addr = c->argv[2]->ptr;
@@ -2588,12 +2667,15 @@ NULL
             while(i < c->argc) {
                 int moreargs = c->argc > i+1;
 
+                // 代表通过id去匹配目标数据
                 if (!strcasecmp(c->argv[i]->ptr,"id") && moreargs) {
                     long long tmp;
 
+                    // i+1应该是对应id信息 并且 该值被包装成了redisObject 现在就是要取出之前存储的值
                     if (getLongLongFromObjectOrReply(c,c->argv[i+1],&tmp,NULL)
                         != C_OK) return;
                     id = tmp;
+                    // 解析type信息
                 } else if (!strcasecmp(c->argv[i]->ptr,"type") && moreargs) {
                     type = getClientTypeByName(c->argv[i+1]->ptr);
                     if (type == -1) {
@@ -2603,6 +2685,7 @@ NULL
                     }
                 } else if (!strcasecmp(c->argv[i]->ptr,"addr") && moreargs) {
                     addr = c->argv[i+1]->ptr;
+                    // 要求处理匹配绑定的user的client
                 } else if (!strcasecmp(c->argv[i]->ptr,"user") && moreargs) {
                     user = ACLGetUserByName(c->argv[i+1]->ptr,
                                             sdslen(c->argv[i+1]->ptr));
@@ -2611,6 +2694,7 @@ NULL
                             (char*) c->argv[i+1]->ptr);
                         return;
                     }
+                    // 代表要跳过自身
                 } else if (!strcasecmp(c->argv[i]->ptr,"skipme") && moreargs) {
                     if (!strcasecmp(c->argv[i+1]->ptr,"yes")) {
                         skipme = 1;
@@ -2624,6 +2708,7 @@ NULL
                     addReply(c,shared.syntaxerr);
                     return;
                 }
+                // 因为参数是以kv形式被解析的  每次跳过2位
                 i += 2;
             }
         } else {
@@ -2631,7 +2716,9 @@ NULL
             return;
         }
 
-        /* Iterate clients killing all the matching clients. */
+        /* Iterate clients killing all the matching clients.
+         * 这里完成了相关参数的解析  遍历此时记录的所有client 进行匹配
+         * */
         listRewind(server.clients,&li);
         while ((ln = listNext(&li)) != NULL) {
             client *client = listNodeValue(ln);
@@ -2657,12 +2744,16 @@ NULL
             else
                 addReply(c,shared.ok);
         } else {
+            // 将处理结果返回给client
             addReplyLongLong(c,killed);
         }
 
         /* If this client has to be closed, flag it as CLOSE_AFTER_REPLY
-         * only after we queued the reply to its output buffers. */
+         * only after we queued the reply to its output buffers.
+         * 发起关闭指令的client 被标记成异步关闭
+         * */
         if (close_this_client) c->flags |= CLIENT_CLOSE_AFTER_REPLY;
+        // client 需要从阻塞状态解除
     } else if (!strcasecmp(c->argv[1]->ptr,"unblock") && (c->argc == 3 ||
                                                           c->argc == 4))
     {
@@ -2681,18 +2772,23 @@ NULL
                 return;
             }
         }
+        // 取出本次针对的clientid
         if (getLongLongFromObjectOrReply(c,c->argv[2],&id,NULL)
             != C_OK) return;
         struct client *target = lookupClientByID(id);
+        // 解除block状态 需要一个原因 分为超时和异常
         if (target && target->flags & CLIENT_BLOCKED) {
             if (unblock_error)
                 addReplyError(target,
                     "-UNBLOCKED client unblocked via CLIENT UNBLOCK");
             else
+                // 将超时信息反馈给待恢复的目标client
                 replyToBlockedClientTimedOut(target);
             unblockClient(target);
+            // 返回1 代表成功
             addReply(c,shared.cone);
         } else {
+            // 返回0
             addReply(c,shared.czero);
         }
     } else if (!strcasecmp(c->argv[1]->ptr,"setname") && c->argc == 3) {
@@ -2705,6 +2801,7 @@ NULL
             addReplyBulk(c,c->name);
         else
             addReplyNull(c);
+        // 将client设置成暂停状态
     } else if (!strcasecmp(c->argv[1]->ptr,"pause") && c->argc == 3) {
         /* CLIENT PAUSE */
         long long duration;
@@ -3226,8 +3323,11 @@ void pauseClients(mstime_t end) {
 }
 
 /* Return non-zero if clients are currently paused. As a side effect the
- * function checks if the pause time was reached and clear it. */
+ * function checks if the pause time was reached and clear it.
+ * 判断当前client是否被暂停了
+ * */
 int clientsArePaused(void) {
+    // 此时已经过了暂停时间 解除标记
     if (server.clients_paused &&
         server.clients_pause_end_time < server.mstime)
     {
@@ -3246,6 +3346,7 @@ int clientsArePaused(void) {
             /* Don't touch slaves and blocked clients.
              * The latter pending requests will be processed when unblocked. */
             if (c->flags & (CLIENT_SLAVE|CLIENT_BLOCKED)) continue;
+            // 检查此时不再阻塞的client 并加入到队列中
             queueClientForReprocessing(c);
         }
     }
@@ -3532,8 +3633,15 @@ int handleClientsWithPendingWritesUsingThreads(void) {
 /* Return 1 if we want to handle the client read later using threaded I/O.
  * This is called by the readable handler of the event loop.
  * As a side effect of calling this function the client is put in the
- * pending read clients and flagged as such. */
+ * pending read clients and flagged as such.
+ * 是否需要延迟读取本地client发送的数据
+ * */
 int postponeClientRead(client *c) {
+    // 此时设置了io线程激活标识
+    // 且此时io状态为正在读取数据
+    // 此时没有处于block状态
+    // 此时没有设置 pending_read标识
+    // 满足上述条件时 将client加入到pending_read中
     if (io_threads_active &&
         server.io_threads_do_reads &&
         !ProcessingEventsWhileBlocked &&

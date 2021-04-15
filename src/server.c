@@ -3535,14 +3535,19 @@ void call(client *c, int flags) {
  *
  * If C_OK is returned the client is still alive and valid and
  * other operations can be performed by the caller. Otherwise
- * if C_ERR is returned the client was destroyed (i.e. after QUIT). */
+ * if C_ERR is returned the client was destroyed (i.e. after QUIT).
+ * 使用client来执行某个command
+ * */
 int processCommand(client *c) {
+    // 先用过滤器做一层处理
     moduleCallCommandFilters(c);
 
     /* The QUIT command is handled separately. Normal command procs will
      * go through checking for replication and QUIT will cause trouble
      * when FORCE_REPLICATION is enabled and would be implemented in
-     * a regular command proc. */
+     * a regular command proc.
+     * 代表执行的是一条退出命令
+     * */
     if (!strcasecmp(c->argv[0]->ptr, "quit")) {
         addReply(c, shared.ok);
         c->flags |= CLIENT_CLOSE_AFTER_REPLY;
@@ -3550,20 +3555,28 @@ int processCommand(client *c) {
     }
 
     /* Now lookup the command and check ASAP about trivial error conditions
-     * such as wrong arity, bad command name and so forth. */
+     * such as wrong arity, bad command name and so forth.
+     * 以client此时内部存储的参数 寻找匹配的command 并执行
+     * 内部的参数是在解析client发送的数据流时生成的
+     * */
     c->cmd = c->lastcmd = lookupCommand(c->argv[0]->ptr);
+    // 没有找到匹配的command
     if (!c->cmd) {
+        // TODO 事务相关的先不看
         flagTransaction(c);
         sds args = sdsempty();
         int i;
+        // 将异常信息写回到client
         for (i = 1; i < c->argc && sdslen(args) < 128; i++)
             args = sdscatprintf(args, "`%.*s`, ", 128 - (int) sdslen(args), (char *) c->argv[i]->ptr);
         addReplyErrorFormat(c, "unknown command `%s`, with args beginning with: %s",
                             (char *) c->argv[0]->ptr, args);
         sdsfree(args);
         return C_OK;
+        // 代表解析到的参数数量少于执行command的数量 返回异常信息
     } else if ((c->cmd->arity > 0 && c->cmd->arity != c->argc) ||
                (c->argc < -c->cmd->arity)) {
+        // TODO 同样涉及到事务
         flagTransaction(c);
         addReplyErrorFormat(c, "wrong number of arguments for '%s' command",
                             c->cmd->name);
@@ -3571,7 +3584,9 @@ int processCommand(client *c) {
     }
 
     /* Check if the user is authenticated. This check is skipped in case
-     * the default user is flagged as "nopass" and is active. */
+     * the default user is flagged as "nopass" and is active.
+     * 在执行指令前 需要验证用户是否有足够的权限
+     * */
     int auth_required = (!(DefaultUser->flags & USER_FLAG_NOPASS) ||
                          (DefaultUser->flags & USER_FLAG_DISABLED)) &&
                         !c->authenticated;
@@ -3586,7 +3601,7 @@ int processCommand(client *c) {
     }
 
     /* Check if the user can run this command according to the current
-     * ACLs. */
+     * ACLs. 检测当前用户是否有权限执行command */
     int acl_keypos;
     int acl_retval = ACLCheckCommandPerm(c, &acl_keypos);
     if (acl_retval != ACL_OK) {

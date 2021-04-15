@@ -785,10 +785,11 @@ typedef struct client {
                                represents the yet not applied portion of the
                                replication stream that we are receiving from
                                the master. */
+    // 上一次qb中最多存储的数量块大小
     size_t querybuf_peak;   /* Recent (100ms or more) peak of querybuf size. */
     int argc;               /* Num of arguments of current command. */
     robj **argv;            /* Arguments of current command. */
-    // 该client支持的所有command 以及上一条执行的命令
+    // 该client上一条执行的命令
     struct redisCommand *cmd, *lastcmd;  /* Last command executed. */
     user *user;             /* User associated with this connection. If the
                                user is set to NULL the connection can do
@@ -1124,6 +1125,7 @@ struct redisServer {
     long fixed_time_expire;     /* If > 0, expire keys against server.mstime. */
     // 通过clientid 能够检索到client对象 相比链表结构 查询耗时更少 这里的id用的是大端法
     rax *clients_index;         /* Active clients dictionary by client ID. */
+    // 当前client暂停使用
     int clients_paused;         /* True if clients are currently paused */
     mstime_t clients_pause_end_time; /* Time when we undo clients_paused */
     // 存储绑定地址时的失败信息
