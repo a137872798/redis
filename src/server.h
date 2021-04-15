@@ -788,6 +788,7 @@ typedef struct client {
     size_t querybuf_peak;   /* Recent (100ms or more) peak of querybuf size. */
     int argc;               /* Num of arguments of current command. */
     robj **argv;            /* Arguments of current command. */
+    // 该client支持的所有command 以及上一条执行的命令
     struct redisCommand *cmd, *lastcmd;  /* Last command executed. */
     user *user;             /* User associated with this connection. If the
                                user is set to NULL the connection can do
@@ -801,6 +802,7 @@ typedef struct client {
     size_t sentlen;         /* Amount of bytes already sent in the current
                                buffer or object being sent. */
     time_t ctime;           /* Client creation time. */
+    // 最近一次与client交互的时间戳
     time_t lastinteraction; /* Time of the last interaction, used for timeout */
     // 代表最近一次client缓冲区 达到soft限制的时间点
     time_t obuf_soft_limit_reached_time;
@@ -815,6 +817,8 @@ typedef struct client {
     long long read_reploff; /* Read replication offset if this is a master. */
     long long reploff;      /* Applied replication offset if this is a master. */
     long long repl_ack_off; /* Replication ack offset, if this is a slave. */
+
+    // 最后接收到该client请求的时间戳
     long long repl_ack_time;/* Replication ack time, if this is a slave. */
     long long psync_initial_offset; /* FULLRESYNC reply offset other slaves
                                        copying this slave output buffer
@@ -1165,6 +1169,7 @@ struct redisServer {
     size_t stat_peak_memory;        /* Max used memory record */
     long long stat_fork_time;       /* Time needed to perform latest fork() */
     double stat_fork_rate;          /* Fork rate in GB/sec. */
+    // 因为超过连接数上限而被关闭的conn数量
     long long stat_rejected_conn;   /* Clients rejected because of maxclients */
     long long stat_sync_full;       /* Number of full resyncs with slaves. */
     long long stat_sync_partial_ok; /* Number of accepted PSYNC requests. */
@@ -1313,6 +1318,7 @@ struct redisServer {
                                        byte in the replication backlog buffer.*/
     time_t repl_backlog_time_limit; /* Time without slaves after the backlog
                                        gets released. */
+    // 此时不存在任何slave时的时间戳
     time_t repl_no_slaves_since;    /* We have no slaves since that time.
                                        Only valid if server.slaves len is 0. */
     int repl_min_slaves_to_write;   /* Min number of slaves to write. */
@@ -1363,6 +1369,7 @@ struct redisServer {
     list *clients_waiting_acks;         /* Clients waiting in WAIT command. */
     int get_ack_from_slaves;            /* If true we send REPLCONF GETACK. */
     /* Limits */
+    // redis默认只维护10000条连接
     unsigned int maxclients;            /* Max number of simultaneous clients */
     unsigned long long maxmemory;   /* Max number of memory bytes to use */
     int maxmemory_policy;           /* Policy for key eviction */

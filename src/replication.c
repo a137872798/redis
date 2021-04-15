@@ -1029,8 +1029,12 @@ void sendBulkToSlave(connection *conn) {
 }
 
 /* Remove one write handler from the list of connections waiting to be writable
- * during rdb pipe transfer. */
+ * during rdb pipe transfer.
+ * 关闭一条与slave的连接 这个连接可以用来传输rdb数据 关闭前需要确保rdb传输完成
+ * TODO 有关rdb传输的逻辑先放着
+ * */
 void rdbPipeWriteHandlerConnRemoved(struct connection *conn) {
+    // 清除conn之前绑定的handler
     if (!connHasWriteHandler(conn))
         return;
     connSetWriteHandler(conn, NULL);
@@ -2842,7 +2846,9 @@ void replicationResurrectCachedMaster(connection *conn) {
 
 /* This function counts the number of slaves with lag <= min-slaves-max-lag.
  * If the option is active, the server will prevent writes if there are not
- * enough connected slaves with the specified lag (or less). */
+ * enough connected slaves with the specified lag (or less).
+ * 更新此时可用的slave数量
+ * */
 void refreshGoodSlavesCount(void) {
     listIter li;
     listNode *ln;

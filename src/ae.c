@@ -226,13 +226,12 @@ int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
 }
 
 /**
- * 从事件循环上删除某个事件
+ * 从事件循环上删除某个事件   一般是要断开某个连接
  * @param eventLoop
- * @param fd
+ * @param fd  对应client socket句柄
  * @param mask
  */
 void aeDeleteFileEvent(aeEventLoop *eventLoop, int fd, int mask) {
-    // 指定的偏移量超过了slot的最大值 无法删除
     if (fd >= eventLoop->setsize) return;
     // 找到对应的事件
     aeFileEvent *fe = &eventLoop->events[fd];
@@ -245,6 +244,7 @@ void aeDeleteFileEvent(aeEventLoop *eventLoop, int fd, int mask) {
      * */
     if (mask & AE_WRITABLE) mask |= AE_BARRIER;
 
+    // 在底层进行删除
     aeApiDelEvent(eventLoop, fd, mask);
     fe->mask = fe->mask & (~mask);
     // 此时移除的是最后一个事件
@@ -252,7 +252,7 @@ void aeDeleteFileEvent(aeEventLoop *eventLoop, int fd, int mask) {
         /* Update the max fd */
         int j;
 
-        // 从后往前不断定位mask为NONE的节点
+        // 从后往前找到第一个mask不为null的fd
         for (j = eventLoop->maxfd - 1; j >= 0; j--)
             if (eventLoop->events[j].mask != AE_NONE) break;
         eventLoop->maxfd = j;
@@ -528,7 +528,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags) {
 
         // 挨个处理每个事件
         for (j = 0; j < numevents; j++) {
-            // 从poll返回后 会将事件填充到数组中
+            // 从poll返回后 会将事件填充到数组中   比如使用的是epoll函数 那么fe就是epoll_event->data.fd 这个是底层操作系统封装的结构体 这时没法确定内部存储的是什么
             aeFileEvent *fe = &eventLoop->events[eventLoop->fired[j].fd];
             // 通过mask信息来判断本次事件类型
             int mask = eventLoop->fired[j].mask;

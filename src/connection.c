@@ -91,6 +91,7 @@ connection *connCreateSocket() {
  * Callers should use connGetState() and verify the created connection
  * is not in an error state (which is not possible for a socket connection,
  * but could but possible with other protocols).
+ * 生成一条新的conn对象 内部存储的句柄是客户端socket句柄
  */
 connection *connCreateAcceptedSocket(int fd) {
     connection *conn = connCreateSocket();
@@ -146,16 +147,21 @@ void *connGetPrivateData(connection *conn) {
  * move here as we implement additional connection types.
  */
 
-/* Close the connection and free resources. */
+/* Close the connection and free resources.
+ * 通过操作客户端socket句柄 实现断开连接
+ * */
 static void connSocketClose(connection *conn) {
     if (conn->fd != -1) {
+        // 将fd从事件循环中移除
         aeDeleteFileEvent(server.el,conn->fd, AE_READABLE | AE_WRITABLE);
+        // 调用操作系统api进行关闭
         close(conn->fd);
         conn->fd = -1;
     }
 
     /* If called from within a handler, schedule the close but
      * keep the connection until the handler returns.
+     * 如果该conn 有引用计数 代表此时该连接正在被使用 那么需要在之后的一个时间点进行关闭 在打上标记后先返回 (应该是在beforesleep/aftersleep 之类的时间点进行关闭)
      */
     if (connHasRefs(conn)) {
         conn->flags |= CONN_FLAG_CLOSE_SCHEDULED;
@@ -165,7 +171,15 @@ static void connSocketClose(connection *conn) {
     zfree(conn);
 }
 
+/**
+ * 当需要往conn写入数据时 会触发该方法
+ * @param conn
+ * @param data
+ * @param data_len
+ * @return
+ */
 static int connSocketWrite(connection *conn, const void *data, size_t data_len) {
+    // 通过句柄定位client的socket文件 并将数据写入
     int ret = write(conn->fd, data, data_len);
     if (ret < 0 && errno != EAGAIN) {
         conn->last_errno = errno;
@@ -197,12 +211,20 @@ static int connSocketRead(connection *conn, void *buf, size_t buf_len) {
     return ret;
 }
 
+/**
+ * 代表此时conn已经顺利连接 (通过了maxClient限制检验 并且已经生成一个对应的client)
+ * @param conn
+ * @param accept_handler
+ * @return
+ */
 static int connSocketAccept(connection *conn, ConnectionCallbackFunc accept_handler) {
     int ret = C_OK;
 
+    // 将状态修改成完成连接
     if (conn->state != CONN_STATE_ACCEPTING) return C_ERR;
     conn->state = CONN_STATE_CONNECTED;
 
+    // 每当要对该conn进行操作时需要增加引用计数 避免被意外关闭
     connIncrRefs(conn);
     if (!callHandler(conn, accept_handler)) ret = C_ERR;
     connDecrRefs(conn);
@@ -217,6 +239,7 @@ static int connSocketAccept(connection *conn, ConnectionCallbackFunc accept_hand
  * CONN_FLAG_WRITE_BARRIER set. This will ensure that the write handler is
  * always called before and not after the read handler in a single event
  * loop.
+ * 当连接变得重新可写的时候 会自动触发回调  一般就是之前的写入使得缓冲区被填满 就会注册handler
  */
 static int connSocketSetWriteHandler(connection *conn, ConnectionCallbackFunc func, int barrier) {
     if (func == conn->write_handler) return C_OK;
@@ -226,6 +249,7 @@ static int connSocketSetWriteHandler(connection *conn, ConnectionCallbackFunc fu
         conn->flags |= CONN_FLAG_WRITE_BARRIER;
     else
         conn->flags &= ~CONN_FLAG_WRITE_BARRIER;
+    // 默认情况下 是不需要监听写事件的 当缓冲区满的时候就需要监听 同时可写时移除掉事件
     if (!conn->write_handler)
         aeDeleteFileEvent(server.el,conn->fd,AE_WRITABLE);
     else

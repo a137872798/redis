@@ -714,7 +714,7 @@ int anetUnixServer(char *err, char *path, mode_t perm, int backlog)
 }
 
 /**
- * 接收新的连接
+ * 之前ae收到准备好的accept事件 应该就是接收到第一次握手请求  这里通过调用accept完成3次握手 并返回连接
  * @param err
  * @param s
  * @param sa
@@ -722,6 +722,8 @@ int anetUnixServer(char *err, char *path, mode_t perm, int backlog)
  * @return
  */
 static int anetGenericAccept(char *err, int s, struct sockaddr *sa, socklen_t *len) {
+
+    // client端的信息也会被包装成一个结构体 fd是指向该结构体的指针
     int fd;
     while(1) {
         // 可以看到这里是阻塞等待新的连接 每当接收到对应客户端连接的socket 就会返回socket对应的文件句柄
@@ -740,19 +742,22 @@ static int anetGenericAccept(char *err, int s, struct sockaddr *sa, socklen_t *l
 }
 
 /**
- * 接收一个客户端连接
+ * 在networking模块 处理socket接收到的连接数据时会转发到该方法
+ * 也就是跟socket交互的细节 被封装到anet中
  * @param err
- * @param s
- * @param ip
+ * @param s  socket句槟
+ * @param ip  需要将指针指向ip地址
  * @param ip_len
- * @param port
+ * @param port  存储端口号
  * @return
  */
 int anetTcpAccept(char *err, int s, char *ip, size_t ip_len, int *port) {
     int fd;
-    // 当接收到client 连接时 会将客户端的地址回填到该属性中
+
     struct sockaddr_storage sa;
     socklen_t salen = sizeof(sa);
+
+    // 通过调用accept 阻塞当前线程 得到描述对端信息的句柄 同时还会将对端的地址填充到sa结构中
     if ((fd = anetGenericAccept(err,s,(struct sockaddr*)&sa,&salen)) == -1)
         return ANET_ERR;
 
@@ -760,7 +765,7 @@ int anetTcpAccept(char *err, int s, char *ip, size_t ip_len, int *port) {
     if (sa.ss_family == AF_INET) {
         struct sockaddr_in *s = (struct sockaddr_in *)&sa;
 
-        // TODO 推测这里是将client的 ip/port 回填到入参上 之后再确定
+        // 只要 ip port 不为null 这里就会从addr中抽取信息并填充
         if (ip) inet_ntop(AF_INET,(void*)&(s->sin_addr),ip,ip_len);
         if (port) *port = ntohs(s->sin_port);
     } else {

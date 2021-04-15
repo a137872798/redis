@@ -143,7 +143,7 @@ void queueClientForReprocessing(client *c) {
 
 /* Unblock a client calling the right function depending on the kind
  * of operation the client is blocking for.
- * 解除client的阻塞状态
+ * TODO 解除client的阻塞状态
  * */
 void unblockClient(client *c) {
     if (c->btype == BLOCKED_LIST ||

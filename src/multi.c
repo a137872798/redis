@@ -282,7 +282,9 @@ void watchForKey(client *c, robj *key) {
 }
 
 /* Unwatch all the keys watched by this client. To clean the EXEC dirty
- * flag is up to the caller. */
+ * flag is up to the caller.
+ * 释放所有watched_keys
+ * */
 void unwatchAllKeys(client *c) {
     listIter li;
     listNode *ln;

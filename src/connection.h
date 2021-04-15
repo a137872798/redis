@@ -134,6 +134,7 @@ static inline int connBlockingConnect(connection *conn, const char *addr, int po
  *
  * The caller should NOT rely on errno. Testing for an EAGAIN-like condition, use
  * connGetState() to see if the connection state is still CONN_STATE_CONNECTED.
+ * 将数据通过conn写入到对端
  */
 static inline int connWrite(connection *conn, const void *data, size_t data_len) {
     return conn->type->write(conn, data, data_len);
