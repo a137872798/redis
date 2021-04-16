@@ -647,10 +647,10 @@ typedef struct clientReplyBlock {
  * 代表一个redis仓库  每个redis下有多个仓库
  * */
 typedef struct redisDb {
-    // 使用字典来存储key/value  key/expire
+    // 使用字典来存储key/value  其中key/value 都是redisObject类型
     dict *dict;                 /* The keyspace for this DB */
 
-    // 其他几个结构待之后理解
+    // db通过这个结构维护所有key的超时时间 因为不是所有key都有设置超时时间 所以和dict结构分开了
     dict *expires;              /* Timeout of keys with a timeout set */
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP)*/
     dict *ready_keys;           /* Blocked keys that received a PUSH */
@@ -1122,6 +1122,7 @@ struct redisServer {
     list *slaves, *monitors;    /* List of slaves and MONITORs */
     client *current_client;     /* Current client executing the command. */
     rax *clients_timeout_table; /* Radix tree for blocked clients timeouts. */
+    // 如果该值不为0  在判断key是否过期时 使用server.mstime
     long fixed_time_expire;     /* If > 0, expire keys against server.mstime. */
     // 通过clientid 能够检索到client对象 相比链表结构 查询耗时更少 这里的id用的是大端法
     rax *clients_index;         /* Active clients dictionary by client ID. */
@@ -1259,7 +1260,9 @@ struct redisServer {
     int aof_stop_sending_diff;     /* If true stop sending accumulated diffs
                                       to child process. */
     sds aof_child_diff;             /* AOF diff accumulator child side. */
-    /* RDB persistence */
+    /* RDB persistence
+     * 应该有一个生成rdb文件的后台线程 通过检测这个标记判断是否要刷盘
+     * */
     long long dirty;                /* Changes to DB from the last save */
     long long dirty_before_bgsave;  /* Used to restore dirty on failed BGSAVE */
     pid_t rdb_child_pid;            /* PID of RDB saving child */
@@ -1374,6 +1377,7 @@ struct redisServer {
     // redis默认只维护10000条连接
     unsigned int maxclients;            /* Max number of simultaneous clients */
     unsigned long long maxmemory;   /* Max number of memory bytes to use */
+    // 此时选择的内存淘汰策略
     int maxmemory_policy;           /* Policy for key eviction */
     int maxmemory_samples;          /* Pricision of random sampling */
     int lfu_log_factor;             /* LFU logarithmic counter factor. */

@@ -92,6 +92,7 @@ unsigned int getLRUClock(void) {
  * precomputed value, otherwise we need to resort to a system call. */
 unsigned int LRU_CLOCK(void) {
     unsigned int lruclock;
+    // 好像是hz低于某个值 就使用一个缓存值
     if (1000/server.hz <= LRU_CLOCK_RESOLUTION) {
         lruclock = server.lruclock;
     } else {
@@ -101,9 +102,12 @@ unsigned int LRU_CLOCK(void) {
 }
 
 /* Given an object returns the min number of milliseconds the object was never
- * requested, using an approximated LRU algorithm. */
+ * requested, using an approximated LRU algorithm.
+ * */
 unsigned long long estimateObjectIdleTime(robj *o) {
     unsigned long long lruclock = LRU_CLOCK();
+
+    // 对象上一次被使用的时间会设置到lru中
     if (lruclock >= o->lru) {
         return (lruclock - o->lru) * LRU_CLOCK_RESOLUTION;
     } else {
@@ -157,7 +161,7 @@ void evictionPoolAlloc(void) {
     struct evictionPoolEntry *ep;
     int j;
 
-    // 默认大小为16
+    // 池内默认存储16个poolEntry
     ep = zmalloc(sizeof(*ep)*EVPOOL_SIZE);
     // 这里为数组中每个元素填充属性
     for (j = 0; j < EVPOOL_SIZE; j++) {
@@ -331,7 +335,9 @@ unsigned long LFUTimeElapsed(unsigned long ldt) {
 }
 
 /* Logarithmically increment a counter. The greater is the current counter value
- * the less likely is that it gets really implemented. Saturate it at 255. */
+ * the less likely is that it gets really implemented. Saturate it at 255.
+ * 增加计数值
+ * */
 uint8_t LFULogIncr(uint8_t counter) {
     if (counter == 255) return 255;
     double r = (double)rand()/RAND_MAX;
@@ -351,11 +357,19 @@ uint8_t LFULogIncr(uint8_t counter) {
  *
  * This function is used in order to scan the dataset for the best object
  * to fit: as we check for the candidate, we incrementally decrement the
- * counter of the scanned objects if needed. */
+ * counter of the scanned objects if needed.
+ * 基于 LFU算法 计算某个value最近时间段内使用的次数  每个value对应的counter值会随着时间的流逝而减小
+ * 同时每次key的命中会增加计数值 他们共同作用的结果决定了value的优先级 或者说该value是否会被淘汰
+ * */
 unsigned long LFUDecrAndReturn(robj *o) {
+    // 前16位 代表时间范围
     unsigned long ldt = o->lru >> 8;
+    // 后8位 代表此时的计数值
     unsigned long counter = o->lru & 255;
+    // 计数值也是惰性计算的 现在通过衰减因子计算最新的计数值  具体的计算公式先不看
     unsigned long num_periods = server.lfu_decay_time ? LFUTimeElapsed(ldt) / server.lfu_decay_time : 0;
+
+    // 代表衰减了一些数值 返回计算后最新的counter
     if (num_periods)
         counter = (num_periods > counter) ? 0 : counter - num_periods;
     return counter;

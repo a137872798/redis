@@ -601,7 +601,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags) {
 
 /* Wait for milliseconds until the given file descriptor becomes
  * writable/readable/exception
- *
+ * 阻塞当前线程 直到监听的事件准备完成  一般是用于阻塞连接
  * */
 int aeWait(int fd, int mask, long long milliseconds) {
     struct pollfd pfd;

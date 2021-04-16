@@ -176,11 +176,15 @@ void handleBlockedClientsTimeout(void) {
  *
  * Note that if the timeout is zero (usually from the point of view of
  * commands API this means no timeout) the value stored into 'timeout'
- * is zero. */
+ * is zero.
+ * @param unit 代表时间单位
+ * 从redisObject中解析出超时时间
+ * */
 int getTimeoutFromObjectOrReply(client *c, robj *object, mstime_t *timeout, int unit) {
     long long tval;
     long double ftval;
 
+    // 根据不同的时间单位读取数据 实际上就是 object->ptr
     if (unit == UNIT_SECONDS) {
         if (getLongDoubleFromObjectOrReply(c,object,&ftval,
             "timeout is not a float or out of range") != C_OK)
@@ -197,6 +201,7 @@ int getTimeoutFromObjectOrReply(client *c, robj *object, mstime_t *timeout, int 
         return C_ERR;
     }
 
+    // 这是一个相对时间 需要换算成绝对时间
     if (tval > 0) {
         tval += mstime();
     }

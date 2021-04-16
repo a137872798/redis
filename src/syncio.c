@@ -45,7 +45,9 @@
 /* Write the specified payload to 'fd'. If writing the whole payload will be
  * done within 'timeout' milliseconds the operation succeeds and 'size' is
  * returned. Otherwise the operation fails, -1 is returned, and an unspecified
- * partial write could be performed against the file descriptor. */
+ * partial write could be performed against the file descriptor.
+ * 将数据以同步方式写入到对端
+ * */
 ssize_t syncWrite(int fd, char *ptr, ssize_t size, long long timeout) {
     ssize_t nwritten, ret = size;
     long long start = mstime();
@@ -67,7 +69,7 @@ ssize_t syncWrite(int fd, char *ptr, ssize_t size, long long timeout) {
         }
         if (size == 0) return ret;
 
-        /* Wait */
+        /* Wait 阻塞等待结果 */
         aeWait(fd,AE_WRITABLE,wait);
         elapsed = mstime() - start;
         if (elapsed >= timeout) {
@@ -81,7 +83,9 @@ ssize_t syncWrite(int fd, char *ptr, ssize_t size, long long timeout) {
 /* Read the specified amount of bytes from 'fd'. If all the bytes are read
  * within 'timeout' milliseconds the operation succeed and 'size' is returned.
  * Otherwise the operation fails, -1 is returned, and an unspecified amount of
- * data could be read from the file descriptor. */
+ * data could be read from the file descriptor.
+ * 同步读取数据
+ * */
 ssize_t syncRead(int fd, char *ptr, ssize_t size, long long timeout) {
     ssize_t nread, totread = 0;
     long long start = mstime();

@@ -161,6 +161,8 @@ typedef struct clusterState {
     clusterNode *slots[CLUSTER_SLOTS];
     // 记录当前server下每个slot下key的数量
     uint64_t slots_keys_count[CLUSTER_SLOTS];
+
+    // 所有key 以及计算出的hash值被存储在该rax结构中 难怪这么看重内存开销 因为这个结构可能要存储redis所有key的信息
     rax *slots_to_keys;
     /* The following fields are used to take the slave state on elections. */
     mstime_t failover_auth_time; /* Time of previous or next election. */

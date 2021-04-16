@@ -648,7 +648,9 @@ void unblockClientWaitingData(client *c) {
  * the same key again and again in the list in case of multiple pushes
  * made by a script or in the context of MULTI/EXEC.
  *
- * The list will be finally processed by handleClientsBlockedOnKeys() */
+ * The list will be finally processed by handleClientsBlockedOnKeys()
+ * 当某些等待的key被设置后 进行相关处理
+ * */
 void signalKeyAsReady(redisDb *db, robj *key) {
     readyList *rl;
 

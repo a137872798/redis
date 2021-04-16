@@ -2806,10 +2806,12 @@ NULL
         /* CLIENT PAUSE */
         long long duration;
 
+        // 从redisObject中获取超时时间信息
         if (getTimeoutFromObjectOrReply(c,c->argv[2],&duration,
                 UNIT_MILLISECONDS) != C_OK) return;
         pauseClients(duration);
         addReply(c,shared.ok);
+        // 忽略链路信息
     } else if (!strcasecmp(c->argv[1]->ptr,"tracking") && c->argc >= 3) {
         /* CLIENT TRACKING (on|off) [REDIRECT <id>] [BCAST] [PREFIX first]
          *                          [PREFIX second] [OPTIN] [OPTOUT] ... */
@@ -2927,6 +2929,8 @@ NULL
         }
         zfree(prefix);
         addReply(c,shared.ok);
+
+        // 只有开启链路模式后 才能开启缓存选项
     } else if (!strcasecmp(c->argv[1]->ptr,"caching") && c->argc >= 3) {
         if (!(c->flags & CLIENT_TRACKING)) {
             addReplyError(c,"CLIENT CACHING can be called only when the "
@@ -2957,6 +2961,7 @@ NULL
 
         /* Common reply for when we succeeded. */
         addReply(c,shared.ok);
+        // 获取链路目录
     } else if (!strcasecmp(c->argv[1]->ptr,"getredir") && c->argc == 2) {
         /* CLIENT GETREDIR */
         if (c->flags & CLIENT_TRACKING) {
@@ -3059,35 +3064,45 @@ void securityWarningCommand(client *c) {
 
 /* Rewrite the command vector of the client. All the new objects ref count
  * is incremented. The old command vector is freed, and the old objects
- * ref count is decremented. */
+ * ref count is decremented.
+ * 重写命令向量
+ * */
 void rewriteClientCommandVector(client *c, int argc, ...) {
     va_list ap;
     int j;
     robj **argv; /* The new argument vector */
 
     argv = zmalloc(sizeof(robj*)*argc);
+    // 下面这段代码可以看作是可变参数的固定使用套路 就是将参数填充到数组中
     va_start(ap,argc);
     for (j = 0; j < argc; j++) {
         robj *a;
 
+        // 填充可变参数
         a = va_arg(ap, robj*);
         argv[j] = a;
         incrRefCount(a);
     }
     /* We free the objects in the original vector at the end, so we are
      * sure that if the same objects are reused in the new vector the
-     * refcount gets incremented before it gets decremented. */
+     * refcount gets incremented before it gets decremented.
+     * 看来每个obj的引用计数最多只会到1 减少引用计数后 释放内存
+     * */
     for (j = 0; j < c->argc; j++) decrRefCount(c->argv[j]);
     zfree(c->argv);
     /* Replace argv and argc with our new versions. */
+    // 更新参数信息
     c->argv = argv;
     c->argc = argc;
+    // 更新当前client要执行的命令
     c->cmd = lookupCommandOrOriginal(c->argv[0]->ptr);
     serverAssertWithInfo(c,NULL,c->cmd != NULL);
     va_end(ap);
 }
 
-/* Completely replace the client command vector with the provided one. */
+/* Completely replace the client command vector with the provided one.
+ * 释放client现有的参数信息  并将传入的参数设置进去
+ * */
 void replaceClientCommandVector(client *c, int argc, robj **argv) {
     freeClientArgv(c);
     zfree(c->argv);
@@ -3107,7 +3122,9 @@ void replaceClientCommandVector(client *c, int argc, robj **argv) {
  * 1. Make sure there are no "holes" and all the arguments are set.
  * 2. If the original argument vector was longer than the one we
  *    want to end with, it's up to the caller to set c->argc and
- *    free the no longer used objects on c->argv. */
+ *    free the no longer used objects on c->argv.
+ *    替换其中某个参数
+ *    */
 void rewriteClientCommandArgument(client *c, int i, robj *newval) {
     robj *oldval;
 
@@ -3264,7 +3281,9 @@ void asyncCloseClientOnOutputBufferLimitReached(client *c) {
 /* Helper function used by freeMemoryIfNeeded() in order to flush slaves
  * output buffers without returning control to the event loop.
  * This is also called by SHUTDOWN for a best-effort attempt to send
- * slaves the latest writes. */
+ * slaves the latest writes.
+ * 将所有slave内囤积的数据发出  注意此时要求client已经设置了writeHandler
+ * */
 void flushSlavesOutputBuffers(void) {
     listIter li;
     listNode *ln;
@@ -3315,7 +3334,9 @@ void flushSlavesOutputBuffers(void) {
  * In such a case, the pause is extended if the duration is more than the
  * time left for the previous duration. However if the duration is smaller
  * than the time left for the previous pause, no change is made to the
- * left duration. */
+ * left duration.
+ * 将client设置成暂停状态   当client处于暂停状态时就不会继续读取数据
+ * */
 void pauseClients(mstime_t end) {
     if (!server.clients_paused || end > server.clients_pause_end_time)
         server.clients_pause_end_time = end;
@@ -3374,10 +3395,14 @@ int processEventsWhileBlocked(void) {
      * avoid handling the read part of clients using threaded I/O.
      * See https://github.com/antirez/redis/issues/6988 for more info. */
     ProcessingEventsWhileBlocked = 1;
+    // 尝试循环4次
     while (iterations--) {
         int events = 0;
+        // 这里是非等待模式 也就是非阻塞模式调用select 获取立即准备完成的事件 并执行对应的函数
         events += aeProcessEvents(server.el, AE_FILE_EVENTS|AE_DONT_WAIT);
+        // 处理在pending_write队列中的任务
         events += handleClientsWithPendingWrites();
+        // 代表此时没有可处理的事件 提前退出循环
         if (!events) break;
         count += events;
     }
@@ -3458,6 +3483,7 @@ void *IOThreadMain(void *myid) {
             // 将数据写入到目标client
             if (io_threads_op == IO_THREADS_OP_WRITE) {
                 writeToClient(c,0);
+            // 从底层缓冲区读取数据 并解析参数 同时调用本次申请执行的命令
             } else if (io_threads_op == IO_THREADS_OP_READ) {
                 readQueryFromClient(c->conn);
             } else {
@@ -3503,6 +3529,8 @@ void initThreadedIO(void) {
         pthread_mutex_init(&io_threads_mutex[i],NULL);
         // 每个线程此时待处理的数量
         io_threads_pending[i] = 0;
+
+        // TODO 这里难道会阻塞么   这样主线程不就无法继续执行了么
         pthread_mutex_lock(&io_threads_mutex[i]); /* Thread will be stopped. */
         // 每条线程开始执行任务
         if (pthread_create(&tid,NULL,IOThreadMain,(void*)(long)i) != 0) {
@@ -3513,6 +3541,10 @@ void initThreadedIO(void) {
     }
 }
 
+/**
+ * 这里认为释放了锁之后 io线程就可以正常执行了 
+ * 调用该方法的应该是main线程
+ */
 void startThreadedIO(void) {
     if (tio_debug) { printf("S"); fflush(stdout); }
     if (tio_debug) printf("--- STARTING THREADED IO ---\n");
@@ -3522,9 +3554,14 @@ void startThreadedIO(void) {
     io_threads_active = 1;
 }
 
+/**
+ * 应该是由主线程控制io线程的状态 
+ */
 void stopThreadedIO(void) {
     /* We may have still clients with pending reads when this function
-     * is called: handle them before stopping the threads. */
+     * is called: handle them before stopping the threads.
+     * 在暂停io线程前 先处理所有pending_read任务
+     * */
     handleClientsWithPendingReadsUsingThreads();
     if (tio_debug) { printf("E"); fflush(stdout); }
     if (tio_debug) printf("--- STOPPING THREADED IO [R%d] [W%d] ---\n",
@@ -3544,13 +3581,17 @@ void stopThreadedIO(void) {
  *
  * The function returns 0 if the I/O threading should be used becuase there
  * are enough active threads, otherwise 1 is returned and the I/O threads
- * could be possibly stopped (if already active) as a side effect. */
+ * could be possibly stopped (if already active) as a side effect.
+ * 检测当前是否需要停止io线程
+ * */
 int stopThreadedIOIfNeeded(void) {
     int pending = listLength(server.clients_pending_write);
 
     /* Return ASAP if IO threads are disabled (single threaded mode). */
+    // 单线程模型 假定已经停止了io线程
     if (server.io_threads_num == 1) return 1;
 
+    // 此时待写的数据比较少 就不需要开启io线程了
     if (pending < (server.io_threads_num*2)) {
         if (io_threads_active) stopThreadedIO();
         return 1;
@@ -3559,22 +3600,34 @@ int stopThreadedIOIfNeeded(void) {
     }
 }
 
+/**
+ * 处理  pending_write队列中的任务
+ * @return
+ */
 int handleClientsWithPendingWritesUsingThreads(void) {
+
+
+    // 这个队列相当于是给main线程一个负载的机会 当发现囤积了很多待写入任务 就会开启io线程 执行写入任务
     int processed = listLength(server.clients_pending_write);
     if (processed == 0) return 0; /* Return ASAP if there are no clients. */
 
     /* If I/O threads are disabled or we have few clients to serve, don't
-     * use I/O threads, but thejboring synchronous code. */
+     * use I/O threads, but thejboring synchronous code.
+     * 如果是单线程模型 或者 此时任务量少 没有启用io线程
+     * */
     if (server.io_threads_num == 1 || stopThreadedIOIfNeeded()) {
         return handleClientsWithPendingWrites();
     }
 
-    /* Start threads if needed. */
+    // 进入到这里代表此时推荐使用额外的io线程来提高写出效率 如果此时io线程处于关闭状态  先开启io线程
+    /* Start threads if needed.*/
     if (!io_threads_active) startThreadedIO();
 
     if (tio_debug) printf("%d TOTAL WRITE pending clients\n", processed);
 
-    /* Distribute the clients across N different lists. */
+    /* Distribute the clients across N different lists.
+     * 因为打算采用多io线程并行处理写入任务
+     * */
     listIter li;
     listNode *ln;
     listRewind(server.clients_pending_write,&li);
@@ -3582,20 +3635,27 @@ int handleClientsWithPendingWritesUsingThreads(void) {
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
         c->flags &= ~CLIENT_PENDING_WRITE;
+        // 这里将任务做负载后 存储到某个io线程的任务槽下
         int target_id = item_id % server.io_threads_num;
         listAddNodeTail(io_threads_list[target_id],c);
         item_id++;
     }
 
     /* Give the start condition to the waiting threads, by setting the
-     * start condition atomic var. */
+     * start condition atomic var.
+     * 此时在io线程中就只会处理write任务
+     * */
     io_threads_op = IO_THREADS_OP_WRITE;
+
+    // 更新每个io线程待处理的任务数量
     for (int j = 1; j < server.io_threads_num; j++) {
         int count = listLength(io_threads_list[j]);
         io_threads_pending[j] = count;
     }
 
-    /* Also use the main thread to process a slice of clients. */
+    /* Also use the main thread to process a slice of clients.
+     * 主线程也开始执行写入任务  0号槽就是为main准备的
+     * */
     listRewind(io_threads_list[0],&li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
@@ -3603,7 +3663,9 @@ int handleClientsWithPendingWritesUsingThreads(void) {
     }
     listEmpty(io_threads_list[0]);
 
-    /* Wait for all the other threads to end their work. */
+    /* Wait for all the other threads to end their work.
+     * 自旋 等待所有io线程完成任务
+     * */
     while(1) {
         unsigned long pending = 0;
         for (int j = 1; j < server.io_threads_num; j++)
@@ -3619,7 +3681,9 @@ int handleClientsWithPendingWritesUsingThreads(void) {
         client *c = listNodeValue(ln);
 
         /* Install the write handler if there are pending writes in some
-         * of the clients. */
+         * of the clients.
+         * 如果某些client还有数据未写入 监听write事件
+         * */
         if (clientHasPendingReplies(c) &&
                 connSetWriteHandler(c->conn, sendReplyToClient) == AE_ERR)
         {
@@ -3660,8 +3724,12 @@ int postponeClientRead(client *c) {
  * process (instead of serving them synchronously). This function runs
  * the queue using the I/O threads, and process them in order to accumulate
  * the reads in the buffers, and also parse the first command available
- * rendering it in the client structures. */
+ * rendering it in the client structures.
+ * 尝试使用io线程处理未读数据
+ * */
 int handleClientsWithPendingReadsUsingThreads(void) {
+    // 如果io线程此时已经被关闭
+    // TODO io_threads_do_reads
     if (!io_threads_active || !server.io_threads_do_reads) return 0;
     int processed = listLength(server.clients_pending_read);
     if (processed == 0) return 0;
@@ -3673,6 +3741,8 @@ int handleClientsWithPendingReadsUsingThreads(void) {
     listNode *ln;
     listRewind(server.clients_pending_read,&li);
     int item_id = 0;
+
+    // 将未读任务负载到各个slot中
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
         int target_id = item_id % server.io_threads_num;
@@ -3705,7 +3775,9 @@ int handleClientsWithPendingReadsUsingThreads(void) {
     }
     if (tio_debug) printf("I/O READ All threads finshed\n");
 
-    /* Run the list of clients again to process the new buffers. */
+    /* Run the list of clients again to process the new buffers.
+     * 此时可能又会增加几个任务 直接使用main线程执行
+     * */
     while(listLength(server.clients_pending_read)) {
         ln = listFirst(server.clients_pending_read);
         client *c = listNodeValue(ln);
@@ -3721,6 +3793,7 @@ int handleClientsWithPendingReadsUsingThreads(void) {
                 continue;
             }
         }
+        // 根据读取到的数据 执行命令
         processInputBuffer(c);
     }
     return processed;

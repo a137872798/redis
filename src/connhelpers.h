@@ -73,6 +73,7 @@ static inline int connHasRefs(connection *conn) {
  * 1. Increment refs to protect the connection.
  * 2. Execute the handler (if set).
  * 3. Decrement refs and perform deferred close, if refs==0.
+ * 在slave节点与 master节点建立连接后 回调函数
  */
 static inline int callHandler(connection *conn, ConnectionCallbackFunc handler) {
     connIncrRefs(conn);

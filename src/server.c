@@ -3810,6 +3810,11 @@ void closeListeningSockets(int unlink_unix_socket) {
     }
 }
 
+/**
+ * 关闭redis
+ * @param flags
+ * @return
+ */
 int prepareForShutdown(int flags) {
     int save = flags & SHUTDOWN_SAVE;
     int nosave = flags & SHUTDOWN_NOSAVE;
