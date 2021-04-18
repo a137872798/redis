@@ -1383,8 +1383,10 @@ void setExpire(client *c, redisDb *db, robj *key, long long when) {
     kde = dictFind(db->dict,key->ptr);
     serverAssertWithInfo(NULL,key,kde != NULL);
     de = dictAddOrFind(db->expires,dictGetKey(kde));
+    // 此时 de是一个空entry 通过when 填充entry属性  就是设置s64属性 代表超时时间 还没有设置lru字段 代表还没有被访问过
     dictSetSignedIntegerVal(de,when);
 
+    // TODO 有关副本组的先忽略 副本的数据是完全一致 还是做了分片???
     int writable_slave = server.masterhost && server.repl_slave_ro == 0;
     if (c && writable_slave && !(c->flags & CLIENT_MASTER))
         rememberSlaveKeyWithExpire(db,key);
@@ -1552,11 +1554,15 @@ int expireIfNeeded(redisDb *db, robj *key) {
 static int getKeysTempBuffer[MAX_KEYS_BUFFER];
 
 /* The base case is to use the keys position as given in the command table
- * (firstkey, lastkey, step). */
+ * (firstkey, lastkey, step).
+ * 根据command的参数 查找相关的key  应该是指定一个范围
+ * 返回结果是 key的下标
+ * */
 int *getKeysUsingCommandTable(struct redisCommand *cmd,robj **argv, int argc, int *numkeys) {
     int j, i = 0, last, *keys;
     UNUSED(argv);
 
+    // 没有指定开始范围
     if (cmd->firstkey == 0) {
         *numkeys = 0;
         return NULL;
@@ -1565,19 +1571,24 @@ int *getKeysUsingCommandTable(struct redisCommand *cmd,robj **argv, int argc, in
     last = cmd->lastkey;
     if (last < 0) last = argc+last;
 
+    // 总计查找范围内的key
     int count = ((last - cmd->firstkey)+1);
     keys = getKeysTempBuffer;
     if (count > MAX_KEYS_BUFFER)
         keys = zmalloc(sizeof(int)*count);
 
+    // 从首个key开始 每次前进 step个步长 直到扫描到末尾
     for (j = cmd->firstkey; j <= last; j += cmd->keystep) {
+        // 代表此时已经超过了一开始要求的数量
         if (j >= argc) {
             /* Modules commands, and standard commands with a not fixed number
              * of arguments (negative arity parameter) do not have dispatch
              * time arity checks, so we need to handle the case where the user
              * passed an invalid number of arguments here. In this case we
              * return no keys and expect the command implementation to report
-             * an arity or syntax error. */
+             * an arity or syntax error.
+             * 反正就是释放之前申请的内存 同时返回null
+             * */
             if (cmd->flags & CMD_MODULE || cmd->arity < 0) {
                 getKeysFreeResult(keys);
                 *numkeys = 0;
@@ -1602,7 +1613,9 @@ int *getKeysUsingCommandTable(struct redisCommand *cmd,robj **argv, int argc, in
  * table, according to the command name in argv[0].
  *
  * This function uses the command table if a command-specific helper function
- * is not required, otherwise it calls the command-specific function. */
+ * is not required, otherwise it calls the command-specific function.
+ * 判断command相关参数之间有多少个key
+ * */
 int *getKeysFromCommand(struct redisCommand *cmd, robj **argv, int argc, int *numkeys) {
     if (cmd->flags & CMD_MODULE_GETKEYS) {
         return moduleGetCommandKeysViaAPI(cmd,argv,argc,numkeys);
@@ -1621,7 +1634,9 @@ void getKeysFreeResult(int *result) {
 
 /* Helper function to extract keys from following commands:
  * ZUNIONSTORE <destkey> <num-keys> <key> <key> ... <key> <options>
- * ZINTERSTORE <destkey> <num-keys> <key> <key> ... <key> <options> */
+ * ZINTERSTORE <destkey> <num-keys> <key> <key> ... <key> <options>
+ * 这个方法的意义是???
+ * */
 int *zunionInterGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys) {
     int i, num, *keys;
     UNUSED(cmd);
@@ -1641,7 +1656,9 @@ int *zunionInterGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *nu
     if (num+1>MAX_KEYS_BUFFER)
         keys = zmalloc(sizeof(int)*(num+1));
 
-    /* Add all key positions for argv[3...n] to keys[] */
+    /* Add all key positions for argv[3...n] to keys[]
+     * 以3为步长 设置keys中的值
+     * */
     for (i = 0; i < num; i++) keys[i] = 3+i;
 
     /* Finally add the argv[1] key position (the storage key target). */
@@ -1652,7 +1669,9 @@ int *zunionInterGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *nu
 
 /* Helper function to extract keys from the following commands:
  * EVAL <script> <num-keys> <key> <key> ... <key> [more stuff]
- * EVALSHA <script> <num-keys> <key> <key> ... <key> [more stuff] */
+ * EVALSHA <script> <num-keys> <key> <key> ... <key> [more stuff]
+ * 好像跟上面那个差不多
+ * */
 int *evalGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys) {
     int i, num, *keys;
     UNUSED(cmd);

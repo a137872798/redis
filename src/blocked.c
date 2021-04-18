@@ -81,22 +81,28 @@ typedef struct bkinfo {
 
 /* Block a client for the specific operation type. Once the CLIENT_BLOCKED
  * flag is set client query buffer is not longer processed, but accumulated,
- * and will be processed when the client is unblocked. */
+ * and will be processed when the client is unblocked.
+ * 将某个client 变成阻塞状态
+ * */
 void blockClient(client *c, int btype) {
     c->flags |= CLIENT_BLOCKED;
     c->btype = btype;
     server.blocked_clients++;
     server.blocked_clients_by_type[btype]++;
+    // 将该client插入到一个timeout结构中
     addClientToTimeoutTable(c);
 }
 
 /* This function is called in the beforeSleep() function of the event loop
  * in order to process the pending input buffer of clients that were
- * unblocked after a blocking operation. */
+ * unblocked after a blocking operation.
+ * 处理未阻塞的client
+ * */
 void processUnblockedClients(void) {
     listNode *ln;
     client *c;
 
+    // 这里遍历每个client 取消未阻塞的标记
     while (listLength(server.unblocked_clients)) {
         ln = listFirst(server.unblocked_clients);
         serverAssert(ln != NULL);
@@ -110,6 +116,7 @@ void processUnblockedClients(void) {
          * the code is conceptually more correct this way. */
         if (!(c->flags & CLIENT_BLOCKED)) {
             if (c->querybuf && sdslen(c->querybuf) > 0) {
+                // 将querybuf中的数据 转换成command 以及相关参数
                 processInputBuffer(c);
             }
         }
@@ -138,21 +145,25 @@ void queueClientForReprocessing(client *c) {
      * blocking operation, don't add back it into the list multiple times. */
     if (!(c->flags & CLIENT_UNBLOCKED)) {
         c->flags |= CLIENT_UNBLOCKED;
+        // 归还到unblock队列中
         listAddNodeTail(server.unblocked_clients,c);
     }
 }
 
 /* Unblock a client calling the right function depending on the kind
  * of operation the client is blocking for.
- * TODO 解除client的阻塞状态
+ * 某个client从阻塞状态解除
  * */
 void unblockClient(client *c) {
+    // 此时处于有关单节点的阻塞状态中
     if (c->btype == BLOCKED_LIST ||
         c->btype == BLOCKED_ZSET ||
         c->btype == BLOCKED_STREAM) {
         unblockClientWaitingData(c);
+        // 集群相关的阻塞状态
     } else if (c->btype == BLOCKED_WAIT) {
         unblockClientWaitingReplicas(c);
+        // module相关的阻塞状态???
     } else if (c->btype == BLOCKED_MODULE) {
         if (moduleClientIsBlockedOnKeys(c)) unblockClientWaitingData(c);
         unblockClientFromModule(c);
@@ -165,17 +176,19 @@ void unblockClient(client *c) {
     server.blocked_clients_by_type[c->btype]--;
     c->flags &= ~CLIENT_BLOCKED;
     c->btype = BLOCKED_NONE;
+    // 将client 从timeout容器中移除
     removeClientFromTimeoutTable(c);
+    // 因为此时阻塞状态已经解除了  可以将querybuf中的数据转换成command的参数了
     queueClientForReprocessing(c);
 }
 
 /* This function gets called when a blocked client timed out in order to
  * send it a reply of some kind. After this function is called,
  * unblockClient() will be called with the same client as argument.
- * 将超时信息反馈给client  TODO 先不细看
+ * 将超时信息写入到client中
  * */
 void replyToBlockedClientTimedOut(client *c) {
-    // btype代表哪类操作被阻塞
+    // 基于不同的阻塞原因 返回不同的信息
     if (c->btype == BLOCKED_LIST ||
         c->btype == BLOCKED_ZSET ||
         c->btype == BLOCKED_STREAM) {
@@ -195,7 +208,9 @@ void replyToBlockedClientTimedOut(client *c) {
  * is called when a master turns into a slave.
  *
  * The semantics is to send an -UNBLOCKED error to the client, disconnecting
- * it at the same time. */
+ * it at the same time.
+ * 解除所有处于block状态的client
+ * */
 void disconnectAllBlockedClients(void) {
     listNode *ln;
     listIter li;
@@ -216,19 +231,25 @@ void disconnectAllBlockedClients(void) {
 
 /* Helper function for handleClientsBlockedOnKeys(). This function is called
  * when there may be clients blocked on a list key, and there may be new
- * data to fetch (the key is ready). */
+ * data to fetch (the key is ready).
+ * @param readyList  内部包含一个db 以及一个key
+ * */
 void serveClientsBlockedOnListKey(robj *o, readyList *rl) {
     /* We serve clients in the same order they blocked for
-     * this key, from the first blocked to the last. */
+     * this key, from the first blocked to the last.
+     * blocking_keys 代表某个db 下某个key阻塞了一组client  为什么会出现这样一个模型呢???
+     * */
     dictEntry *de = dictFind(rl->db->blocking_keys,rl->key);
     if (de) {
         list *clients = dictGetVal(de);
         int numclients = listLength(clients);
 
+        // 挨个处理每个client
         while(numclients--) {
             listNode *clientnode = listFirst(clients);
             client *receiver = clientnode->value;
 
+            // 不是因为list而阻塞的 将节点移动到尾部
             if (receiver->btype != BLOCKED_LIST) {
                 /* Put at the tail, so that at the next call
                  * we'll not run into it again. */
@@ -236,7 +257,9 @@ void serveClientsBlockedOnListKey(robj *o, readyList *rl) {
                 continue;
             }
 
+            // 这个目标key是什么意思
             robj *dstkey = receiver->bpop.target;
+            // 根据client的lastcmd 信息   将obj 放到合适的位置
             int where = (receiver->lastcmd &&
                          receiver->lastcmd->proc == blpopCommand) ?
                          LIST_HEAD : LIST_TAIL;

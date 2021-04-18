@@ -33,12 +33,17 @@
  * List API
  *----------------------------------------------------------------------------*/
 
+// Redis 内部的list结构 redis下的数据结构有一个特点 就是存储的都是redisObject adlist相当于是一个在redis内部使用的普通链表
+
 /* The function pushes an element to the specified list object 'subject',
  * at head or tail position as specified by 'where'.
  *
  * There is no need for the caller to increment the refcount of 'value' as
- * the function takes care of it if needed. */
+ * the function takes care of it if needed.
+ * @param where 数据应当存储在什么位置
+ * */
 void listTypePush(robj *subject, robj *value, int where) {
+    // 要求这个对象的编码方式必须是快速列表
     if (subject->encoding == OBJ_ENCODING_QUICKLIST) {
         int pos = (where == LIST_HEAD) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
         value = getDecodedObject(value);

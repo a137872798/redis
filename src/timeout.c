@@ -98,7 +98,9 @@ int clientsCronHandleTimeout(client *c, mstime_t now_ms) {
 
 #define CLIENT_ST_KEYLEN 16    /* 8 bytes mstime + 8 bytes client ID. */
 
-/* Given client ID and timeout, write the resulting radix tree key in buf. */
+/* Given client ID and timeout, write the resulting radix tree key in buf.
+ * 将阻塞超时时间 与 clientId 填充到buf中
+ * */
 void encodeTimeoutKey(unsigned char *buf, uint64_t timeout, client *c) {
     timeout = htonu64(timeout);
     memcpy(buf,&timeout,sizeof(timeout));
@@ -119,12 +121,16 @@ void decodeTimeoutKey(unsigned char *buf, uint64_t *toptr, client **cptr) {
 
 /* Add the specified client id / timeout as a key in the radix tree we use
  * to handle blocked clients timeouts. The client is not added to the list
- * if its timeout is zero (block forever). */
+ * if its timeout is zero (block forever).
+ * 当某个client 变成阻塞状态时 会触发该方法
+ * */
 void addClientToTimeoutTable(client *c) {
+    // 此时该client的阻塞状态中 超时时间为0 那么不需要处理
     if (c->bpop.timeout == 0) return;
     uint64_t timeout = c->bpop.timeout;
     unsigned char buf[CLIENT_ST_KEYLEN];
     encodeTimeoutKey(buf,timeout,c);
+    // 以 timeout+clientId 作为key存储到rax结构中
     if (raxTryInsert(server.clients_timeout_table,buf,sizeof(buf),NULL,NULL))
         c->flags |= CLIENT_IN_TO_TABLE;
 }

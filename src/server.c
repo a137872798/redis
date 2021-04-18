@@ -3197,12 +3197,16 @@ void redisOpArrayInit(redisOpArray *oa) {
     oa->numops = 0;
 }
 
+/**
+ * 将本次待执行的command 追加到 opArray中
+ */
 int redisOpArrayAppend(redisOpArray *oa, struct redisCommand *cmd, int dbid,
                        robj **argv, int argc, int target) {
     redisOp *op;
 
     oa->ops = zrealloc(oa->ops, sizeof(redisOp) * (oa->numops + 1));
     op = oa->ops + oa->numops;
+    // 将指令指针 db 参数信息 标识 填充到op上
     op->cmd = cmd;
     op->dbid = dbid;
     op->argv = argv;
@@ -3212,6 +3216,10 @@ int redisOpArrayAppend(redisOpArray *oa, struct redisCommand *cmd, int dbid,
     return oa->numops;
 }
 
+/**
+ * 释放所有op
+ * @param oa
+ */
 void redisOpArrayFree(redisOpArray *oa) {
     while (oa->numops) {
         int j;
@@ -3274,6 +3282,7 @@ struct redisCommand *lookupCommandOrOriginal(sds name) {
  * However for functions that need to (also) propagate out of the context of a
  * command execution, for example when serving a blocked client, you
  * want to use propagate().
+ * 将本次指定command的信息写入到 aof文件中  以及复写到slave节点 TODO 先不看具体实现
  */
 void propagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
                int flags) {
@@ -3294,12 +3303,15 @@ void propagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
  * The function does not take a reference to the passed 'argv' vector,
  * so it is up to the caller to release the passed argv (but it is usually
  * stack allocated).  The function autoamtically increments ref count of
- * passed objects, so the caller does not need to. */
+ * passed objects, so the caller does not need to.
+ * 在opArray中追加一个指令
+ * */
 void alsoPropagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
                    int target) {
     robj **argvcopy;
     int j;
 
+    // 数据加载阶段还未结束 忽略 一般来说加载未完成时 还没有开始事件循环 也接收不到请求 不会触发该方法
     if (server.loading) return; /* No propagation during loading. */
 
     argvcopy = zmalloc(sizeof(robj *) * argc);
