@@ -727,6 +727,14 @@ int getLongLongFromObjectOrReply(client *c, robj *o, long long *target, const ch
     return C_OK;
 }
 
+/**
+ * 获取obj上的ptr指针 并认为它是一个longlong类型
+ * @param c
+ * @param o
+ * @param target
+ * @param msg
+ * @return
+ */
 int getLongFromObjectOrReply(client *c, robj *o, long *target, const char *msg) {
     long long value;
 

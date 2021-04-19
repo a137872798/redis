@@ -55,6 +55,12 @@ void listTypePush(robj *subject, robj *value, int where) {
     }
 }
 
+/**
+ * 将 数据块包装成redisObject
+ * @param data
+ * @param sz
+ * @return
+ */
 void *listPopSaver(unsigned char *data, unsigned int sz) {
     return createStringObject((char*)data,sz);
 }
