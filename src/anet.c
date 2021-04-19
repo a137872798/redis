@@ -787,7 +787,7 @@ int anetUnixAccept(char *err, int s) {
 }
 
 /**
- * 打印名字 先忽略
+ * 从指定的socket句柄 回填ip地址和端口号
  * @param fd
  * @param ip
  * @param ip_len
