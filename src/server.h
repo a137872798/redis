@@ -202,6 +202,7 @@ typedef long long ustime_t; /* microsecond time type. */
 /* AOF states */
 #define AOF_OFF 0             /* AOF is off */
 #define AOF_ON 1              /* AOF is on */
+// 等待通过aof文件完成数据重做
 #define AOF_WAIT_REWRITE 2    /* AOF waits rewrite to start appending */
 
 /* Client flags */
@@ -568,7 +569,9 @@ typedef struct RedisModuleIO {
  * modules. We want to capture both the ordered and unordered elements of
  * a data structure, so that a digest can be created in a way that correctly
  * reflects the values. See the DEBUG DIGEST command implementation for more
- * background. */
+ * background.
+ * 存储了一组待消化的元素
+ * */
 typedef struct RedisModuleDigest {
     unsigned char o[20];    /* Ordered elements. */
     unsigned char x[20];    /* Xored elements. */

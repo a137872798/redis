@@ -145,6 +145,13 @@ void bioInit(void) {
     }
 }
 
+/**
+ * 在后台线程中添加一个aof文件刷盘任务
+ * @param type
+ * @param arg1
+ * @param arg2
+ * @param arg3
+ */
 void bioCreateBackgroundJob(int type, void *arg1, void *arg2, void *arg3) {
     struct bio_job *job = zmalloc(sizeof(*job));
 
@@ -155,6 +162,7 @@ void bioCreateBackgroundJob(int type, void *arg1, void *arg2, void *arg3) {
     pthread_mutex_lock(&bio_mutex[type]);
     listAddNodeTail(bio_jobs[type],job);
     bio_pending[type]++;
+    // 因为添加了新的job 通知正在等待的job
     pthread_cond_signal(&bio_newjob_cond[type]);
     pthread_mutex_unlock(&bio_mutex[type]);
 }
@@ -291,7 +299,7 @@ void *bioProcessBackgroundJobs(void *arg) {
 }
 
 /* Return the number of pending jobs of the specified type.
- * 获取某一线程此时待执行的任务数量
+ * 检测某一类型任务此时的数量
  * */
 unsigned long long bioPendingJobsOfType(int type) {
     unsigned long long val;

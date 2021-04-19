@@ -1464,7 +1464,9 @@ int incrementallyRehash(int dbid) {
  * to play well with copy-on-write (otherwise when a resize happens lots of
  * memory pages are copied). The goal of this function is to update the ability
  * for dict.c to resize the hash tables accordingly to the fact we have o not
- * running childs. */
+ * running childs.
+ * 根据当前有无子进程  修改能否动态调整dict大小的标识
+ * */
 void updateDictResizePolicy(void) {
     if (!hasActiveChildProcess())
         dictEnableResize();
