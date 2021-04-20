@@ -73,7 +73,9 @@ typedef struct quicklistLZF {
  * When not used, they don't add any memory overhead, but when used and then
  * deleted, some overhead remains (to avoid resonance).
  * The number of bookmarks used should be kept to minimum since it also adds
- * overhead on node deletion (searching for a bookmark to update). */
+ * overhead on node deletion (searching for a bookmark to update).
+ * 书签能够帮助快速定位到某个节点 每个书签都有名字信息  书签存储在quicklist结构中
+ * */
 typedef struct quicklistBookmark {
     quicklistNode *node;
     char *name;
@@ -101,7 +103,9 @@ typedef struct quicklistBookmark {
  *                of quicklistNodes to leave uncompressed at ends of quicklist.
  * 'fill' is the user-requested (or default) fill factor.
  * 'bookmakrs are an optional feature that is used by realloc this struct,
- *      so that they don't consume memory when not used. */
+ *      so that they don't consume memory when not used.
+ *      快速列表内部还可以存储一组标签
+ *      */
 typedef struct quicklist {
     quicklistNode *head;
     quicklistNode *tail;

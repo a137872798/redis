@@ -33,7 +33,7 @@
  * List API
  *----------------------------------------------------------------------------*/
 
-// Redis 内部的list结构 redis下的数据结构有一个特点 就是存储的都是redisObject adlist相当于是一个在redis内部使用的普通链表
+// 定义值类型为redisList的api
 
 /* The function pushes an element to the specified list object 'subject',
  * at head or tail position as specified by 'where'.

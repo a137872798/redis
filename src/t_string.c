@@ -514,6 +514,7 @@ void incrbyfloatCommand(client *c) {
         addReplyError(c,"increment would produce NaN or Infinity");
         return;
     }
+    // 将最新的value 包装成一个新的redisObject 并进行覆盖或者插入
     new = createStringObjectFromLongDouble(value,1);
     if (o)
         dbOverwrite(c->db,c->argv[1],new);
@@ -526,8 +527,11 @@ void incrbyfloatCommand(client *c) {
 
     /* Always replicate INCRBYFLOAT as a SET command with the final value
      * in order to make sure that differences in float precision or formatting
-     * will not create differences in replicas or after an AOF restart. */
+     * will not create differences in replicas or after an AOF restart.
+     * 这里更改了client内部的命令信息  强制修改成一条set指令 这样可以保证数据一致性
+     * */
     aux1 = createStringObject("SET",3);
+    // 修改client.arg
     rewriteClientCommandArgument(c,0,aux1);
     decrRefCount(aux1);
     rewriteClientCommandArgument(c,2,new);
@@ -536,11 +540,16 @@ void incrbyfloatCommand(client *c) {
     decrRefCount(aux2);
 }
 
+/**
+ * 在原有数据上进行追加
+ * @param c
+ */
 void appendCommand(client *c) {
     size_t totlen;
     robj *o, *append;
 
     o = lookupKeyWrite(c->db,c->argv[1]);
+    // 首次创建
     if (o == NULL) {
         /* Create the key */
         c->argv[2] = tryObjectEncoding(c->argv[2]);
@@ -548,7 +557,9 @@ void appendCommand(client *c) {
         incrRefCount(c->argv[2]);
         totlen = stringObjectLen(c->argv[2]);
     } else {
-        /* Key exists, check type */
+        /* Key exists, check type
+         * 确保存在的数据必须是string类型
+         * */
         if (checkType(c,o,OBJ_STRING))
             return;
 
@@ -558,7 +569,7 @@ void appendCommand(client *c) {
         if (checkStringLength(c,totlen) != C_OK)
             return;
 
-        /* Append the value */
+        /* Append the value 对原数据进行解码后 将本次新数据拼接上去 */
         o = dbUnshareStringValue(c->db,c->argv[1],o);
         o->ptr = sdscatlen(o->ptr,append->ptr,sdslen(append->ptr));
         totlen = sdslen(o->ptr);
@@ -569,6 +580,10 @@ void appendCommand(client *c) {
     addReplyLongLong(c,totlen);
 }
 
+/**
+ * 获取某个key对应value的长度
+ * @param c
+ */
 void strlenCommand(client *c) {
     robj *o;
     if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.czero)) == NULL ||
@@ -592,6 +607,7 @@ void stralgoCommand(client *c) {
 
 /* STRALGO <algo> [IDX] [MINMATCHLEN <len>] [WITHMATCHLEN]
  *     STRINGS <string> <string> | KEYS <keya> <keyb>
+ *     TODO 求最长公共子序列的算法 先不看
  */
 void stralgoLCS(client *c) {
     uint32_t i, j;

@@ -34,7 +34,9 @@
 #define ZIPLIST_HEAD 0
 #define ZIPLIST_TAIL 1
 
-/* Each entry in the ziplist is either a string or an integer. */
+/* Each entry in the ziplist is either a string or an integer.
+ * 在压缩列表中 每个元素 要么是string类型 要么是integer类型
+ * */
 typedef struct {
     /* When string is used, it is provided with the length (slen). */
     unsigned char *sval;

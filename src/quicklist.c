@@ -72,8 +72,26 @@ static const size_t optimization_level[] = {4096, 8192, 16384, 32768, 65536};
 
 /* Bookmarks forward declarations */
 #define QL_MAX_BM ((1 << QL_BM_BITS)-1)
+/**
+ * 在某个快速列表中 通过name查找某个标签
+ * @param ql
+ * @param name
+ * @return
+ */
 quicklistBookmark *_quicklistBookmarkFindByName(quicklist *ql, const char *name);
+/**
+ * 从某个节点上获取书签
+ * @param ql
+ * @param node
+ * @return
+ */
 quicklistBookmark *_quicklistBookmarkFindByNode(quicklist *ql, quicklistNode *node);
+
+/**
+ * 删除快速列表上的某个书签
+ * @param ql
+ * @param bm
+ */
 void _quicklistBookmarkDelete(quicklist *ql, quicklistBookmark *bm);
 
 /* Simple way to give quicklistEntry structs default values with one call. */
@@ -96,7 +114,9 @@ void _quicklistBookmarkDelete(quicklist *ql, quicklistBookmark *bm);
 #endif
 
 /* Create a new quicklist.
- * Free with quicklistRelease(). */
+ * Free with quicklistRelease().
+ * 这里初始化一个快速列表
+ * */
 quicklist *quicklistCreate(void) {
     struct quicklist *quicklist;
 
@@ -130,12 +150,20 @@ void quicklistSetFill(quicklist *quicklist, int fill) {
     quicklist->fill = fill;
 }
 
+/**
+ * 为quicklist追加一些选项
+ * @param quicklist
+ * @param fill
+ * @param depth
+ */
 void quicklistSetOptions(quicklist *quicklist, int fill, int depth) {
     quicklistSetFill(quicklist, fill);
     quicklistSetCompressDepth(quicklist, depth);
 }
 
-/* Create a new quicklist with some default parameters. */
+/* Create a new quicklist with some default parameters.
+ * 同样是创建quicklist 还会追加一些选项
+ * */
 quicklist *quicklistNew(int fill, int compress) {
     quicklist *quicklist = quicklistCreate();
     quicklistSetOptions(quicklist, fill, compress);
@@ -158,7 +186,9 @@ REDIS_STATIC quicklistNode *quicklistCreateNode(void) {
 /* Return cached quicklist count */
 unsigned long quicklistCount(const quicklist *ql) { return ql->count; }
 
-/* Free entire quicklist. */
+/* Free entire quicklist.
+ * 释放快速列表中所有元素
+ * */
 void quicklistRelease(quicklist *quicklist) {
     unsigned long len;
     quicklistNode *current, *next;
@@ -484,11 +514,15 @@ REDIS_STATIC int _quicklistNodeAllowMerge(const quicklistNode *a,
 /* Add new entry to head node of quicklist.
  *
  * Returns 0 if used existing head.
- * Returns 1 if new head created. */
+ * Returns 1 if new head created.
+ * 往quicklist中插入一个元素
+ * */
 int quicklistPushHead(quicklist *quicklist, void *value, size_t sz) {
     quicklistNode *orig_head = quicklist->head;
+    // 当前节点允许插入新值
     if (likely(
             _quicklistNodeAllowInsert(quicklist->head, quicklist->fill, sz))) {
+        // 本次数据插入到了head节点对应的 ziplist结构中
         quicklist->head->zl =
             ziplistPush(quicklist->head->zl, value, sz, ZIPLIST_HEAD);
         quicklistNodeUpdateSz(quicklist->head);
