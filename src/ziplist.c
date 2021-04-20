@@ -298,7 +298,9 @@ typedef struct zlentry {
 }
 
 /* Extract the encoding from the byte pointed by 'ptr' and set it into
- * 'encoding' field of the zlentry structure. */
+ * 'encoding' field of the zlentry structure.
+ * 解析encoding
+ * */
 #define ZIP_ENTRY_ENCODING(ptr, encoding) do {  \
     (encoding) = (ptr[0]); \
     if ((encoding) < ZIP_STR_MASK) (encoding) &= ZIP_STR_MASK; \
@@ -390,14 +392,21 @@ unsigned int zipStoreEntryEncoding(unsigned char *p, unsigned char encoding, uns
  * length, and the 'len' variable will hold the entry length.
  * 解析某个entry 并将各个部分的长度填充到相关字段中
  * 此时ptr对应的位置为entry+prevlen
+ * @param encoding 存储编码标识
+ * @param lensize 存储长度信息使用了多少字节
+ * @param len 实际的长度值
  * */
 #define ZIP_DECODE_LENGTH(ptr, encoding, lensize, len) do {                    \
                                                                                \
-    ZIP_ENTRY_ENCODING((ptr), (encoding));                                     \
+    // 解析第二部分 encoding的长度
+    ZIP_ENTRY_ENCODING((ptr), (encoding));                       \
+    // 代表第三部分的数据是字符串 根据encoding的值可以判断字符串的长度
     if ((encoding) < ZIP_STR_MASK) {                                           \
+        // 代表长度可以用64位表示
         if ((encoding) == ZIP_STR_06B) {                                       \
             (lensize) = 1;                                                     \
-            (len) = (ptr)[0] & 0x3f;                                           \
+            (len) = (ptr)[0] & 0x3f;
+        // 同上
         } else if ((encoding) == ZIP_STR_14B) {                                \
             (lensize) = 2;                                                     \
             (len) = (((ptr)[0] & 0x3f) << 8) | (ptr)[1];                       \
@@ -411,7 +420,9 @@ unsigned int zipStoreEntryEncoding(unsigned char *p, unsigned char encoding, uns
             panic("Invalid string encoding 0x%02X", (encoding));               \
         }                                                                      \
     } else {                                                                   \
+        // 代表第三部分是int类型
         (lensize) = 1;                                                         \
+        // int占用多少字节
         (len) = zipIntSize(encoding);                                          \
     }                                                                          \
 } while(0);
@@ -491,23 +502,23 @@ unsigned int zipStorePrevEntryLength(unsigned char *p, unsigned int len) {
  * So the function returns a positive number if more space is needed,
  * a negative number if less space is needed, or zero if the same space
  * is needed.
- * 计算本次要写入的长度与上个entry的长度差
  * */
 int zipPrevLenByteDiff(unsigned char *p, unsigned int len) {
     unsigned int prevlensize;
-    // 获取p的上个entry长度
+    // p的上个entry的prevlen字段长度1或5
     ZIP_DECODE_PREVLENSIZE(p, prevlensize);
     return zipStorePrevEntryLength(NULL, len) - prevlensize;
 }
 
 /* Return the total number of bytes used by the entry pointed to by 'p'.
- * 每个entry的第一个部分记录了 prevlen
+ * 返回entry的总长度
  * */
 unsigned int zipRawEntryLength(unsigned char *p) {
     unsigned int prevlensize, encoding, lensize, len;
 
     // prevlen 可能占用1字节或者5字节 当prevlen超过254时 就会占用5字节
     ZIP_DECODE_PREVLENSIZE(p, prevlensize);
+    // 这里是解析entry长度
     ZIP_DECODE_LENGTH(p + prevlensize, encoding, lensize, len);
     return prevlensize + lensize + len;
 }
@@ -613,7 +624,9 @@ int64_t zipLoadInteger(unsigned char *p, unsigned char encoding) {
     return ret;
 }
 
-/* Return a struct with all information about an entry. */
+/* Return a struct with all information about an entry.
+ * 通过一个偏移量定位到entry 并解析entry相关的所有信息
+ * */
 void zipEntry(unsigned char *p, zlentry *e) {
 
     ZIP_DECODE_PREVLEN(p, e->prevrawlensize, e->prevrawlen);
@@ -822,17 +835,15 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
     zlentry tail;
 
     /* Find out prevlen for the entry that is inserted. */
-    // 代表本次希望插入到头部 (且此时ziplist已经存在数据)
+    // 代表本次希望插入到头部 (且此时ziplist已经存在数据)  在下面会解析第一个entry的prevlen 不过第一个entry没有前prev 长度应该是0
     if (p[0] != ZIP_END) {
         ZIP_DECODE_PREVLEN(p, prevlensize, prevlen);
     } else {
-        // 代表本次是希望插入到末尾 或者想要插入头部但此前没有数据 这样逻辑是一样的 都是找到tail的位置 当ziplist内部没有数据时 tail就是head的末尾
+        // 代表本次是希望插入到末尾 或者想要插入头部但此前没有数据 这样逻辑是一样的 都是找到tail的位置
         unsigned char *ptail = ZIPLIST_ENTRY_TAIL(zl);
         // 代表此前有数据  如果没有数据head的尾部就是end同时也是tail的起始位置 3者重叠
         if (ptail[0] != ZIP_END) {
-            // prevlen是对于tailentry而言的上一个entry的长度
-            // 推测该值应该是一个累计值 通过将连续的entry.prevlen相减能够快速判断一个entry的原大小 因为如果必须通过解压后才能判断entry的原大小 会做很多无用功
-            // 那么这个prevlen应该是数据块原大小基于某种规则计算出来的
+            // 这里是在计算tail的长度
             prevlen = zipRawEntryLength(ptail);
         }
     }
@@ -862,8 +873,10 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
      * make sure that the next entry can hold this entry's length in
      * its prevlen field. */
     int forcelarge = 0;
-    // p[0] != ZIP_END 代表此时ziplist中已经有数据  简化情况第一次p[0]就是end 此时diff是0
+    // p[0] != ZIP_END 代表本次期望插入头部  这里是确保当前p用于存储上一个entry长度信息的prevlen有足够的空间表示本次新entry的长度信息
+    // 简化情况第一次p[0]就是end 此时diff是0
     nextdiff = (p[0] != ZIP_END) ? zipPrevLenByteDiff(p,reqlen) : 0;
+    // TODO
     if (nextdiff == -4 && reqlen < 4) {
         nextdiff = 0;
         forcelarge = 1;
@@ -878,12 +891,12 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
     p = zl+offset;
 
     /* Apply memory move when necessary and update tail offset.
-     * 当ziplist中已经有entry时
+     * 本次插入头部且原本有数据
      * */
     if (p[0] != ZIP_END) {
         /* Subtract one because of the ZIP_END bytes
          * param1 dest param2 src param3 len
-         * 先将情况简化 认为nextdiff为0  可以看到就是将p之后的所有数据移动到p+reqlen的位置 也就是tailentry也一起移动了
+         * 先简化情况 认为nextdiff为0 这里是把从firstentry开始的数据移动到了本次新entry插入后的位置
          * */
         memmove(p+reqlen,p-nextdiff,curlen-offset-1+nextdiff);
 
@@ -891,6 +904,7 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
         if (forcelarge)
             zipStorePrevEntryLengthLarge(p+reqlen,reqlen);
         else
+            // 将新entry的长度信息填充到原first的首位
             zipStorePrevEntryLength(p+reqlen,reqlen);
 
         /* Update offset for tail */
@@ -908,7 +922,7 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
         // 先简化情况 认为ziplist中没有entry 此时进入的是这个分支
     } else {
         /* This element will be the new tail. */
-        // 此时将end的位置标记为tail_offset 那么之后就应该会在end前插入新的entry作为tailentry
+        // 此时将tail_offset的位置标记为end 那么之后就应该会在end后插入新的entry作为tailentry
         ZIPLIST_TAIL_OFFSET(zl) = intrev32ifbe(p-zl);
     }
 
@@ -1064,7 +1078,7 @@ unsigned char *ziplistMerge(unsigned char **first, unsigned char **second) {
  */
 unsigned char *ziplistPush(unsigned char *zl, unsigned char *s, unsigned int slen, int where) {
     unsigned char *p;
-    // p 对应应当插入的位置 因为头部是固定不变的所以 需要定位到数组+headsize的位置
+    // p 对应应当插入的位置 因为头部是固定不变的所以 需要定位到数组[0]+headsize的位置
     // ZIPLIST_ENTRY_END 就是总长度-1 也就是对应到end的位置
     p = (where == ZIPLIST_HEAD) ? ZIPLIST_ENTRY_HEAD(zl) : ZIPLIST_ENTRY_END(zl);
     // 将s字符串插入到zl中
