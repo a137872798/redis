@@ -42,12 +42,16 @@
  * container: 2 bits, NONE=1, ZIPLIST=2.
  * recompress: 1 bit, bool, true if node is temporary decompressed for usage.
  * attempted_compress: 1 bit, boolean, used for verifying during testing.
- * extra: 10 bits, free for future use; pads out the remainder of 32 bits */
+ * extra: 10 bits, free for future use; pads out the remainder of 32 bits
+ * 快速列表节点本身是一个链表结构
+ * */
 typedef struct quicklistNode {
     struct quicklistNode *prev;
     struct quicklistNode *next;
+    // 这个应该是ziplist的起始偏移量
     unsigned char *zl;
     unsigned int sz;             /* ziplist size in bytes */
+    // 该node绑定的压缩列表内有多少项
     unsigned int count : 16;     /* count of items in ziplist */
     unsigned int encoding : 2;   /* RAW==1 or LZF==2 */
     unsigned int container : 2;  /* NONE==1 or ZIPLIST==2 */
@@ -109,11 +113,14 @@ typedef struct quicklistBookmark {
 typedef struct quicklist {
     quicklistNode *head;
     quicklistNode *tail;
+    // 每个节点对应一个压缩列表 这里是所有节点下压缩列表的entry数总和
     unsigned long count;        /* total count of all entries in all ziplists */
     unsigned long len;          /* number of quicklistNodes */
+    // 每个节点下允许存储多少entry
     int fill : QL_FILL_BITS;              /* fill factor for individual nodes */
     unsigned int compress : QL_COMP_BITS; /* depth of end nodes not to compress;0=off */
     unsigned int bookmark_count: QL_BM_BITS;
+    // 列表中存在一组标签
     quicklistBookmark bookmarks[];
 } quicklist;
 

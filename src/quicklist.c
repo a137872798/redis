@@ -125,6 +125,7 @@ quicklist *quicklistCreate(void) {
     quicklist->len = 0;
     quicklist->count = 0;
     quicklist->compress = 0;
+    // 一开始不允许节点下存储entry
     quicklist->fill = -2;
     quicklist->bookmark_count = 0;
     return quicklist;
@@ -206,6 +207,7 @@ void quicklistRelease(quicklist *quicklist) {
         quicklist->len--;
         current = next;
     }
+    // 释放所有书签
     quicklistBookmarksClear(quicklist);
     zfree(quicklist);
 }
@@ -386,7 +388,9 @@ REDIS_STATIC void __quicklistCompress(const quicklist *quicklist,
 /* Insert 'new_node' after 'old_node' if 'after' is 1.
  * Insert 'new_node' before 'old_node' if 'after' is 0.
  * Note: 'new_node' is *always* uncompressed, so if we assign it to
- *       head or tail, we do not need to uncompress it. */
+ *       head or tail, we do not need to uncompress it.
+ *       链表操作
+ *       */
 REDIS_STATIC void __quicklistInsertNode(quicklist *quicklist,
                                         quicklistNode *old_node,
                                         quicklistNode *new_node, int after) {
@@ -400,6 +404,7 @@ REDIS_STATIC void __quicklistInsertNode(quicklist *quicklist,
         }
         if (quicklist->tail == old_node)
             quicklist->tail = new_node;
+        // 代表new_node 插入到old_node的前面 
     } else {
         new_node->next = old_node;
         if (old_node) {
@@ -455,6 +460,13 @@ _quicklistNodeSizeMeetsOptimizationRequirement(const size_t sz,
 
 #define sizeMeetsSafetyLimit(sz) ((sz) <= SIZE_SAFETY_LIMIT)
 
+/**
+ * 判断当前quicklistnode 对应的ziplist是否有足够的空间
+ * @param node
+ * @param fill
+ * @param sz
+ * @return
+ */
 REDIS_STATIC int _quicklistNodeAllowInsert(const quicklistNode *node,
                                            const int fill, const size_t sz) {
     if (unlikely(!node))
@@ -475,12 +487,17 @@ REDIS_STATIC int _quicklistNodeAllowInsert(const quicklistNode *node,
     else
         ziplist_overhead += 5;
 
-    /* new_sz overestimates if 'sz' encodes to an integer type */
+    /* new_sz overestimates if 'sz' encodes to an integer type
+     * 预计加入后 当前node的size是多少
+     * */
     unsigned int new_sz = node->sz + sz + ziplist_overhead;
+    // TODO 先忽略优化的逻辑
     if (likely(_quicklistNodeSizeMeetsOptimizationRequirement(new_sz, fill)))
         return 1;
+    // 此时的sz是否在一个安全值 如果不满足条件返回0  代表当前node不适合继续插入数据
     else if (!sizeMeetsSafetyLimit(new_sz))
         return 0;
+    // 当此时的数量小于某个限制值时 允许继续插入数据
     else if ((int)node->count < fill)
         return 1;
     else
@@ -506,6 +523,9 @@ REDIS_STATIC int _quicklistNodeAllowMerge(const quicklistNode *a,
         return 0;
 }
 
+/**
+ * 根据node绑定的ziplist设置sz
+ */
 #define quicklistNodeUpdateSz(node)                                            \
     do {                                                                       \
         (node)->sz = ziplistBlobLen((node)->zl);                               \
@@ -527,24 +547,32 @@ int quicklistPushHead(quicklist *quicklist, void *value, size_t sz) {
             ziplistPush(quicklist->head->zl, value, sz, ZIPLIST_HEAD);
         quicklistNodeUpdateSz(quicklist->head);
     } else {
+        // 当此时目标节点无法继续插入value时 申请新节点
         quicklistNode *node = quicklistCreateNode();
+        // 将value插入到ziplist的头节点 同时挂载到该节点下
         node->zl = ziplistPush(ziplistNew(), value, sz, ZIPLIST_HEAD);
 
+        // 更新当前节点的长度
         quicklistNodeUpdateSz(node);
+        // 将node插入到quicklist的指定位置
         _quicklistInsertNodeBefore(quicklist, quicklist->head, node);
     }
-    quicklist->count++;
-    quicklist->head->count++;
+    // 插入成功后修改相关的计数值
+    quicklist->count++; // list下的node数量
+    quicklist->head->count++; // node下的entry数量
     return (orig_head != quicklist->head);
 }
 
 /* Add new entry to tail node of quicklist.
  *
  * Returns 0 if used existing tail.
- * Returns 1 if new tail created. */
+ * Returns 1 if new tail created.
+ * 往尾部插入一个值
+ * */
 int quicklistPushTail(quicklist *quicklist, void *value, size_t sz) {
     quicklistNode *orig_tail = quicklist->tail;
     if (likely(
+            // quicklist中每个节点对应的ziplist都有一个存储上限 当内部的entry超过这个数量时 推荐创建新节点
             _quicklistNodeAllowInsert(quicklist->tail, quicklist->fill, sz))) {
         quicklist->tail->zl =
             ziplistPush(quicklist->tail->zl, value, sz, ZIPLIST_TAIL);
