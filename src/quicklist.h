@@ -48,13 +48,16 @@
 typedef struct quicklistNode {
     struct quicklistNode *prev;
     struct quicklistNode *next;
-    // 这个应该是ziplist的起始偏移量
+    // 该指针指向实际数据存储的位置  数据块既可以用ziplist也可以用lzf
     unsigned char *zl;
     unsigned int sz;             /* ziplist size in bytes */
     // 该node绑定的压缩列表内有多少项
     unsigned int count : 16;     /* count of items in ziplist */
+    // RAW代表zl指向ziplist LZF 代表zl指向quicklistLZF
     unsigned int encoding : 2;   /* RAW==1 or LZF==2 */
     unsigned int container : 2;  /* NONE==1 or ZIPLIST==2 */
+
+    // 如果数据已经被压缩过 该标识为0
     unsigned int recompress : 1; /* was this node previous compressed? */
     unsigned int attempted_compress : 1; /* node can't compress; too small */
     unsigned int extra : 10; /* more bits to steal for future usage */
@@ -64,7 +67,9 @@ typedef struct quicklistNode {
  * 'sz' is byte length of 'compressed' field.
  * 'compressed' is LZF data with total (compressed) length 'sz'
  * NOTE: uncompressed length is stored in quicklistNode->sz.
- * When quicklistNode->zl is compressed, node->zl points to a quicklistLZF */
+ * When quicklistNode->zl is compressed, node->zl points to a quicklistLZF
+ * 当某个quicknode满足压缩条件时
+ * */
 typedef struct quicklistLZF {
     unsigned int sz; /* LZF size in bytes*/
     char compressed[];
@@ -118,6 +123,8 @@ typedef struct quicklist {
     unsigned long len;          /* number of quicklistNodes */
     // 每个节点下允许存储多少entry
     int fill : QL_FILL_BITS;              /* fill factor for individual nodes */
+
+    // 非0代表支持压缩
     unsigned int compress : QL_COMP_BITS; /* depth of end nodes not to compress;0=off */
     unsigned int bookmark_count: QL_BM_BITS;
     // 列表中存在一组标签
@@ -132,9 +139,16 @@ typedef struct quicklistIter {
     int direction;
 } quicklistIter;
 
+
+/**
+ * 描述 quicklist下ziplist中的某个entry
+ */
 typedef struct quicklistEntry {
     const quicklist *quicklist;
     quicklistNode *node;
+    /**
+     * ziplist 此时某个entry的指针
+     */
     unsigned char *zi;
     unsigned char *value;
     long long longval;
@@ -145,7 +159,9 @@ typedef struct quicklistEntry {
 #define QUICKLIST_HEAD 0
 #define QUICKLIST_TAIL -1
 
-/* quicklist node encodings */
+/* quicklist node encodings
+ * 当新创建一个 quicklist节点时 encoding类型为raw
+ * */
 #define QUICKLIST_NODE_ENCODING_RAW 1
 #define QUICKLIST_NODE_ENCODING_LZF 2
 
