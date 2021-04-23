@@ -57,7 +57,7 @@ typedef struct quicklistNode {
     unsigned int encoding : 2;   /* RAW==1 or LZF==2 */
     unsigned int container : 2;  /* NONE==1 or ZIPLIST==2 */
 
-    // 如果数据已经被压缩过 该标识为0
+    // 代表该数据之前被压缩过 此时已经被解压
     unsigned int recompress : 1; /* was this node previous compressed? */
     unsigned int attempted_compress : 1; /* node can't compress; too small */
     unsigned int extra : 10; /* more bits to steal for future usage */
@@ -121,10 +121,11 @@ typedef struct quicklist {
     // 每个节点对应一个压缩列表 这里是所有节点下压缩列表的entry数总和
     unsigned long count;        /* total count of all entries in all ziplists */
     unsigned long len;          /* number of quicklistNodes */
-    // 每个节点下允许存储多少entry
+
+    // 认为每个节点内最多允许插入多少数据 如果是负数 会映射成一个特殊大小
     int fill : QL_FILL_BITS;              /* fill factor for individual nodes */
 
-    // 非0代表支持压缩
+    // 只有当节点数量 超过2倍的该值时 才允许进行压缩
     unsigned int compress : QL_COMP_BITS; /* depth of end nodes not to compress;0=off */
     unsigned int bookmark_count: QL_BM_BITS;
     // 列表中存在一组标签
@@ -153,6 +154,9 @@ typedef struct quicklistEntry {
     unsigned char *value;
     long long longval;
     unsigned int sz;
+    /**
+     * ziplist下第几个entry
+     */
     int offset;
 } quicklistEntry;
 

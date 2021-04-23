@@ -31,7 +31,7 @@
 #include <math.h>
 
 /*-----------------------------------------------------------------------------
- * Hash type API
+ * Hash type API   redis内部的数据结构对外被封装成hashapi
  *----------------------------------------------------------------------------*/
 
 /* Check the length of a number of objects to see if we need to convert a
