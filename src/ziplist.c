@@ -861,7 +861,7 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
     zlentry tail;
 
     /* Find out prevlen for the entry that is inserted. */
-    // 代表本次希望插入到头部 (且此时ziplist已经存在数据)  在下面会解析第一个entry的prevlen 不过第一个entry没有前prev prevlen长度应该是0
+    // 代表本次希望插入到非尾部的位置 (此时ziplist已经存在数据)  在下面会解析本p对应的entry的prevlen (第一个entry没有前prev prevlen长度应该是0)
     if (p[0] != ZIP_END) {
         ZIP_DECODE_PREVLEN(p, prevlensize, prevlen);
     } else {
@@ -899,7 +899,7 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
      * make sure that the next entry can hold this entry's length in
      * its prevlen field. */
     int forcelarge = 0;
-    // p[0] != ZIP_END 代表本次期望插入头部  这里是确保当前p用于存储上一个entry长度信息的prevlen有足够的空间表示本次新entry的长度信息
+    // p[0] != ZIP_END 代表本次期望插入到非尾部  这里是确保当前p用于存储上一个entry长度信息的prevlen有足够的空间表示本次新entry的长度信息
     // 简化情况第一次p[0]就是end 此时diff是0
     nextdiff = (p[0] != ZIP_END) ? zipPrevLenByteDiff(p,reqlen) : 0;
     // 目前头部entry前缀长度必然是0 也就是 zipPrevLenByteDiff(p,reqlen) 不会是负数 应该不会出现下面的情况
