@@ -1278,7 +1278,9 @@ dictType objectKeyHeapPointerValueDictType = {
         dictVanillaFree            /* val destructor */
 };
 
-/* Set dictionary type. Keys are SDS strings, values are ot used. */
+/* Set dictionary type. Keys are SDS strings, values are ot used.
+ * redisSet使用的dict函数 这里认为key/value都是sds
+ * */
 dictType setDictType = {
         dictSdsHash,               /* hash function */
         NULL,                      /* key dup */

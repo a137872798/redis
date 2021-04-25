@@ -26,6 +26,9 @@
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
+ *
+ *
+ * intset结构 redis特化出来 专门负责存储int类型的数据结构
  */
 
 #include <stdio.h>
@@ -42,7 +45,9 @@
 #define INTSET_ENC_INT32 (sizeof(int32_t))
 #define INTSET_ENC_INT64 (sizeof(int64_t))
 
-/* Return the required encoding for the provided value. */
+/* Return the required encoding for the provided value.
+ * 如果int值可以用高位保存 仅截取高位 以达到节省内存的目的
+ * */
 static uint8_t _intsetValueEncoding(int64_t v) {
     if (v < INT32_MIN || v > INT32_MAX)
         return INTSET_ENC_INT64;
@@ -52,13 +57,17 @@ static uint8_t _intsetValueEncoding(int64_t v) {
         return INTSET_ENC_INT16;
 }
 
-/* Return the value at pos, given an encoding. */
+/* Return the value at pos, given an encoding.
+ * @param enc 代表数据的编码方式
+ * 对数据进行还原
+ * */
 static int64_t _intsetGetEncoded(intset *is, int pos, uint8_t enc) {
     int64_t v64;
     int32_t v32;
     int16_t v16;
 
     if (enc == INTSET_ENC_INT64) {
+        // 通过pos 定位到数据的起始位置后 配合enc确定要读取的长度
         memcpy(&v64,((int64_t*)is->contents)+pos,sizeof(v64));
         memrev64ifbe(&v64);
         return v64;
@@ -73,12 +82,16 @@ static int64_t _intsetGetEncoded(intset *is, int pos, uint8_t enc) {
     }
 }
 
-/* Return the value at pos, using the configured encoding. */
+/* Return the value at pos, using the configured encoding.
+ * 直接采用配置的encoding解析数据
+ * */
 static int64_t _intsetGet(intset *is, int pos) {
     return _intsetGetEncoded(is,pos,intrev32ifbe(is->encoding));
 }
 
-/* Set the value at pos, using the configured encoding. */
+/* Set the value at pos, using the configured encoding.
+ * 在intset中 对pos上的数据采用一开始配置的encoding进行编码
+ * */
 static void _intsetSet(intset *is, int pos, int64_t value) {
     uint32_t encoding = intrev32ifbe(is->encoding);
 
@@ -94,7 +107,9 @@ static void _intsetSet(intset *is, int pos, int64_t value) {
     }
 }
 
-/* Create an empty intset. */
+/* Create an empty intset.
+ * 初始化一个新的结构 默认encoding为16
+ * */
 intset *intsetNew(void) {
     intset *is = zmalloc(sizeof(intset));
     is->encoding = intrev32ifbe(INTSET_ENC_INT16);
@@ -102,7 +117,9 @@ intset *intsetNew(void) {
     return is;
 }
 
-/* Resize the intset */
+/* Resize the intset
+ * 看来该结构被设计成 内部每个元素的大小都应当可以用同一种encoding来表示
+ * */
 static intset *intsetResize(intset *is, uint32_t len) {
     uint32_t size = len*intrev32ifbe(is->encoding);
     is = zrealloc(is,sizeof(intset)+size);
@@ -112,7 +129,10 @@ static intset *intsetResize(intset *is, uint32_t len) {
 /* Search for the position of "value". Return 1 when the value was found and
  * sets "pos" to the position of the value within the intset. Return 0 when
  * the value is not present in the intset and sets "pos" to the position
- * where "value" can be inserted. */
+ * where "value" can be inserted.
+ *
+ * 从这里使用二分查找可以反推出 内部数据是按照从小到大的顺序
+ * */
 static uint8_t intsetSearch(intset *is, int64_t value, uint32_t *pos) {
     int min = 0, max = intrev32ifbe(is->length)-1, mid = -1;
     int64_t cur = -1;
@@ -123,16 +143,21 @@ static uint8_t intsetSearch(intset *is, int64_t value, uint32_t *pos) {
         return 0;
     } else {
         /* Check for the case where we know we cannot find the value,
-         * but do know the insert position. */
+         * but do know the insert position.
+         * 如果本次插入的值超过此时intset内的最大值
+         * */
         if (value > _intsetGet(is,max)) {
+            // 此时pos就是最大长度
             if (pos) *pos = intrev32ifbe(is->length);
             return 0;
+            // 小于最小值
         } else if (value < _intsetGet(is,0)) {
             if (pos) *pos = 0;
             return 0;
         }
     }
 
+    // 标准的二分查找
     while(max >= min) {
         mid = ((unsigned int)min + (unsigned int)max) >> 1;
         cur = _intsetGet(is,mid);
@@ -154,21 +179,32 @@ static uint8_t intsetSearch(intset *is, int64_t value, uint32_t *pos) {
     }
 }
 
-/* Upgrades the intset to a larger encoding and inserts the given integer. */
+/* Upgrades the intset to a larger encoding and inserts the given integer.
+ * 当表示本次插入的值需要的位数 超过了之前值的位数时 对之前的数据进行升级
+ * 因为发生了升级操作 所以可以确保本次的数据是最大或者最小的 不需要编码
+ * */
 static intset *intsetUpgradeAndAdd(intset *is, int64_t value) {
     uint8_t curenc = intrev32ifbe(is->encoding);
     uint8_t newenc = _intsetValueEncoding(value);
     int length = intrev32ifbe(is->length);
     int prepend = value < 0 ? 1 : 0;
 
-    /* First set new encoding and resize */
+    /* First set new encoding and resize
+     * 更新intset此时的编码方式
+     * */
     is->encoding = intrev32ifbe(newenc);
+
+    // 按照此时最新的encoding 对intset进行扩容
     is = intsetResize(is,intrev32ifbe(is->length)+1);
 
     /* Upgrade back-to-front so we don't overwrite values.
      * Note that the "prepend" variable is used to make sure we have an empty
-     * space at either the beginning or the end of the intset. */
+     * space at either the beginning or the end of the intset.
+     * 对原有的每个元素进行扩容
+     * */
     while(length--)
+        // _intsetGetEncoded 按照旧的编码方式对数据进行还原
+        // 此时数据会按照最新的encoding 进行编码
         _intsetSet(is,length+prepend,_intsetGetEncoded(is,length,curenc));
 
     /* Set the value at the beginning or the end. */
@@ -180,6 +216,12 @@ static intset *intsetUpgradeAndAdd(intset *is, int64_t value) {
     return is;
 }
 
+/**
+ * 将从from开始的所有数据 移动到以to为起点的位置
+ * @param is
+ * @param from
+ * @param to
+ */
 static void intsetMoveTail(intset *is, uint32_t from, uint32_t to) {
     void *src, *dst;
     uint32_t bytes = intrev32ifbe(is->length)-from;
@@ -201,28 +243,38 @@ static void intsetMoveTail(intset *is, uint32_t from, uint32_t to) {
     memmove(dst,src,bytes);
 }
 
-/* Insert an integer in the intset */
+/* Insert an integer in the intset
+ * 往intset中插入一个新元素
+ * */
 intset *intsetAdd(intset *is, int64_t value, uint8_t *success) {
+    // 预估该值需要多少位表示
     uint8_t valenc = _intsetValueEncoding(value);
     uint32_t pos;
     if (success) *success = 1;
 
     /* Upgrade encoding if necessary. If we need to upgrade, we know that
      * this value should be either appended (if > 0) or prepended (if < 0),
-     * because it lies outside the range of existing values. */
+     * because it lies outside the range of existing values.
+     * 如果此时该值超过了原本intset中其他值占用的位数 打算对之前所有的元素进行升级 也就是每个值占用相同的位数
+     * */
     if (valenc > intrev32ifbe(is->encoding)) {
-        /* This always succeeds, so we don't need to curry *success. */
+        /* This always succeeds, so we don't need to curry *success.
+         * 因为encoding 发生了变化 所以可以确定本次插入的值一定比之前所有值大/小
+         * */
         return intsetUpgradeAndAdd(is,value);
     } else {
         /* Abort if the value is already present in the set.
          * This call will populate "pos" with the right position to insert
-         * the value when it cannot be found. */
+         * the value when it cannot be found.
+         * 判断该值是否已经存在 因为是set 不允许保留相同的值 此时会将合适的下标设置到pos中
+         * */
         if (intsetSearch(is,value,&pos)) {
             if (success) *success = 0;
             return is;
         }
 
         is = intsetResize(is,intrev32ifbe(is->length)+1);
+        // 将pos起所有的值往后挪 以便空出空间插入新数据
         if (pos < intrev32ifbe(is->length)) intsetMoveTail(is,pos,pos+1);
     }
 
@@ -231,19 +283,25 @@ intset *intsetAdd(intset *is, int64_t value, uint8_t *success) {
     return is;
 }
 
-/* Delete integer from intset */
+/* Delete integer from intset
+ * 从inset中移除某个元素
+ * */
 intset *intsetRemove(intset *is, int64_t value, int *success) {
+
     uint8_t valenc = _intsetValueEncoding(value);
     uint32_t pos;
     if (success) *success = 0;
 
+    // 如果本次的值编码后比之前所有元素编码都要大 必然不存在 小是有可能存在的 因为可能发生了升级
     if (valenc <= intrev32ifbe(is->encoding) && intsetSearch(is,value,&pos)) {
         uint32_t len = intrev32ifbe(is->length);
 
         /* We know we can delete */
         if (success) *success = 1;
 
-        /* Overwrite value with tail and update length */
+        /* Overwrite value with tail and update length
+         * 将后面所有元素前移
+         * */
         if (pos < (len-1)) intsetMoveTail(is,pos+1,pos);
         is = intsetResize(is,len-1);
         is->length = intrev32ifbe(len-1);
@@ -279,7 +337,9 @@ uint32_t intsetLen(const intset *is) {
     return intrev32ifbe(is->length);
 }
 
-/* Return intset blob size in bytes. */
+/* Return intset blob size in bytes.
+ * 返回该结构占用的内存总大小
+ * */
 size_t intsetBlobLen(intset *is) {
     return sizeof(intset)+intrev32ifbe(is->length)*intrev32ifbe(is->encoding);
 }

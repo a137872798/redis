@@ -884,6 +884,9 @@ struct moduleLoadQueueEntry {
     robj **argv;
 };
 
+/**
+ * 有些固定的返回结果以常量形式存储
+ */
 struct sharedObjectsStruct {
     robj *crlf, *ok, *err, *emptybulk, *czero, *cone, *pong, *space,
     *colon, *queued, *null[4], *nullarray[4], *emptymap[4], *emptyset[4],
@@ -1569,11 +1572,15 @@ typedef struct {
     quicklistEntry entry; /* Entry in quicklist */
 } listTypeEntry;
 
-/* Structure to hold set iteration abstraction. */
+/* Structure to hold set iteration abstraction.
+ * 有关redisSet结构的迭代器  此时set可能是intset 也可能是dict
+ * */
 typedef struct {
     robj *subject;
     int encoding;
+    // 对应intset的迭代器 实际上就是下标
     int ii; /* intset iterator */
+    // 对应dict的迭代器
     dictIterator *di;
 } setTypeIterator;
 
