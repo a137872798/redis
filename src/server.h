@@ -904,20 +904,29 @@ struct sharedObjectsStruct {
     sds minstring, maxstring;
 };
 
-/* ZSETs use a specialized version of Skiplists */
+/* ZSETs use a specialized version of Skiplists * */
 typedef struct zskiplistNode {
     sds ele;
     double score;
+    // 同一级中的横向链表
     struct zskiplistNode *backward;
+    // 纵向链表
     struct zskiplistLevel {
+        // 每个level存储了下一层的节点指针
         struct zskiplistNode *forward;
         unsigned long span;
     } level[];
 } zskiplistNode;
 
+/**
+ * redis基于跳跃表来实现有序set(zset)
+ */
 typedef struct zskiplist {
+    // 最低层的首尾节点
     struct zskiplistNode *header, *tail;
+    // 应该是最低层的元素数量
     unsigned long length;
+    // 记录此时高度
     int level;
 } zskiplist;
 

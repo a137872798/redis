@@ -61,13 +61,16 @@
 
 /*-----------------------------------------------------------------------------
  * Skiplist implementation of the low level API
+ * zset 代表有序set 它的实现是基于跳跃表
  *----------------------------------------------------------------------------*/
 
 int zslLexValueGteMin(sds value, zlexrangespec *spec);
 int zslLexValueLteMax(sds value, zlexrangespec *spec);
 
 /* Create a skiplist node with the specified number of levels.
- * The SDS string 'ele' is referenced by the node after the call. */
+ * The SDS string 'ele' is referenced by the node after the call.
+ * 跳跃表一般而言在初始阶段就已经声明了level的大小 也对应着跳跃表的高度
+ * */
 zskiplistNode *zslCreateNode(int level, double score, sds ele) {
     zskiplistNode *zn =
         zmalloc(sizeof(*zn)+level*sizeof(struct zskiplistLevel));
@@ -76,16 +79,21 @@ zskiplistNode *zslCreateNode(int level, double score, sds ele) {
     return zn;
 }
 
-/* Create a new skiplist. */
+/* Create a new skiplist.
+ * 初始化一个新的跳跃表
+ * */
 zskiplist *zslCreate(void) {
     int j;
     zskiplist *zsl;
 
     zsl = zmalloc(sizeof(*zsl));
+    // 初始阶段数据只要一级就可以了
     zsl->level = 1;
     zsl->length = 0;
     zsl->header = zslCreateNode(ZSKIPLIST_MAXLEVEL,0,NULL);
+    // 给每个 level填充属性
     for (j = 0; j < ZSKIPLIST_MAXLEVEL; j++) {
+        // 每一层的第一个元素 就是level.forward
         zsl->header->level[j].forward = NULL;
         zsl->header->level[j].span = 0;
     }
@@ -104,6 +112,7 @@ void zslFreeNode(zskiplistNode *node) {
 
 /* Free a whole skiplist. */
 void zslFree(zskiplist *zsl) {
+    // zsl->header->level[0].forward 就是跳跃表的第一个节点 上层节点通过level连接 往右通过backward连接
     zskiplistNode *node = zsl->header->level[0].forward, *next;
 
     zfree(zsl->header);
@@ -128,32 +137,51 @@ int zslRandomLevel(void) {
 
 /* Insert a new node in the skiplist. Assumes the element does not already
  * exist (up to the caller to enforce that). The skiplist takes ownership
- * of the passed SDS string 'ele'. */
+ * of the passed SDS string 'ele'.
+ * 往跳跃表中插入数据  看来是根据score为元素排序的
+ * */
 zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele) {
+
+    // update中存储的是每一层开始变动的节点
     zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;
+    // 该值存储的是每一层的节点在同层的span值
     unsigned int rank[ZSKIPLIST_MAXLEVEL];
     int i, level;
 
     serverAssert(!isnan(score));
+    // 先取到zskiplist中最小的元素
     x = zsl->header;
+    // 从高处往低处读取数据 如果level不为1 代表索引已经建立(高层数据就是底层数据的索引)  这里的循环就是每次往下层搜索
     for (i = zsl->level-1; i >= 0; i--) {
-        /* store rank that is crossed to reach the insert position */
+        /* store rank that is crossed to reach the insert position
+         * 代表首次访问  为rank[zsl->level-1] 赋值为0
+         * 之后每次到下层 rank值都是累加的 (累加之前所有的span值)
+         * */
         rank[i] = i == (zsl->level-1) ? 0 : rank[i+1];
+        // 从header节点的最高层首元素开始与score比较
         while (x->level[i].forward &&
+        // 命中索引范围 往下层继续寻找
                 (x->level[i].forward->score < score ||
+                // score一样的情况下 ele小的也算
                     (x->level[i].forward->score == score &&
                     sdscmp(x->level[i].forward->ele,ele) < 0)))
         {
             rank[i] += x->level[i].span;
+            // 跳转到下一层
             x = x->level[i].forward;
         }
+        // 每次在某一层对应到的节点都会存储在update数组中
         update[i] = x;
     }
     /* we assume the element is not already inside, since we allow duplicated
      * scores, reinserting the same element should never happen since the
      * caller of zslInsert() should test in the hash table if the element is
-     * already inside or not. */
+     * already inside or not.
+     * 这里生成一个随机的level
+     * */
     level = zslRandomLevel();
+    // level的范围是0~maxLevel  而此时zskiplist中囤积的数据可能还不足于达到这个高度
+    // 先简化情况 认为随机的level在 0~zsl->level之间 这时不会进入下面的分支
     if (level > zsl->level) {
         for (i = zsl->level; i < level; i++) {
             rank[i] = 0;
@@ -162,8 +190,10 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele) {
         }
         zsl->level = level;
     }
+    // 基于这个随机的level来创建节点
     x = zslCreateNode(level,score,ele);
     for (i = 0; i < level; i++) {
+        // 之前在上面的逻辑块中已经定位到要在哪些level的哪些节点开始插入数据了 将数据拷贝到x节点各个level的位置
         x->level[i].forward = update[i]->level[i].forward;
         update[i]->level[i].forward = x;
 

@@ -38,6 +38,11 @@
 /* Check the length of a number of objects to see if we need to convert a
  * ziplist to a real hash. Note that we only check string encoded objects
  * as their string length can be queried in constant time.
+ *
+ * 该方法是提前判断hash结构是否要转换
+ * @param argv 代表一组参数
+ * @param start 代表这组参数从哪里开始使用
+ * @param end 代表这组参数到哪里结束
  * */
 void hashTypeTryConversion(robj *o, robj **argv, int start, int end) {
     int i;
@@ -45,6 +50,7 @@ void hashTypeTryConversion(robj *o, robj **argv, int start, int end) {
     if (o->encoding != OBJ_ENCODING_ZIPLIST) return;
 
     for (i = start; i <= end; i++) {
+        // 其中存在某个特别长的字符串 超过了ziplist的限制 会转换成hash结构
         if (sdsEncodedObject(argv[i]) &&
             sdslen(argv[i]->ptr) > server.hash_max_ziplist_value)
         {
@@ -302,7 +308,9 @@ int hashTypeSet(robj *o, sds field, sds value, int flags) {
 }
 
 /* Delete an element from a hash.
- * Return 1 on deleted and 0 on not found. */
+ * Return 1 on deleted and 0 on not found.
+ * 根据某个key删除键值对
+ * */
 int hashTypeDelete(robj *o, sds field) {
     int deleted = 0;
 
@@ -459,7 +467,7 @@ sds hashTypeCurrentFromHashTable(hashTypeIterator *hi, int what) {
  * If *vll is populated *vstr is set to NULL, so the caller
  * can always check the function return by checking the return value
  * type checking if vstr == NULL.
- * 读取迭代器此时遍历到的元素 可能是key 也可能是value
+ * 从迭代器中获取下一个元素 根据what来判断获取的是key还是value
  * */
 void hashTypeCurrentObject(hashTypeIterator *hi, int what, unsigned char **vstr, unsigned int *vlen, long long *vll) {
     if (hi->encoding == OBJ_ENCODING_ZIPLIST) {
@@ -489,11 +497,18 @@ sds hashTypeCurrentObjectNewSds(hashTypeIterator *hi, int what) {
     return sdsfromlonglong(vll);
 }
 
+/**
+ * 只要在db中  key没有冲突 就允许新建hash
+ * @param c
+ * @param key
+ * @return
+ */
 robj *hashTypeLookupWriteOrCreate(client *c, robj *key) {
     robj *o = lookupKeyWrite(c->db,key);
     if (checkType(c,o,OBJ_HASH)) return NULL;
 
     if (o == NULL) {
+        // 初始化hash结构时 默认就是ziplist
         o = createHashObject();
         dbAdd(c->db,key,o);
     }
@@ -560,7 +575,9 @@ void hashTypeConvert(robj *o, int enc) {
  * Duplicate a hash object, with the guarantee that the returned object
  * has the same encoding as the original one.
  *
- * The resulting object always has refcount set to 1 */
+ * The resulting object always has refcount set to 1
+ * 生成一个redisSet副本
+ * */
 robj *hashTypeDup(robj *o) {
     robj *hobj;
     hashTypeIterator *hi;
@@ -601,7 +618,9 @@ robj *hashTypeDup(robj *o) {
     return hobj;
 }
 
-/* callback for to check the ziplist doesn't have duplicate recoreds */
+/* callback for to check the ziplist doesn't have duplicate recoreds
+ * 检查ziplist中是否有重复的数据
+ * */
 static int _hashZiplistEntryValidation(unsigned char *p, void *userdata) {
     struct {
         long count;
@@ -613,9 +632,11 @@ static int _hashZiplistEntryValidation(unsigned char *p, void *userdata) {
         unsigned char *str;
         unsigned int slen;
         long long vll;
+        // 这里从ziplist中继续获取数据
         if (!ziplistGet(p, &str, &slen, &vll))
             return 0;
-        sds field = str? sdsnewlen(str, slen): sdsfromlonglong(vll);;
+        sds field = str? sdsnewlen(str, slen): sdsfromlonglong(vll);
+        // 检测 userdata中的dict是否存在相同的数据 不存在则插入
         if (dictAdd(data->fields, field, NULL) != DICT_OK) {
             /* Duplicate, return an error */
             sdsfree(field);
@@ -623,6 +644,7 @@ static int _hashZiplistEntryValidation(unsigned char *p, void *userdata) {
         }
     }
 
+    // 此时zip的数据已经插入到dict中了 所以count+1 注意插入的value为NULL
     (data->count)++;
     return 1;
 }
@@ -631,6 +653,7 @@ static int _hashZiplistEntryValidation(unsigned char *p, void *userdata) {
  * when `deep` is 0, only the integrity of the header is validated.
  * when `deep` is 1, we scan all the entries one by one. */
 int hashZiplistValidateIntegrity(unsigned char *zl, size_t size, int deep) {
+    // 代表仅检查单条数据
     if (!deep)
         return ziplistValidateIntegrity(zl, size, 0, NULL, NULL);
 
@@ -650,12 +673,16 @@ int hashZiplistValidateIntegrity(unsigned char *zl, size_t size, int deep) {
     return ret;
 }
 
-/* Create a new sds string from the ziplist entry. */
+/* Create a new sds string from the ziplist entry.
+ * 读取ziplist内的值
+ * */
 sds hashSdsFromZiplistEntry(ziplistEntry *e) {
     return e->sval ? sdsnewlen(e->sval, e->slen) : sdsfromlonglong(e->lval);
 }
 
-/* Reply with bulk string from the ziplist entry. */
+/* Reply with bulk string from the ziplist entry.
+ * 将ziplist内部的数据写回到client
+ * */
 void hashReplyFromZiplistEntry(client *c, ziplistEntry *e) {
     if (e->sval)
         addReplyBulkCBuffer(c, e->sval, e->slen);
@@ -690,22 +717,33 @@ void hashTypeRandomElement(robj *hashobj, unsigned long hashsize, ziplistEntry *
  * Hash type commands
  *----------------------------------------------------------------------------*/
 
+/**
+ * 针对hash结构 如果存在数据插入 否则不操作
+ * @param c
+ */
 void hsetnxCommand(client *c) {
     robj *o;
+    // 先从client连接的db中查找目标数据结构
     if ((o = hashTypeLookupWriteOrCreate(c,c->argv[1])) == NULL) return;
     hashTypeTryConversion(o,c->argv,2,3);
 
+    // 发现本次要插入的数据已经存在 返回0
     if (hashTypeExists(o, c->argv[2]->ptr)) {
         addReply(c, shared.czero);
     } else {
         hashTypeSet(o,c->argv[2]->ptr,c->argv[3]->ptr,HASH_SET_COPY);
         addReply(c, shared.cone);
+        // 这里也要触发监听机制 推测应该是执行aof和复写相关的吧
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_HASH,"hset",c->argv[1],c->db->id);
         server.dirty++;
     }
 }
 
+/**
+ * 强制覆盖存在的键值对
+ * @param c
+ */
 void hsetCommand(client *c) {
     int i, created = 0;
     robj *o;
@@ -716,6 +754,7 @@ void hsetCommand(client *c) {
     }
 
     if ((o = hashTypeLookupWriteOrCreate(c,c->argv[1])) == NULL) return;
+    // 预计会插入很多数据
     hashTypeTryConversion(o,c->argv,2,c->argc-1);
 
     for (i = 2; i < c->argc; i += 2)
@@ -723,6 +762,7 @@ void hsetCommand(client *c) {
 
     /* HMSET (deprecated) and HSET return value is different. */
     char *cmdname = c->argv[0]->ptr;
+    // 根据command类型 来确定返回结果
     if (cmdname[1] == 's' || cmdname[1] == 'S') {
         /* HSET */
         addReplyLongLong(c, created);
@@ -735,6 +775,10 @@ void hsetCommand(client *c) {
     server.dirty += (c->argc - 2)/2;
 }
 
+/**
+ * 将值增加某个量
+ * @param c
+ */
 void hincrbyCommand(client *c) {
     long long value, incr, oldvalue;
     robj *o;
@@ -752,6 +796,7 @@ void hincrbyCommand(client *c) {
             }
         } /* Else hashTypeGetValue() already stored it into &value */
     } else {
+        // 不存在 则初始化成0
         value = 0;
     }
 
@@ -763,6 +808,7 @@ void hincrbyCommand(client *c) {
     }
     value += incr;
     new = sdsfromlonglong(value);
+    // 覆盖原值
     hashTypeSet(o,c->argv[2]->ptr,new,HASH_SET_TAKE_VALUE);
     addReplyLongLong(c,value);
     signalModifiedKey(c,c->db,c->argv[1]);
@@ -818,6 +864,12 @@ void hincrbyfloatCommand(client *c) {
     decrRefCount(newobj);
 }
 
+/**
+ * 从hash结构中读取某个key对应的数据 并写回到client中
+ * @param c
+ * @param o
+ * @param field
+ */
 static void addHashFieldToReply(client *c, robj *o, sds field) {
     int ret;
 
@@ -835,6 +887,7 @@ static void addHashFieldToReply(client *c, robj *o, sds field) {
         if (ret < 0) {
             addReplyNull(c);
         } else {
+            // 按照数据类型调用不同的api 写入到client的缓冲区中
             if (vstr) {
                 addReplyBulkCBuffer(c, vstr, vlen);
             } else {
@@ -856,12 +909,17 @@ static void addHashFieldToReply(client *c, robj *o, sds field) {
 void hgetCommand(client *c) {
     robj *o;
 
+    // 检测redisHash结构是否存在 不存在将错误信息写入到client中
     if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.null[c->resp])) == NULL ||
         checkType(c,o,OBJ_HASH)) return;
 
     addHashFieldToReply(c, o, c->argv[2]->ptr);
 }
 
+/**
+ * 这应该是 multiget的意思
+ * @param c
+ */
 void hmgetCommand(client *c) {
     robj *o;
     int i;
@@ -872,11 +930,16 @@ void hmgetCommand(client *c) {
     if (checkType(c,o,OBJ_HASH)) return;
 
     addReplyArrayLen(c, c->argc-2);
+    // 将每个key查询到的数据写入到client
     for (i = 2; i < c->argc; i++) {
         addHashFieldToReply(c, o, c->argv[i]->ptr);
     }
 }
 
+/**
+ * 从hash结构中删除某个键值对
+ * @param c
+ */
 void hdelCommand(client *c) {
     robj *o;
     int j, deleted = 0, keyremoved = 0;
@@ -914,6 +977,10 @@ void hlenCommand(client *c) {
     addReplyLongLong(c,hashTypeLength(o));
 }
 
+/**
+ * 返回value的长度
+ * @param c
+ */
 void hstrlenCommand(client *c) {
     robj *o;
 
@@ -922,6 +989,12 @@ void hstrlenCommand(client *c) {
     addReplyLongLong(c,hashTypeGetValueLength(o,c->argv[2]->ptr));
 }
 
+/**
+ * 读取迭代器此时对应的数据 并写回到client中
+ * @param c
+ * @param hi
+ * @param what
+ */
 static void addHashIteratorCursorToReply(client *c, hashTypeIterator *hi, int what) {
     if (hi->encoding == OBJ_ENCODING_ZIPLIST) {
         unsigned char *vstr = NULL;
@@ -941,6 +1014,11 @@ static void addHashIteratorCursorToReply(client *c, hashTypeIterator *hi, int wh
     }
 }
 
+/**
+ * 获取所有key的公共逻辑
+ * @param c
+ * @param flags 代表要获取 key或者value
+ */
 void genericHgetallCommand(client *c, int flags) {
     robj *o;
     hashTypeIterator *hi;
