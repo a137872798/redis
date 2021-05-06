@@ -4231,7 +4231,8 @@ long double RM_LoadLongDouble(RedisModuleIO *io) {
 
 /* Iterate over modules, and trigger rdb aux saving for the ones modules types
  * who asked for it.
- * TODO RDB相关的先忽略
+ * 在为当前db数据生成rdb时 会调用该方法
+ * @param when 调用时机 比如生成rdb前/后
  * */
 ssize_t rdbSaveModulesAux(rio *rdb, int when) {
     size_t total_written = 0;
@@ -4243,7 +4244,7 @@ ssize_t rdbSaveModulesAux(rio *rdb, int when) {
         listIter li;
         listNode *ln;
 
-        // 每个module可能有支持的数据类型吧  module和command的区别是什么???
+        // 遍历所有module 并检查他们是否有需要存储的辅助信息
         listRewind(module->types, &li);
         while ((ln = listNext(&li))) {
             moduleType *mt = ln->value;

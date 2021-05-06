@@ -732,7 +732,9 @@ int rdbLoadBinaryFloatValue(rio *rdb, float *val) {
     return 0;
 }
 
-/* Save the object type of object "o". */
+/* Save the object type of object "o".
+ * 将类型信息写入到rio中
+ * */
 int rdbSaveObjectType(rio *rdb, robj *o) {
     switch (o->type) {
     case OBJ_STRING:
@@ -774,7 +776,9 @@ int rdbSaveObjectType(rio *rdb, robj *o) {
 }
 
 /* Use rdbLoadType() to load a TYPE in RDB format, but returns -1 if the
- * type is not specifically a valid Object Type. */
+ * type is not specifically a valid Object Type.
+ * 检查读取出来的type是否合法
+ * */
 int rdbLoadObjectType(rio *rdb) {
     int type;
     if ((type = rdbLoadType(rdb)) == -1) return -1;
@@ -788,11 +792,15 @@ int rdbLoadObjectType(rio *rdb) {
  * just the IDs: this is useful because for the global consumer group PEL
  * we serialized the NACKs as well, but when serializing the local consumer
  * PELs we just add the ID, that will be resolved inside the global PEL to
- * put a reference to the same structure. */
+ * put a reference to the same structure.
+ * 将 stream中的数据写入到rdb中
+ * */
 ssize_t rdbSaveStreamPEL(rio *rdb, rax *pel, int nacks) {
     ssize_t n, nwritten = 0;
 
-    /* Number of entries in the PEL. */
+    /* Number of entries in the PEL.
+     * 将待处理的entry总数写入
+     * */
     if ((n = rdbSaveLen(rdb,raxSize(pel))) == -1) return -1;
     nwritten += n;
 
@@ -802,11 +810,15 @@ ssize_t rdbSaveStreamPEL(rio *rdb, rax *pel, int nacks) {
     raxSeek(&ri,"^",NULL,0);
     while(raxNext(&ri)) {
         /* We store IDs in raw form as 128 big big endian numbers, like
-         * they are inside the radix tree key. */
+         * they are inside the radix tree key.
+         * 该rax结构中key存储的是 streamID
+         * */
         if ((n = rdbWriteRaw(rdb,ri.key,sizeof(streamID))) == -1) return -1;
         nwritten += n;
 
+        // 代表每个节点存储了数据
         if (nacks) {
+            // 该对象用于存储消息接收时间 以及消费逻辑
             streamNACK *nack = ri.data;
             if ((n = rdbSaveMillisecondTime(rdb,nack->delivery_time)) == -1)
                 return -1;
@@ -824,11 +836,14 @@ ssize_t rdbSaveStreamPEL(rio *rdb, rax *pel, int nacks) {
 
 /* Serialize the consumers of a stream consumer group into the RDB. Helper
  * function for the stream data type serialization. What we do here is to
- * persist the consumer metadata, and it's PEL, for each consumer. */
+ * persist the consumer metadata, and it's PEL, for each consumer.
+ * 存储消息消费者
+ * */
 size_t rdbSaveStreamConsumers(rio *rdb, streamCG *cg) {
     ssize_t n, nwritten = 0;
 
-    /* Number of consumers in this consumer group. */
+    /* Number of consumers in this consumer group.
+     * */
     if ((n = rdbSaveLen(rdb,raxSize(cg->consumers))) == -1) return -1;
     nwritten += n;
 
@@ -861,7 +876,9 @@ size_t rdbSaveStreamConsumers(rio *rdb, streamCG *cg) {
 }
 
 /* Save a Redis object.
- * Returns -1 on error, number of bytes written on success. */
+ * Returns -1 on error, number of bytes written on success.
+ * 将某个redisObject写入到rdb中  可以注意到aof是写入每次命令 并且要通过fakeClient进行数据重做  而rdb只要存储此时db中的数据 也就是一种快照
+ * */
 ssize_t rdbSaveObject(rio *rdb, robj *o, robj *key) {
     ssize_t n = 0, nwritten = 0;
 
@@ -879,6 +896,7 @@ ssize_t rdbSaveObject(rio *rdb, robj *o, robj *key) {
             nwritten += n;
 
             while(node) {
+                // 如果数据已经被压缩 直接写入压缩数据  否则将ziplist的数据直接写入rdb
                 if (quicklistNodeIsCompressed(node)) {
                     void *data;
                     size_t compress_len = quicklistGetLzf(node, &data);
@@ -1109,6 +1127,7 @@ ssize_t rdbSaveObject(rio *rdb, robj *o, robj *key) {
  * this length with very little changes to the code. In the future
  * we could switch to a faster solution. */
 size_t rdbSavedObjectLen(robj *o, robj *key) {
+    // 当rdb为NULL时  本次save只会返回o对应的长度
     ssize_t len = rdbSaveObject(NULL,o,key);
     serverAssertWithInfo(NULL,o,len != -1);
     return len;
@@ -1117,8 +1136,11 @@ size_t rdbSavedObjectLen(robj *o, robj *key) {
 /* Save a key-value pair, with expire time, type, key, value.
  * On error -1 is returned.
  * On success if the key was actually saved 1 is returned, otherwise 0
- * is returned (the key was already expired). */
+ * is returned (the key was already expired).
+ * 存储一组键值对 还包含了超时时间
+ * */
 int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val, long long expiretime) {
+    // 采用的内存淘汰策略
     int savelru = server.maxmemory_policy & MAXMEMORY_FLAG_LRU;
     int savelfu = server.maxmemory_policy & MAXMEMORY_FLAG_LFU;
 
@@ -1130,6 +1152,7 @@ int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val, long long expiretime) {
 
     /* Save the LRU info. */
     if (savelru) {
+        // 计算一个空闲时间 超过这么多时间后该value就会被回收
         uint64_t idletime = estimateObjectIdleTime(val);
         idletime /= 1000; /* Using seconds is enough and requires less space.*/
         if (rdbSaveType(rdb,RDB_OPCODE_IDLE) == -1) return -1;
@@ -1148,19 +1171,25 @@ int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val, long long expiretime) {
         if (rdbWriteRaw(rdb,buf,1) == -1) return -1;
     }
 
-    /* Save type, key, value */
+    /* Save type, key, value
+     * 最后写入redisObject类型 key/value
+     * */
     if (rdbSaveObjectType(rdb,val) == -1) return -1;
     if (rdbSaveStringObject(rdb,key) == -1) return -1;
     if (rdbSaveObject(rdb,val,key) == -1) return -1;
 
-    /* Delay return if required (for testing) */
+    /* Delay return if required (for testing)
+     * 如果此时rdb刷盘线程处于暂停状态 唤醒
+     * */
     if (server.rdb_key_save_delay)
         usleep(server.rdb_key_save_delay);
 
     return 1;
 }
 
-/* Save an AUX field. */
+/* Save an AUX field.
+ * 写入一个辅助信息 也是一个键值对
+ * */
 ssize_t rdbSaveAuxField(rio *rdb, void *key, size_t keylen, void *val, size_t vallen) {
     ssize_t ret, len = 0;
     if ((ret = rdbSaveType(rdb,RDB_OPCODE_AUX)) == -1) return -1;
@@ -1185,7 +1214,9 @@ ssize_t rdbSaveAuxFieldStrInt(rio *rdb, char *key, long long val) {
     return rdbSaveAuxField(rdb,key,strlen(key),buf,vlen);
 }
 
-/* Save a few default AUX fields with information about the RDB generated. */
+/* Save a few default AUX fields with information about the RDB generated.
+ * 存储一些常量信息
+ * */
 int rdbSaveInfoAuxFields(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
     int redis_bits = (sizeof(void*) == 8) ? 64 : 32;
     int aof_preamble = (rdbflags & RDBFLAGS_AOF_PREAMBLE) != 0;
@@ -1209,13 +1240,22 @@ int rdbSaveInfoAuxFields(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
     return 1;
 }
 
+/**
+ * 存储某个模块的辅助信息
+ * @param rdb
+ * @param when 调用时机 是在生成rdb前/后
+ * @param mt
+ * @return
+ */
 ssize_t rdbSaveSingleModuleAux(rio *rdb, int when, moduleType *mt) {
     /* Save a module-specific aux value. */
     RedisModuleIO io;
     int retval = rdbSaveType(rdb, RDB_OPCODE_MODULE_AUX);
 
     /* Write the "module" identifier as prefix, so that we'll be able
-     * to call the right module during loading. */
+     * to call the right module during loading.
+     * 存储模块id
+     * */
     retval = rdbSaveLen(rdb,mt->id);
     if (retval == -1) return -1;
     io.bytes += retval;
@@ -1232,6 +1272,7 @@ ssize_t rdbSaveSingleModuleAux(rio *rdb, int when, moduleType *mt) {
 
     /* Then write the module-specific representation + EOF marker. */
     moduleInitIOContext(io,mt,rdb,NULL);
+    // 主要就是通过该方法存储辅助信息
     mt->aux_save(&io,when);
     retval = rdbSaveLen(rdb,RDB_MODULE_OPCODE_EOF);
     if (retval == -1)
@@ -1255,7 +1296,9 @@ ssize_t rdbSaveSingleModuleAux(rio *rdb, int when, moduleType *mt) {
  *
  * When the function returns C_ERR and if 'error' is not NULL, the
  * integer pointed by 'error' is set to the value of errno just after the I/O
- * error. */
+ * error.
+ * 将所有数据存储到rdb中 或者说针对当前数据生成快照
+ * */
 int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     dictIterator *di = NULL;
     dictEntry *de;
@@ -1266,18 +1309,25 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
 
     if (server.rdb_checksum)
         rdb->update_cksum = rioGenericUpdateChecksum;
+    // 可以看到rdb文件开头是 REDIS+RDB_VERSION
     snprintf(magic,sizeof(magic),"REDIS%04d",RDB_VERSION);
     if (rdbWriteRaw(rdb,magic,9) == -1) goto werr;
+    // 存储一些辅助信息
     if (rdbSaveInfoAuxFields(rdb,rdbflags,rsi) == -1) goto werr;
+    // 存储module信息
     if (rdbSaveModulesAux(rdb, REDISMODULE_AUX_BEFORE_RDB) == -1) goto werr;
 
+    // 这里开始遍历每个db 并存储所有数据
     for (j = 0; j < server.dbnum; j++) {
         redisDb *db = server.db+j;
+        // db下所有的redisObject存储在dict中
         dict *d = db->dict;
         if (dictSize(d) == 0) continue;
         di = dictGetSafeIterator(d);
 
-        /* Write the SELECT DB opcode */
+        /* Write the SELECT DB opcode
+         * 先存储db序号
+         * */
         if (rdbSaveType(rdb,RDB_OPCODE_SELECTDB) == -1) goto werr;
         if (rdbSaveLen(rdb,j) == -1) goto werr;
 
@@ -1285,6 +1335,7 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
         uint64_t db_size, expires_size;
         db_size = dictSize(db->dict);
         expires_size = dictSize(db->expires);
+        // 分别写入所有redisObject 和设置了超时时间的 redisObject
         if (rdbSaveType(rdb,RDB_OPCODE_RESIZEDB) == -1) goto werr;
         if (rdbSaveLen(rdb,db_size) == -1) goto werr;
         if (rdbSaveLen(rdb,expires_size) == -1) goto werr;
@@ -1297,11 +1348,14 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
 
             initStaticStringObject(key,keystr);
             expire = getExpire(db,&key);
+            // 将每个redisObject 已经相关的key写入到rdb中
             if (rdbSaveKeyValuePair(rdb,&key,o,expire) == -1) goto werr;
 
             /* When this RDB is produced as part of an AOF rewrite, move
              * accumulated diff from parent to child while rewriting in
-             * order to have a smaller final write. */
+             * order to have a smaller final write.
+             * TODO 与aof有关
+             * */
             if (rdbflags & RDBFLAGS_AOF_PREAMBLE &&
                 rdb->processed_bytes > processed+AOF_READ_DIFF_INTERVAL_BYTES)
             {
@@ -1316,7 +1370,9 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     /* If we are storing the replication information on disk, persist
      * the script cache as well: on successful PSYNC after a restart, we need
      * to be able to process any EVALSHA inside the replication backlog the
-     * master will send us. */
+     * master will send us.
+     * TODO 忽略lua脚本
+     * */
     if (rsi && dictSize(server.lua_scripts)) {
         di = dictGetIterator(server.lua_scripts);
         while((de = dictNext(di)) != NULL) {
@@ -1328,6 +1384,7 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
         di = NULL; /* So that we don't release it again on error. */
     }
 
+    // 在rdb存储完成后 存入一些后置信息
     if (rdbSaveModulesAux(rdb, REDISMODULE_AUX_AFTER_RDB) == -1) goto werr;
 
     /* EOF opcode */
@@ -1353,7 +1410,9 @@ werr:
  *
  * While the suffix is the 40 bytes hex string we announced in the prefix.
  * This way processes receiving the payload can understand when it ends
- * without doing any processing of the content. */
+ * without doing any processing of the content.
+ * 实际上也是调用 rdbSaveRio 只是会追加写入一些特殊的前后缀
+ * */
 int rdbSaveRioWithEOFMark(rio *rdb, int *error, rdbSaveInfo *rsi) {
     char eofmark[RDB_EOF_MARK_SIZE];
 
@@ -2129,6 +2188,10 @@ void stopLoading(int success) {
                           NULL);
 }
 
+/**
+ * 触发事件的逻辑 先忽略
+ * @param rdbflags
+ */
 void startSaving(int rdbflags) {
     /* Fire the persistence modules end event. */
     int subevent;
