@@ -40,7 +40,9 @@ void initClientMultiState(client *c) {
     c->mstate.cmd_flags = 0;
 }
 
-/* Release all the resources associated with MULTI/EXEC state */
+/* Release all the resources associated with MULTI/EXEC state
+ * 在执行完一组批任务后 释放内存
+ * */
 void freeClientMultiState(client *c) {
     int j;
 
@@ -55,13 +57,18 @@ void freeClientMultiState(client *c) {
     zfree(c->mstate.commands);
 }
 
-/* Add a new command into the MULTI commands queue */
+/* Add a new command into the MULTI commands queue
+ * 为client增加一个待处理的命令
+ * */
 void queueMultiCommand(client *c) {
     multiCmd *mc;
     int j;
 
+    // 对commands数组进行扩容
     c->mstate.commands = zrealloc(c->mstate.commands,
             sizeof(multiCmd)*(c->mstate.count+1));
+
+    // 将mc指向数组的新槽
     mc = c->mstate.commands+c->mstate.count;
     mc->cmd = c->cmd;
     mc->argc = c->argc;
@@ -69,24 +76,37 @@ void queueMultiCommand(client *c) {
     memcpy(mc->argv,c->argv,sizeof(robj*)*c->argc);
     for (j = 0; j < c->argc; j++)
         incrRefCount(mc->argv[j]);
+    // 此时client维护的组合任务列表中 增加了一个新的multiCommand 所以count+1
     c->mstate.count++;
     c->mstate.cmd_flags |= c->cmd->flags;
 }
 
+/**
+ * 丢弃本次事务  只有当执行批量任务时才有事务的概念
+ * @param c
+ */
 void discardTransaction(client *c) {
     freeClientMultiState(c);
+    // 重置multi命令
     initClientMultiState(c);
+    // 移除掉相关标记
     c->flags &= ~(CLIENT_MULTI|CLIENT_DIRTY_CAS|CLIENT_DIRTY_EXEC);
     unwatchAllKeys(c);
 }
 
 /* Flag the transacation as DIRTY_EXEC so that EXEC will fail.
- * Should be called every time there is an error while queueing a command. */
+ * Should be called every time there is an error while queueing a command.
+ * 当发现client准备执行一次multi命令时 增加一个dirty标记
+ * */
 void flagTransaction(client *c) {
     if (c->flags & CLIENT_MULTI)
         c->flags |= CLIENT_DIRTY_EXEC;
 }
 
+/**
+ * 当要执行一条批量命令时 直接返回ok到对端
+ * @param c
+ */
 void multiCommand(client *c) {
     if (c->flags & CLIENT_MULTI) {
         addReplyError(c,"MULTI calls can not be nested");
@@ -96,6 +116,10 @@ void multiCommand(client *c) {
     addReply(c,shared.ok);
 }
 
+/**
+ * 丢弃此时未执行完的命令
+ * @param c
+ */
 void discardCommand(client *c) {
     if (!(c->flags & CLIENT_MULTI)) {
         addReplyError(c,"DISCARD without MULTI");
@@ -106,17 +130,27 @@ void discardCommand(client *c) {
 }
 
 /* Send a MULTI command to all the slaves and AOF file. Check the execCommand
- * implementation for more information. */
+ * implementation for more information.
+ * 将批量任务 通知到aof 以及集群中其他子节点
+ * */
 void execCommandPropagateMulti(client *c) {
     propagate(server.multiCommand,c->db->id,&shared.multi,1,
               PROPAGATE_AOF|PROPAGATE_REPL);
 }
 
+/**
+ * 应当是执行exec命令时 才会一次性执行之前在client中存储的所有命令吧
+ * @param c
+ */
 void execCommandPropagateExec(client *c) {
     propagate(server.execCommand,c->db->id,&shared.exec,1,
               PROPAGATE_AOF|PROPAGATE_REPL);
 }
 
+/**
+ * 执行之前存储的所有任务
+ * @param c
+ */
 void execCommand(client *c) {
     int j;
     robj **orig_argv;
@@ -125,6 +159,7 @@ void execCommand(client *c) {
     int must_propagate = 0; /* Need to propagate MULTI/EXEC to AOF / slaves? */
     int was_master = server.masterhost == NULL;
 
+    // 如果此时没有待执行的批任务 不允许发出该命令
     if (!(c->flags & CLIENT_MULTI)) {
         addReplyError(c,"EXEC without MULTI");
         return;
@@ -135,7 +170,9 @@ void execCommand(client *c) {
      * 2) There was a previous error while queueing commands.
      * A failed EXEC in the first case returns a multi bulk nil object
      * (technically it is not an error but a special behavior), while
-     * in the second an EXECABORT error is returned. */
+     * in the second an EXECABORT error is returned.
+     * 因为某些数据已经发生了变化 比如其他client操作了相同的key   在执行批量任务前 会对相关的key进行监控
+     * */
     if (c->flags & (CLIENT_DIRTY_CAS|CLIENT_DIRTY_EXEC)) {
         addReply(c, c->flags & CLIENT_DIRTY_EXEC ? shared.execaborterr :
                                                    shared.nullarray[c->resp]);
@@ -147,7 +184,9 @@ void execCommand(client *c) {
      * only slave, we want to send an error. This happens when the transaction
      * was initiated when the instance was a master or a writable replica and
      * then the configuration changed (for example instance was turned into
-     * a replica). */
+     * a replica).
+     * 当前节点不支持写操作
+     * */
     if (!server.loading && server.masterhost && server.repl_slave_ro &&
         !(c->flags & CLIENT_MASTER) && c->mstate.cmd_flags & CMD_WRITE)
     {
@@ -158,13 +197,18 @@ void execCommand(client *c) {
         goto handle_monitor;
     }
 
-    /* Exec all the queued commands */
+    /* Exec all the queued commands
+     * 此时解除对所有相关key的监控
+     * */
     unwatchAllKeys(c); /* Unwatch ASAP otherwise we'll waste CPU cycles */
     orig_argv = c->argv;
     orig_argc = c->argc;
     orig_cmd = c->cmd;
+    // 先将长度信息写入到buff中 此时还没有将结果发送到对端
     addReplyArrayLen(c,c->mstate.count);
     for (j = 0; j < c->mstate.count; j++) {
+
+        // 将某个command的相关信息回填到client上
         c->argc = c->mstate.commands[j].argc;
         c->argv = c->mstate.commands[j].argv;
         c->cmd = c->mstate.commands[j].cmd;
@@ -173,7 +217,9 @@ void execCommand(client *c) {
          * is not readonly nor an administrative one.
          * This way we'll deliver the MULTI/..../EXEC block as a whole and
          * both the AOF and the replication link will have the same consistency
-         * and atomicity guarantees. */
+         * and atomicity guarantees.
+         * 非只读节点 会将本次exec命令通知到aof/子节点  exec命令只需要传播一次
+         * */
         if (!must_propagate &&
             !server.loading &&
             !(c->cmd->flags & (CMD_READONLY|CMD_ADMIN)))
@@ -183,7 +229,9 @@ void execCommand(client *c) {
         }
 
         int acl_keypos;
+        // 检测当前client使用的用户是否有权限执行command  每个client在连接到服务器时都会使用一个账号(用户)
         int acl_retval = ACLCheckCommandPerm(c,&acl_keypos);
+        // 代表此时client使用的登录用户没有权限执行命令
         if (acl_retval != ACL_OK) {
             addACLLogEntry(c,acl_retval,acl_keypos,NULL);
             addReplyErrorFormat(c,
@@ -195,14 +243,19 @@ void execCommand(client *c) {
                 "no permission to execute the command or subcommand" :
                 "no permission to touch the specified keys");
         } else {
+            // 执行当前命令
             call(c,server.loading ? CMD_CALL_NONE : CMD_CALL_FULL);
         }
 
-        /* Commands may alter argc/argv, restore mstate. */
+        /* Commands may alter argc/argv, restore mstate.
+         * 在执行完命令后 参数可能会被修改 这里回填到commands中
+         * */
         c->mstate.commands[j].argc = c->argc;
         c->mstate.commands[j].argv = c->argv;
         c->mstate.commands[j].cmd = c->cmd;
     }
+
+    // 当所有命令完成后 恢复cmd和参数信息
     c->argv = orig_argv;
     c->argc = orig_argc;
     c->cmd = orig_cmd;
@@ -245,20 +298,26 @@ handle_monitor:
 
 /* In the client->watched_keys list we need to use watchedKey structures
  * as in order to identify a key in Redis we need both the key name and the
- * DB */
+ * DB
+ * 代表某个redisObject此时处于被监控的状态 当该key相关的对象被修改时 会通知本对象 并终止相关的批任务
+ * */
 typedef struct watchedKey {
     robj *key;
     redisDb *db;
 } watchedKey;
 
-/* Watch for the specified key */
+/* Watch for the specified key
+ * 将某个db,redisObject 包装成watchedKey
+ * */
 void watchForKey(client *c, robj *key) {
     list *clients = NULL;
     listIter li;
     listNode *ln;
     watchedKey *wk;
 
-    /* Check if we are already watching for this key */
+    /* Check if we are already watching for this key
+     * 查看本次要监视的key 是否已经存在与client.watched_keys中
+     * */
     listRewind(c->watched_keys,&li);
     while((ln = listNext(&li))) {
         wk = listNodeValue(ln);
@@ -267,6 +326,8 @@ void watchForKey(client *c, robj *key) {
     }
     /* This key is not already watched in this DB. Let's add it */
     clients = dictFetchValue(c->db->watched_keys,key);
+
+    // 如果该key 还没有在db中被标记成监控状态 插入到db中 value对应监控该key的所有client
     if (!clients) {
         clients = listCreate();
         dictAdd(c->db->watched_keys,key,clients);
@@ -278,12 +339,14 @@ void watchForKey(client *c, robj *key) {
     wk->key = key;
     wk->db = c->db;
     incrRefCount(key);
+
+    // 将key设置到client.watched_keys
     listAddNodeTail(c->watched_keys,wk);
 }
 
 /* Unwatch all the keys watched by this client. To clean the EXEC dirty
  * flag is up to the caller.
- * 释放所有watched_keys
+ * 取消对某些key的监控状态
  * */
 void unwatchAllKeys(client *c) {
     listIter li;
@@ -300,8 +363,12 @@ void unwatchAllKeys(client *c) {
         wk = listNodeValue(ln);
         clients = dictFetchValue(wk->db->watched_keys, wk->key);
         serverAssertWithInfo(c,NULL,clients != NULL);
+
+        // 从监控该key的 client列表中移除本对象
         listDelNode(clients,listSearchKey(clients,c));
-        /* Kill the entry at all if this was the only client */
+        /* Kill the entry at all if this was the only client
+         * 如果此时没有client监控该key  将键值对从watched_key中移除
+         * */
         if (listLength(clients) == 0)
             dictDelete(wk->db->watched_keys, wk->key);
         /* Remove this watched key from the client->watched list */
@@ -312,7 +379,9 @@ void unwatchAllKeys(client *c) {
 }
 
 /* "Touch" a key, so that if this key is being WATCHed by some client the
- * next EXEC will fail. */
+ * next EXEC will fail.
+ * 代表在某个db下 key对应的redisObject发生了变化
+ * */
 void touchWatchedKey(redisDb *db, robj *key) {
     list *clients;
     listIter li;
@@ -323,7 +392,9 @@ void touchWatchedKey(redisDb *db, robj *key) {
     if (!clients) return;
 
     /* Mark all the clients watching this key as CLIENT_DIRTY_CAS */
-    /* Check if we are already watching for this key */
+    /* Check if we are already watching for this key
+     * 对这些client打上 dirty_cas标记 代表数据发生过变化
+     * */
     listRewind(clients,&li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
@@ -335,7 +406,9 @@ void touchWatchedKey(redisDb *db, robj *key) {
 /* On FLUSHDB or FLUSHALL all the watched keys that are present before the
  * flush but will be deleted as effect of the flushing operation should
  * be touched. "dbid" is the DB that's getting the flush. -1 if it is
- * a FLUSHALL operation (all the DBs flushed). */
+ * a FLUSHALL operation (all the DBs flushed).
+ * 如果某个client 监控的key在某个db下 将它们标记成 dirty
+ * */
 void touchWatchedKeysOnFlush(int dbid) {
     listIter li1, li2;
     listNode *ln;
@@ -344,6 +417,8 @@ void touchWatchedKeysOnFlush(int dbid) {
     listRewind(server.clients,&li1);
     while((ln = listNext(&li1))) {
         client *c = listNodeValue(ln);
+
+        // 遍历此时连接到server上的所有client监视的key
         listRewind(c->watched_keys,&li2);
         while((ln = listNext(&li2))) {
             watchedKey *wk = listNodeValue(ln);
@@ -359,6 +434,10 @@ void touchWatchedKeysOnFlush(int dbid) {
     }
 }
 
+/**
+ * 发起监控命令
+ * @param c
+ */
 void watchCommand(client *c) {
     int j;
 

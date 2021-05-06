@@ -100,13 +100,17 @@ typedef struct _rio rio;
 
 /* The following functions are our interface with the stream. They'll call the
  * actual implementation of read / write / tell, and will update the checksum
- * if needed. */
-
+ * if needed.
+ * 将buf的数据写入到rio中
+ * */
 static inline size_t rioWrite(rio *r, const void *buf, size_t len) {
     if (r->flags & RIO_FLAG_WRITE_ERROR) return 0;
     while (len) {
+        // 每次写入的大小有一个上限值
         size_t bytes_to_write = (r->max_processing_chunk && r->max_processing_chunk < len) ? r->max_processing_chunk : len;
+        // 更新校验和
         if (r->update_cksum) r->update_cksum(r,buf,bytes_to_write);
+        // 将数据写入到rio中
         if (r->write(r,buf,bytes_to_write) == 0) {
             r->flags |= RIO_FLAG_WRITE_ERROR;
             return 0;

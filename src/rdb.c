@@ -48,7 +48,7 @@
 #define rdbReportReadError(...) rdbReportError(0, __LINE__,__VA_ARGS__)
 
 /**
- * 记录此时正在加载的rdb文件的名字
+ * 代表此时正在读取的rdb文件
  */
 char* rdbFileBeingLoaded = NULL; /* used for rdb checking on read error */
 extern int rdbCheckMode;
@@ -83,12 +83,25 @@ void rdbReportError(int corruption_error, int linenum, char *reason, ...) {
     exit(1);
 }
 
+/**
+ * 将p的数据写入到rio中
+ * @param rdb
+ * @param p
+ * @param len
+ * @return
+ */
 static int rdbWriteRaw(rio *rdb, void *p, size_t len) {
     if (rdb && rioWrite(rdb,p,len) == 0)
         return -1;
     return len;
 }
 
+/**
+ * 写入rdb类型信息
+ * @param rdb
+ * @param type
+ * @return
+ */
 int rdbSaveType(rio *rdb, unsigned char type) {
     return rdbWriteRaw(rdb,&type,1);
 }
@@ -96,7 +109,7 @@ int rdbSaveType(rio *rdb, unsigned char type) {
 /* Load a "type" in RDB format, that is a one byte unsigned integer.
  * This function is not only used to load object types, but also special
  * "types" like the end-of-file type, the EXPIRE type, and so forth.
- * 加载type字段
+ * 加载type字段   rio流可以定义自己的写入/读取逻辑
  * */
 int rdbLoadType(rio *rdb) {
     unsigned char type;
@@ -108,13 +121,21 @@ int rdbLoadType(rio *rdb) {
  * opcode. New versions of Redis store using the RDB_OPCODE_EXPIRETIME_MS
  * opcode. On error -1 is returned, however this could be a valid time, so
  * to check for loading errors the caller should call rioGetReadError() after
- * calling this function. */
+ * calling this function.
+ * 读取一个时间信息
+ * */
 time_t rdbLoadTime(rio *rdb) {
     int32_t t32;
     if (rioRead(rdb,&t32,4) == 0) return -1;
     return (time_t)t32;
 }
 
+/**
+ * 存储一个时间信息
+ * @param rdb
+ * @param t
+ * @return
+ */
 int rdbSaveMillisecondTime(rio *rdb, long long t) {
     int64_t t64 = (int64_t) t;
     memrev64ifbe(&t64); /* Store in little endian. */
@@ -135,7 +156,9 @@ int rdbSaveMillisecondTime(rio *rdb, long long t) {
  *
  * On I/O error the function returns LLONG_MAX, however if this is also a
  * valid stored value, the caller should use rioGetReadError() to check for
- * errors after calling this function. */
+ * errors after calling this function.
+ * 读取一个时间信息
+ * */
 long long rdbLoadMillisecondTime(rio *rdb, int rdbver) {
     int64_t t64;
     if (rioRead(rdb,&t64,8) == 0) return LLONG_MAX;
@@ -146,22 +169,30 @@ long long rdbLoadMillisecondTime(rio *rdb, int rdbver) {
 
 /* Saves an encoded length. The first two bits in the first byte are used to
  * hold the encoding type. See the RDB_* definitions for more information
- * on the types of encoding. */
+ * on the types of encoding.
+ * 保存编码长度
+ * */
 int rdbSaveLen(rio *rdb, uint64_t len) {
     unsigned char buf[2];
     size_t nwritten;
 
+    // 当可以用6位保存时 仅使用1字节存储数据
     if (len < (1<<6)) {
-        /* Save a 6 bit len */
+        /* Save a 6 bit len
+         * 前2位要使用一个特殊的标记
+         * */
         buf[0] = (len&0xFF)|(RDB_6BITLEN<<6);
         if (rdbWriteRaw(rdb,buf,1) == -1) return -1;
         nwritten = 1;
+        // 需要14位保存 也就是2字节
     } else if (len < (1<<14)) {
         /* Save a 14 bit len */
         buf[0] = ((len>>8)&0xFF)|(RDB_14BITLEN<<6);
         buf[1] = len&0xFF;
         if (rdbWriteRaw(rdb,buf,2) == -1) return -1;
         nwritten = 2;
+
+        // 当使用 32位/64位时 需要特殊的标记位
     } else if (len <= UINT32_MAX) {
         /* Save a 32 bit len */
         buf[0] = RDB_32BITLEN;
@@ -189,14 +220,19 @@ int rdbSaveLen(rio *rdb, uint64_t len) {
  * See the RDB_ENC_* definitions in rdb.h for more information on special
  * encodings.
  *
- * The function returns -1 on error, 0 on success. */
+ * The function returns -1 on error, 0 on success.
+ * 读取编码长度 与上面对应
+ * */
 int rdbLoadLenByRef(rio *rdb, int *isencoded, uint64_t *lenptr) {
     unsigned char buf[2];
     int type;
 
     if (isencoded) *isencoded = 0;
+    // 先读取标志位 之后判断要读取多少字节
     if (rioRead(rdb,buf,1) == 0) return -1;
     type = (buf[0]&0xC0)>>6;
+
+    // 这是特殊情况 代表长度信息本身被编码过
     if (type == RDB_ENCVAL) {
         /* Read a 6 bit encoding type. */
         if (isencoded) *isencoded = 1;
@@ -229,7 +265,9 @@ int rdbLoadLenByRef(rio *rdb, int *isencoded, uint64_t *lenptr) {
 /* This is like rdbLoadLenByRef() but directly returns the value read
  * from the RDB stream, signaling an error by returning RDB_LENERR
  * (since it is a too large count to be applicable in any Redis data
- * structure). */
+ * structure).
+ * 从存储rdb数据的rio流中读取长度信息
+ * */
 uint64_t rdbLoadLen(rio *rdb, int *isencoded) {
     uint64_t len;
 
@@ -240,7 +278,9 @@ uint64_t rdbLoadLen(rio *rdb, int *isencoded) {
 /* Encodes the "value" argument as integer when it fits in the supported ranges
  * for encoded types. If the function successfully encodes the integer, the
  * representation is stored in the buffer pointer to by "enc" and the string
- * length is returned. Otherwise 0 is returned. */
+ * length is returned. Otherwise 0 is returned.
+ * 对一个integer进行编码
+ * */
 int rdbEncodeInteger(long long value, unsigned char *enc) {
     if (value >= -(1<<7) && value <= (1<<7)-1) {
         enc[0] = (RDB_ENCVAL<<6)|RDB_ENC_INT8;
@@ -265,7 +305,9 @@ int rdbEncodeInteger(long long value, unsigned char *enc) {
 
 /* Loads an integer-encoded object with the specified encoding type "enctype".
  * The returned value changes according to the flags, see
- * rdbGenericLoadStringObject() for more info. */
+ * rdbGenericLoadStringObject() for more info.
+ * 根据编码类型 读取不同的长度
+ * */
 void *rdbLoadIntegerObject(rio *rdb, int enctype, int flags, size_t *lenptr) {
     int plain = flags & RDB_LOAD_PLAIN;
     int sds = flags & RDB_LOAD_SDS;
@@ -290,6 +332,7 @@ void *rdbLoadIntegerObject(rio *rdb, int enctype, int flags, size_t *lenptr) {
         rdbExitReportCorruptRDB("Unknown RDB integer encoding type %d",enctype);
         return NULL; /* Never reached. */
     }
+    // 代表直接返回char指针
     if (plain || sds) {
         char buf[LONG_STR_SIZE], *p;
         int len = ll2string(buf,sizeof(buf),val);
@@ -297,6 +340,7 @@ void *rdbLoadIntegerObject(rio *rdb, int enctype, int flags, size_t *lenptr) {
         p = plain ? zmalloc(len) : sdsnewlen(SDS_NOINIT,len);
         memcpy(p,buf,len);
         return p;
+        // 代表需要对返回的结果进行编码
     } else if (encode) {
         return createStringObjectFromLongLongForValue(val);
     } else {
@@ -306,7 +350,9 @@ void *rdbLoadIntegerObject(rio *rdb, int enctype, int flags, size_t *lenptr) {
 
 /* String objects in the form "2391" "-100" without any space and with a
  * range of values that can fit in an 8, 16 or 32 bit signed value can be
- * encoded as integers to save space */
+ * encoded as integers to save space
+ * 对一个integer值进行编码
+ * */
 int rdbTryIntegerEncoding(char *s, size_t len, unsigned char *enc) {
     long long value;
     char *endptr, buf[32];
@@ -314,31 +360,48 @@ int rdbTryIntegerEncoding(char *s, size_t len, unsigned char *enc) {
     /* Check if it's possible to encode this value as a number */
     value = strtoll(s, &endptr, 10);
     if (endptr[0] != '\0') return 0;
+    // 将数字转换成字符串 并填充到buf中
     ll2string(buf,32,value);
 
     /* If the number converted back into a string is not identical
-     * then it's not possible to encode the string as integer */
+     * then it's not possible to encode the string as integer
+     * 在还原过程中数据发生了变化 不进行编码
+     * */
     if (strlen(buf) != len || memcmp(buf,s,len)) return 0;
 
     return rdbEncodeInteger(value,enc);
 }
 
+/**
+ * 将压缩数据写入到 rio中 (rio底层连接的是rdb文件)
+ * @param rdb
+ * @param data
+ * @param compress_len
+ * @param original_len
+ * @return
+ */
 ssize_t rdbSaveLzfBlob(rio *rdb, void *data, size_t compress_len,
                        size_t original_len) {
     unsigned char byte;
     ssize_t n, nwritten = 0;
 
-    /* Data compressed! Let's save it on disk */
+    /* Data compressed! Let's save it on disk
+     * lz4压缩算法吗
+     * */
     byte = (RDB_ENCVAL<<6)|RDB_ENC_LZF;
+    // 先写入一个压缩标记位
     if ((n = rdbWriteRaw(rdb,&byte,1)) == -1) goto writeerr;
     nwritten += n;
 
+    // 写入压缩长度
     if ((n = rdbSaveLen(rdb,compress_len)) == -1) goto writeerr;
     nwritten += n;
 
+    // 写入原始长度
     if ((n = rdbSaveLen(rdb,original_len)) == -1) goto writeerr;
     nwritten += n;
 
+    // 写入压缩数据
     if ((n = rdbWriteRaw(rdb,data,compress_len)) == -1) goto writeerr;
     nwritten += n;
 
@@ -348,19 +411,33 @@ writeerr:
     return -1;
 }
 
+/**
+ * 将数据写入到rio中
+ * @param rdb
+ * @param s
+ * @param len
+ * @return
+ */
 ssize_t rdbSaveLzfStringObject(rio *rdb, unsigned char *s, size_t len) {
     size_t comprlen, outlen;
     void *out;
 
-    /* We require at least four bytes compression for this to be worth it */
+    /* We require at least four bytes compression for this to be worth it
+     * 数据长度过小 不会使用压缩算法
+     * */
     if (len <= 4) return 0;
     outlen = len-4;
     if ((out = zmalloc(outlen+1)) == NULL) return 0;
+    // 将原数据进行压缩
     comprlen = lzf_compress(s, len, out, outlen);
+
+    // 返回0代表压缩失败
     if (comprlen == 0) {
         zfree(out);
         return 0;
     }
+
+    // 将压缩数据写入到rio中
     ssize_t nwritten = rdbSaveLzfBlob(rdb, out, comprlen, len);
     zfree(out);
     return nwritten;
@@ -368,7 +445,9 @@ ssize_t rdbSaveLzfStringObject(rio *rdb, unsigned char *s, size_t len) {
 
 /* Load an LZF compressed string in RDB format. The returned value
  * changes according to 'flags'. For more info check the
- * rdbGenericLoadStringObject() function. */
+ * rdbGenericLoadStringObject() function.
+ * 从rio流中读取压缩数据  此时已经读取过flags信息了
+ * */
 void *rdbLoadLzfStringObject(rio *rdb, int flags, size_t *lenptr) {
     int plain = flags & RDB_LOAD_PLAIN;
     int sds = flags & RDB_LOAD_SDS;
@@ -376,7 +455,9 @@ void *rdbLoadLzfStringObject(rio *rdb, int flags, size_t *lenptr) {
     unsigned char *c = NULL;
     char *val = NULL;
 
+    // 读取压缩长度
     if ((clen = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return NULL;
+    // 读取原始长度
     if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return NULL;
     if ((c = zmalloc(clen)) == NULL) goto err;
 
@@ -390,6 +471,7 @@ void *rdbLoadLzfStringObject(rio *rdb, int flags, size_t *lenptr) {
 
     /* Load the compressed representation and uncompress it to target. */
     if (rioRead(rdb,c,clen) == 0) goto err;
+    // 对数据进行解压 并赋值到val上
     if (lzf_decompress(c,clen,val,len) == 0) {
         rdbExitReportCorruptRDB("Invalid LZF compressed string");
     }
@@ -410,15 +492,21 @@ err:
 }
 
 /* Save a string object as [len][data] on disk. If the object is a string
- * representation of an integer value we try to save it in a special form */
+ * representation of an integer value we try to save it in a special form
+ * 往rio中写入一个原始字符串
+ * */
 ssize_t rdbSaveRawString(rio *rdb, unsigned char *s, size_t len) {
     int enclen;
     ssize_t n, nwritten = 0;
 
-    /* Try integer encoding */
+    /* Try integer encoding
+     * 这里对字符串长度进行一个编码 既然下面要写入长度信息 为什么这里要写入一个编码值
+     * */
     if (len <= 11) {
         unsigned char buf[5];
         if ((enclen = rdbTryIntegerEncoding((char*)s,len,buf)) > 0) {
+
+            // 将编码后的长度信息写入到rdb中
             if (rdbWriteRaw(rdb,buf,enclen) == -1) return -1;
             return enclen;
         }
@@ -429,10 +517,13 @@ ssize_t rdbSaveRawString(rio *rdb, unsigned char *s, size_t len) {
     if (server.rdb_compression && len > 20) {
         n = rdbSaveLzfStringObject(rdb,s,len);
         if (n == -1) return -1;
+        // 返回正数代表压缩成功
         if (n > 0) return n;
         /* Return value of 0 means data can't be compressed, save the old way */
     }
 
+
+    // 此时压缩失败 直接写入原始数据
     /* Store verbatim */
     if ((n = rdbSaveLen(rdb,len)) == -1) return -1;
     nwritten += n;
@@ -443,15 +534,18 @@ ssize_t rdbSaveRawString(rio *rdb, unsigned char *s, size_t len) {
     return nwritten;
 }
 
-/* Save a long long value as either an encoded string or a string. */
+/* Save a long long value as either an encoded string or a string.
+ * 将一个long long值转换成string后存储到 rdb结构中
+ * */
 ssize_t rdbSaveLongLongAsStringObject(rio *rdb, long long value) {
     unsigned char buf[32];
     ssize_t n, nwritten = 0;
+    // 对value进行编码后写入到rdb中
     int enclen = rdbEncodeInteger(value,buf);
     if (enclen > 0) {
         return rdbWriteRaw(rdb,buf,enclen);
     } else {
-        /* Encode as string */
+        /* Encode as string 如果要写入的是一个string类型 需要同时写入长度和字符 */
         enclen = ll2string((char*)buf,32,value);
         serverAssert(enclen < 32);
         if ((n = rdbSaveLen(rdb,enclen)) == -1) return -1;
@@ -486,6 +580,7 @@ ssize_t rdbSaveStringObject(rio *rdb, robj *obj) {
  * RDB_LOAD_SDS: Return an SDS string instead of a Redis object.
  *
  * On I/O error NULL is returned.
+ * 根据flags的描述信息 从rdb中加载数据
  */
 void *rdbGenericLoadStringObject(rio *rdb, int flags, size_t *lenptr) {
     int encode = flags & RDB_LOAD_ENC;
@@ -494,14 +589,17 @@ void *rdbGenericLoadStringObject(rio *rdb, int flags, size_t *lenptr) {
     int isencoded;
     uint64_t len;
 
+    // 先读取长度信息
     len = rdbLoadLen(rdb,&isencoded);
     if (isencoded) {
         switch(len) {
         case RDB_ENC_INT8:
         case RDB_ENC_INT16:
         case RDB_ENC_INT32:
+            // 代笔内部数据比较少 直接读取就好
             return rdbLoadIntegerObject(rdb,len,flags,lenptr);
         case RDB_ENC_LZF:
+            // 代表采用了lz4压缩算法
             return rdbLoadLzfStringObject(rdb,flags,lenptr);
         default:
             rdbExitReportCorruptRDB("Unknown RDB string encoding type %d",len);
@@ -509,6 +607,7 @@ void *rdbGenericLoadStringObject(rio *rdb, int flags, size_t *lenptr) {
         }
     }
 
+    // 代表数据没有编码过 直接读取
     if (len == RDB_LENERR) return NULL;
     if (plain || sds) {
         void *buf = plain ? zmalloc(len) : sdsnewlen(SDS_NOINIT,len);
@@ -547,11 +646,13 @@ robj *rdbLoadEncodedStringObject(rio *rdb) {
  * 253: not a number
  * 254: + inf
  * 255: - inf
+ * 往rdb中写入一个double类型
  */
 int rdbSaveDoubleValue(rio *rdb, double val) {
     unsigned char buf[128];
     int len;
 
+    // 前2种都是特殊情况
     if (isnan(val)) {
         buf[0] = 253;
         len = 1;

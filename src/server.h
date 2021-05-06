@@ -657,6 +657,8 @@ typedef struct redisDb {
     dict *expires;              /* Timeout of keys with a timeout set */
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP)*/
     dict *ready_keys;           /* Blocked keys that received a PUSH */
+
+    // 代表这个db内哪些key处于被监视状态 当某个key关联的redisObject对象被修改 并且发现它在watched_keys内 就会触发通知逻辑
     dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
     int id;                     /* Database ID */
     long long avg_ttl;          /* Average TTL, just for stats */
@@ -664,7 +666,9 @@ typedef struct redisDb {
     list *defrag_later;         /* List of key names to attempt to defrag one by one, gradually. */
 } redisDb;
 
-/* Client MULTI/EXEC state */
+/* Client MULTI/EXEC state
+ * 作为一次批任务中的某个任务
+ * */
 typedef struct multiCmd {
     robj **argv;
     int argc;
@@ -672,6 +676,7 @@ typedef struct multiCmd {
 } multiCmd;
 
 typedef struct multiState {
+    // 其中每个command 都是一组命令
     multiCmd *commands;     /* Array of MULTI commands */
     int count;              /* Total number of MULTI commands */
     int cmd_flags;          /* The accumulated command flags OR-ed together.
@@ -835,6 +840,8 @@ typedef struct client {
     int btype;              /* Type of blocking op if CLIENT_BLOCKED. */
     blockingState bpop;     /* blocking state */
     long long woff;         /* Last write global replication offset. */
+
+    // 此时某个client监视的所有key 当这些对象发生变化时 会终止之前要执行的批操作
     list *watched_keys;     /* Keys WATCHED for MULTI/EXEC CAS */
     dict *pubsub_channels;  /* channels a client is interested in (SUBSCRIBE) */
     list *pubsub_patterns;  /* patterns a client is interested in (SUBSCRIBE) */
@@ -904,16 +911,21 @@ struct sharedObjectsStruct {
     sds minstring, maxstring;
 };
 
-/* ZSETs use a specialized version of Skiplists * */
+/* ZSETs use a specialized version of Skiplists
+ * 首先跳跃表每个节点横向形成一个链表结构 其中每个节点纵向基于当前level值存在多个zskiplistLevel
+ * */
 typedef struct zskiplistNode {
+    // 每个节点关联的数据
     sds ele;
+    // 该数据对应的得分  zset就是通过该字段进行排序的 如果2个数据的score相同 就按照sds进行排序 sds本身不允许重复(set的特性)
     double score;
-    // 同一级中的横向链表
+    // 跳表中每个level1节点以链表形式链接 不过是反向链接 都是往前数
     struct zskiplistNode *backward;
     // 纵向链表
     struct zskiplistLevel {
-        // 每个level存储了下一层的节点指针
+        // 下个最近的同一level的节点
         struct zskiplistNode *forward;
+        // 记录了一个跨度值 代表距离下一个等高的level 相距多少个node节点
         unsigned long span;
     } level[];
 } zskiplistNode;
@@ -922,15 +934,18 @@ typedef struct zskiplistNode {
  * redis基于跳跃表来实现有序set(zset)
  */
 typedef struct zskiplist {
-    // 最低层的首尾节点
+    // 最低层的首尾节点 记录尾节点应该是用于反向遍历
     struct zskiplistNode *header, *tail;
-    // 应该是最低层的元素数量
+    // 此时节点总数 header不算
     unsigned long length;
-    // 记录此时高度
+    // 对于zskiplist level代表当下所有节点中最高的level (header节点不算 且header的默认level为32)
     int level;
 } zskiplist;
 
 typedef struct zset {
+    /**
+     * skiplist本身应该也是能作为索引的 这里还专门维护了一个dict 用于查找数据
+     */
     dict *dict;
     zskiplist *zsl;
 } zset;
@@ -1252,6 +1267,8 @@ struct redisServer {
     list *aof_rewrite_buf_blocks;   /* Hold changes during an AOF rewrite. */
     sds aof_buf;      /* AOF buffer, written before entering the event loop */
     int aof_fd;       /* File descriptor of currently selected AOF file */
+
+    // 此时aof正在针对哪个db读取数据
     int aof_selected_db; /* Currently selected DB in AOF */
     time_t aof_flush_postponed_start; /* UNIX time of postponed AOF flush */
     time_t aof_last_fsync;            /* UNIX time of last fsync() */

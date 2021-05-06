@@ -571,7 +571,9 @@ long long dbTotalServerKeyCount() {
  *----------------------------------------------------------------------------*/
 
 /* Note that the 'c' argument may be NULL if the key was modified out of
- * a context of a client. */
+ * a context of a client.
+ * 每当某个client对db下某个key对应的redisObject操作时会触发该方法
+ * */
 void signalModifiedKey(client *c, redisDb *db, robj *key) {
     touchWatchedKey(db,key);
     trackingInvalidateKey(c,key);

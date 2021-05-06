@@ -1468,6 +1468,7 @@ int incrementallyRehash(int dbid) {
  * for dict.c to resize the hash tables accordingly to the fact we have o not
  * running childs.
  * 根据当前有无子进程  修改能否动态调整dict大小的标识
+ * 如果能动态调整大小 在多进程场景就会有并发问题
  * */
 void updateDictResizePolicy(void) {
     if (!hasActiveChildProcess())
@@ -3386,18 +3387,22 @@ void preventCommandReplication(client *c) {
  * preventCommandPropagation(client *c);
  * preventCommandAOF(client *c);
  * preventCommandReplication(client *c);
- *
+ * 执行client命令
  */
 void call(client *c, int flags) {
     long long dirty;
     ustime_t start, duration;
+
+    // 先记录执行command前的 标识信息/command
     int client_old_flags = c->flags;
     struct redisCommand *real_cmd = c->cmd;
 
     server.fixed_time_expire++;
 
     /* Send the command to clients in MONITOR mode if applicable.
-     * Administrative commands are considered too dangerous to be shown. */
+     * Administrative commands are considered too dangerous to be shown.
+     * TODO 先忽略有监控节点的情况
+     * */
     if (listLength(server.monitors) &&
         !server.loading &&
         !(c->cmd->flags & (CMD_SKIP_MONITOR | CMD_ADMIN))) {
