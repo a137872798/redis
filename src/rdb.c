@@ -2519,8 +2519,11 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
 }
 
 /* A background saving child (BGSAVE) terminated its work. Handle this.
- * This function covers the case of actual BGSAVEs. */
+ * This function covers the case of actual BGSAVEs.
+ * 某个后台存储rdb文件的任务 已经完成 这时清理逻辑
+ * */
 static void backgroundSaveDoneHandlerDisk(int exitcode, int bysignal) {
+    // 代表本次处理成功
     if (!bysignal && exitcode == 0) {
         serverLog(LL_NOTICE,
             "Background saving terminated with success");
@@ -2531,11 +2534,13 @@ static void backgroundSaveDoneHandlerDisk(int exitcode, int bysignal) {
         serverLog(LL_WARNING, "Background saving error");
         server.lastbgsave_status = C_ERR;
     } else {
+        // 代表本次进程由于某种信号被终止
         mstime_t latency;
 
         serverLog(LL_WARNING,
             "Background saving terminated by signal %d", bysignal);
         latencyStartMonitor(latency);
+        // 清理子进程创建的临时文件
         rdbRemoveTempFile(server.rdb_child_pid, 0);
         latencyEndMonitor(latency);
         latencyAddSampleIfNeeded("rdb-unlink-temp-file",latency);
@@ -2548,7 +2553,9 @@ static void backgroundSaveDoneHandlerDisk(int exitcode, int bysignal) {
 
 /* A background saving child (BGSAVE) terminated its work. Handle this.
  * This function covers the case of RDB -> Slaves socket transfers for
- * diskless replication. */
+ * diskless replication.
+ * 当将rdb数据流写入到socket的任务完成时 触发该方法
+ * */
 static void backgroundSaveDoneHandlerSocket(int exitcode, int bysignal) {
     if (!bysignal && exitcode == 0) {
         serverLog(LL_NOTICE,
@@ -2561,7 +2568,9 @@ static void backgroundSaveDoneHandlerSocket(int exitcode, int bysignal) {
     }
 }
 
-/* When a background RDB saving/transfer terminates, call the right handler. */
+/* When a background RDB saving/transfer terminates, call the right handler.
+ * 当某个后台任务完成了rdb数据流的存储或者传输 前者对应disk 后者对应socket
+ * */
 void backgroundSaveDoneHandler(int exitcode, int bysignal) {
     int type = server.rdb_child_type;
     switch(server.rdb_child_type) {
@@ -2576,6 +2585,7 @@ void backgroundSaveDoneHandler(int exitcode, int bysignal) {
         break;
     }
 
+    // 重置子进程状态 同时更新存储时间
     server.rdb_child_pid = -1;
     server.rdb_child_type = RDB_CHILD_TYPE_NONE;
     server.rdb_save_time_last = time(NULL)-server.rdb_save_time_start;
@@ -2587,7 +2597,9 @@ void backgroundSaveDoneHandler(int exitcode, int bysignal) {
 
 /* Kill the RDB saving child using SIGUSR1 (so that the parent will know
  * the child did not exit for an error, but because we wanted), and performs
- * the cleanup needed. */
+ * the cleanup needed.
+ * 从外部关闭rdb子进程
+ * */
 void killRDBChild(void) {
     kill(server.rdb_child_pid,SIGUSR1);
     rdbRemoveTempFile(server.rdb_child_pid, 0);
@@ -2596,7 +2608,9 @@ void killRDBChild(void) {
 }
 
 /* Spawn an RDB child that writes the RDB to the sockets of the slaves
- * that are currently in SLAVE_STATE_WAIT_BGSAVE_START state. */
+ * that are currently in SLAVE_STATE_WAIT_BGSAVE_START state.
+ * 创建子进程 将rdb的数据传输到 slave节点上
+ * */
 int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
     listNode *ln;
     listIter li;
@@ -2619,31 +2633,39 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
     anetNonBlock(NULL, server.rdb_pipe_read);
 
     /* Collect the connections of the replicas we want to transfer
-     * the RDB to, which are i WAIT_BGSAVE_START state. */
+     * the RDB to, which are i WAIT_BGSAVE_START state.
+     * 存储需要传输rdb数据流的 slave节点连接
+     * */
     server.rdb_pipe_conns = zmalloc(sizeof(connection *)*listLength(server.slaves));
     server.rdb_pipe_numconns = 0;
     server.rdb_pipe_numconns_writing = 0;
     listRewind(server.slaves,&li);
     while((ln = listNext(&li))) {
         client *slave = ln->value;
+        // 找到所有需要传输rdb数据的slave
         if (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_START) {
             server.rdb_pipe_conns[server.rdb_pipe_numconns++] = slave->conn;
             replicationSetupSlaveForFullResync(slave,getPsyncInitialOffset());
         }
     }
 
-    /* Create the child process. */
+    /* Create the child process.
+     * 打开 server.child_info 管道
+     * */
     openChildInfoPipe();
+    // 此时分离出的子进程
     if ((childpid = redisFork(CHILD_TYPE_RDB)) == 0) {
         /* Child */
         int retval;
         rio rdb;
 
+        // 产生的rio流对接 的是管道
         rioInitWithFd(&rdb,server.rdb_pipe_write);
 
         redisSetProcTitle("redis-rdb-to-slaves");
         redisSetCpuAffinity(server.bgsave_cpulist);
 
+        // 此时数据都已经写入到了 pipe中
         retval = rdbSaveRioWithEOFMark(&rdb,NULL,rsi);
         if (retval == C_OK && rioFlush(&rdb) == 0)
             retval = C_ERR;
@@ -2653,17 +2675,22 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
         }
 
         rioFreeFd(&rdb);
+        // 关闭写通道后 读通道才会被唤醒
         close(server.rdb_pipe_write); /* wake up the reader, tell it we're done. */
         exitFromChild((retval == C_OK) ? 0 : 1);
     } else {
-        /* Parent */
+        /* Parent
+         * 创建子进程失败
+         * */
         if (childpid == -1) {
             serverLog(LL_WARNING,"Can't save in background: fork: %s",
                 strerror(errno));
 
             /* Undo the state change. The caller will perform cleanup on
              * all the slaves in BGSAVE_START state, but an early call to
-             * replicationSetupSlaveForFullResync() turned it into BGSAVE_END */
+             * replicationSetupSlaveForFullResync() turned it into BGSAVE_END
+             * 将所有slave状态重置成start
+             * */
             listRewind(server.slaves,&li);
             while((ln = listNext(&li))) {
                 client *slave = ln->value;
@@ -2671,6 +2698,8 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
                     slave->replstate = SLAVE_STATE_WAIT_BGSAVE_START;
                 }
             }
+
+            // 关闭之前创建的所有管道
             close(server.rdb_pipe_write);
             close(server.rdb_pipe_read);
             zfree(server.rdb_pipe_conns);
@@ -2679,6 +2708,7 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
             server.rdb_pipe_numconns_writing = 0;
             closeChildInfoPipe();
         } else {
+            // 设置rdb的类型
             serverLog(LL_NOTICE,"Background RDB transfer started by pid %d",
                 childpid);
             server.rdb_save_time_start = time(NULL);
@@ -2686,6 +2716,7 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
             server.rdb_child_type = RDB_CHILD_TYPE_SOCKET;
             updateDictResizePolicy();
             close(server.rdb_pipe_write); /* close write in parent so that it can detect the close on the child. */
+            // 将读通道注册上去 一旦子进程写入完毕 并关闭写通道后 读通道就会接收到数据
             if (aeCreateFileEvent(server.el, server.rdb_pipe_read, AE_READABLE, rdbPipeReadHandler,NULL) == AE_ERR) {
                 serverPanic("Unrecoverable error creating server.rdb_pipe_read file event.");
             }
@@ -2695,13 +2726,19 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
     return C_OK; /* Unreached. */
 }
 
+/**
+ * 执行save命令 就是基于当前数据生成快照(rdb)
+ * @param c
+ */
 void saveCommand(client *c) {
     if (server.rdb_child_pid != -1) {
         addReplyError(c,"Background save already in progress");
         return;
     }
     rdbSaveInfo rsi, *rsiptr;
+    // 根据当前服务器信息填充 rdbSaveInfo
     rsiptr = rdbPopulateSaveInfo(&rsi);
+    // 根据保存结果返回信息到client
     if (rdbSave(server.rdb_filename,rsiptr) == C_OK) {
         addReply(c,shared.ok);
     } else {
@@ -2709,12 +2746,16 @@ void saveCommand(client *c) {
     }
 }
 
-/* BGSAVE [SCHEDULE] */
+/* BGSAVE [SCHEDULE]
+ * 使用后台线程执行rdb生成任务
+ * */
 void bgsaveCommand(client *c) {
     int schedule = 0;
 
     /* The SCHEDULE option changes the behavior of BGSAVE when an AOF rewrite
-     * is in progress. Instead of returning an error a BGSAVE gets scheduled. */
+     * is in progress. Instead of returning an error a BGSAVE gets scheduled.
+     * 如果携带了其他参数 检查是否开启了定时选项
+     * */
     if (c->argc > 1) {
         if (c->argc == 2 && !strcasecmp(c->argv[1]->ptr,"schedule")) {
             schedule = 1;
@@ -2727,8 +2768,10 @@ void bgsaveCommand(client *c) {
     rdbSaveInfo rsi, *rsiptr;
     rsiptr = rdbPopulateSaveInfo(&rsi);
 
+    // 此时已经开启了后台进程 无法继续创建
     if (server.rdb_child_pid != -1) {
         addReplyError(c,"Background save already in progress");
+        // 此时有其他子进程正在运行 本次必须是延时写入 才能正常处理
     } else if (hasActiveChildProcess()) {
         if (schedule) {
             server.rdb_bgsave_scheduled = 1;
@@ -2754,7 +2797,9 @@ void bgsaveCommand(client *c) {
  * that is normally stack-allocated in the caller, returns the populated
  * pointer if the instance has a valid master client, otherwise NULL
  * is returned, and the RDB saving will not persist any replication related
- * information. */
+ * information.
+ * 填充rdb存储信息  主要是设置db
+ * */
 rdbSaveInfo *rdbPopulateSaveInfo(rdbSaveInfo *rsi) {
     rdbSaveInfo rsi_init = RDB_SAVE_INFO_INIT;
     *rsi = rsi_init;

@@ -1430,6 +1430,8 @@ int expireIfNeeded(redisDb *db, robj *key) {
  *
  * This function must be called at least once before starting to populate
  * the result, and can be called repeatedly to enlarge the result array.
+ * 为getKeysResult 做一些初始化工作
+ * @param numkeys 预计会有多少keys
  */
 int *getKeysPrepareResult(getKeysResult *result, int numkeys) {
     /* GETKEYS_RESULT_INIT initializes keys to NULL, point it to the pre-allocated stack

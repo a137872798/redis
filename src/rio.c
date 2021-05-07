@@ -488,6 +488,7 @@ void rioGenericUpdateChecksum(rio *r, const void *buf, size_t len) {
 void rioSetAutoSync(rio *r, off_t bytes) {
     // 只有当rio底层为文件时 才可以设置自动刷盘配置
     if(r->write != rioFileIO.write) return;
+    // 每当文件中的数据量达到该值后就会触发一次自动刷盘
     r->io.file.autosync = bytes;
 }
 

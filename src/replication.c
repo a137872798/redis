@@ -487,7 +487,10 @@ long long getPsyncInitialOffset(void) {
  *
  * Normally this function should be called immediately after a successful
  * BGSAVE for replication was started, or when there is one already in
- * progress that we attached our slave to. */
+ * progress that we attached our slave to.
+ * @param slave 本次要将数据传输到哪个slave节点上
+ * @param offset 此时master的偏移量 数据只会传输到该偏移量为止
+ * */
 int replicationSetupSlaveForFullResync(client *slave, long long offset) {
     char buf[128];
     int buflen;

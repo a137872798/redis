@@ -1092,7 +1092,9 @@ struct redisServer {
     size_t initial_memory_usage; /* Bytes used after initialization. */
     int always_show_logo;       /* Show logo even for non-stdout logging. */
     char *ignore_warnings;      /* Config: warnings that should be ignored. */
-    /* Modules */
+    /* Modules
+     * 所有模块都会存储在该字典中
+     * */
     dict *moduleapi;            /* Exported core APIs dictionary for modules. */
     dict *sharedapi;            /* Like moduleapi but containing the APIs that
                                    modules share with each other. */
@@ -1219,6 +1221,7 @@ struct redisServer {
     clientBufferLimitsConfig client_obuf_limits[CLIENT_TYPE_OBUF_COUNT];
     /* AOF persistence */
     int aof_enabled;                /* AOF configuration */
+    // 描述此时aof功能是打开/关闭/等待重写状态
     int aof_state;                  /* AOF_(ON|OFF|WAIT_REWRITE) */
     int aof_fsync;                  /* Kind of fsync() policy */
     char *aof_filename;             /* Name of the AOF file */
@@ -1229,6 +1232,8 @@ struct redisServer {
     off_t aof_current_size;         /* AOF current size. */
     off_t aof_fsync_offset;         /* AOF offset which is already synced to disk. */
     int aof_flush_sleep;            /* Micros to sleep before flush. (used by tests) */
+
+    // 当打算开启aof子进程 却发现已经存在其它子进程时 就会设置该标识
     int aof_rewrite_scheduled;      /* Rewrite once BGSAVE terminates. */
     pid_t aof_child_pid;            /* PID if rewriting process */
     list *aof_rewrite_buf_blocks;   /* Hold changes during an AOF rewrite. */
@@ -1274,6 +1279,8 @@ struct redisServer {
     time_t lastbgsave_try;          /* Unix time of last attempted bgsave */
     time_t rdb_save_time_last;      /* Time used by last RDB save run. */
     time_t rdb_save_time_start;     /* Current RDB save start time. */
+
+    // 开启定时任务 会在一定延时后执行rdb写入任务
     int rdb_bgsave_scheduled;       /* BGSAVE when possible if true. */
 
     // 子进程存储rdb数据的方式
@@ -1505,6 +1512,7 @@ typedef struct pubsubPattern {
 
 /* A result structure for the various getkeys function calls. It lists the
  * keys as indices to the provided argv.
+ * 比如调用了某些获取key的api后 会将得到的key填充到buf中
  */
 typedef struct {
     int keysbuf[MAX_KEYS_BUFFER];       /* Pre-allocated buffer, to save heap allocations */

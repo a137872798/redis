@@ -51,7 +51,9 @@ typedef struct RedisModuleInfoCtx {
 
 typedef void (*RedisModuleInfoFunc)(RedisModuleInfoCtx *ctx, int for_crash_report);
 
-/* This structure represents a module inside the system. */
+/* This structure represents a module inside the system.
+ * 描述一个模块信息
+ * */
 struct RedisModule {
     void *handle;   /* Module dlopen() handle. */
     char *name;     /* Module name. */
@@ -65,6 +67,7 @@ struct RedisModule {
     int in_hook;    /* Hooks callback nesting level for this module (0 or 1). */
     int options;    /* Module options and capabilities. */
     int blocked_clients;         /* Count of RedisModuleBlockedClient in this module. */
+    // 为module增加信息需要借助该对象
     RedisModuleInfoFunc info_cb; /* Callback for module to add INFO fields. */
 };
 typedef struct RedisModule RedisModule;
@@ -79,6 +82,9 @@ struct RedisModuleSharedAPI {
 };
 typedef struct RedisModuleSharedAPI RedisModuleSharedAPI;
 
+/**
+ * 该字典中存储了所有 module
+ */
 static dict *modules; /* Hash table of modules. SDS -> RedisModule ptr.*/
 
 /* Entries in the context->amqueue array, representing objects to free
@@ -149,6 +155,9 @@ struct RedisModuleCtx {
     /* Used if there is the REDISMODULE_CTX_KEYS_POS_REQUEST flag set. */
     getKeysResult *keys_result;
 
+    /**
+     * 每个module上下文包含了一组 pool块
+     */
     struct RedisModulePoolAllocBlock *pa_head;
     redisOpArray saved_oparray;    /* When propagating commands in a callback
                                       we reallocate the "also propagate" op
@@ -424,7 +433,9 @@ char *RM_Strdup(const char *str) {
  * Pool allocator
  * -------------------------------------------------------------------------- */
 
-/* Release the chain of blocks used for pool allocations. */
+/* Release the chain of blocks used for pool allocations.
+ * 释放该上下文相关的所有内存块
+ * */
 void poolAllocRelease(RedisModuleCtx *ctx) {
     RedisModulePoolAllocBlock *head = ctx->pa_head, *next;
 
@@ -450,10 +461,14 @@ void poolAllocRelease(RedisModuleCtx *ctx) {
  * The function returns NULL if `bytes` is 0. */
 void *RM_PoolAlloc(RedisModuleCtx *ctx, size_t bytes) {
     if (bytes == 0) return NULL;
+    // 这是一个链表结构 每个元素都对应一个内存块
     RedisModulePoolAllocBlock *b = ctx->pa_head;
+    // 当前内存块的剩余空间
     size_t left = b ? b->size - b->used : 0;
 
-    /* Fix alignment. */
+    /* Fix alignment.
+     * 代表有足够的空间
+     * */
     if (left >= bytes) {
         size_t alignment = REDISMODULE_POOL_ALLOC_ALIGN;
         while (bytes < alignment && alignment/2 >= bytes) alignment /= 2;
@@ -462,10 +477,13 @@ void *RM_PoolAlloc(RedisModuleCtx *ctx, size_t bytes) {
         left = (b->used > b->size) ? 0 : b->size - b->used;
     }
 
-    /* Create a new block if needed. */
+    /* Create a new block if needed.
+     * 代表内存块空间不足 申请一个新的内存块
+     * */
     if (left < bytes) {
         size_t blocksize = REDISMODULE_POOL_ALLOC_MIN_SIZE;
         if (blocksize < bytes) blocksize = bytes;
+        // 将新的内存块设置到链表首部
         b = zmalloc(sizeof(*b) + blocksize);
         b->size = blocksize;
         b->used = 0;
@@ -493,11 +511,14 @@ void *RM_PoolAlloc(RedisModuleCtx *ctx, size_t bytes) {
  * 1) The key is not open for writing.
  * 2) The key is not empty.
  * 3) The specified type is unknown.
+ * 基于这个redisObject的类型 生成一个空的key
  */
 int moduleCreateEmptyKey(RedisModuleKey *key, int type) {
     robj *obj;
 
-    /* The key must be open for writing and non existing to proceed. */
+    /* The key must be open for writing and non existing to proceed.
+     * 如果该key 已经绑定了value 或者支持write模式 抛出异常
+     * */
     if (!(key->mode & REDISMODULE_WRITE) || key->value)
         return REDISMODULE_ERR;
 
@@ -515,6 +536,7 @@ int moduleCreateEmptyKey(RedisModuleKey *key, int type) {
         break;
     default: return REDISMODULE_ERR;
     }
+    // 将redisObject插入到db中  并将value绑定到key上
     dbAdd(key->db,key->key,obj);
     key->value = obj;
     return REDISMODULE_OK;
@@ -529,12 +551,16 @@ int moduleCreateEmptyKey(RedisModuleKey *key, int type) {
  * possibly recreating the key if needed.
  *
  * The function returns 1 if the key value object is found empty and is
- * deleted, otherwise 0 is returned. */
+ * deleted, otherwise 0 is returned.
+ * 检测某个key上绑定的value数据是否为空 是则将key从db中移除
+ * */
 int moduleDelKeyIfEmpty(RedisModuleKey *key) {
+    // 如果未绑定value 不用处理 此时认为还没有插入到db中
     if (!(key->mode & REDISMODULE_WRITE) || key->value == NULL) return 0;
     int isempty;
     robj *o = key->value;
 
+    // 根据对象类型 判断数据是否为空 为空就可以从db中删除了
     switch(o->type) {
     case OBJ_LIST: isempty = listTypeLength(o) == 0; break;
     case OBJ_SET: isempty = setTypeSize(o) == 0; break;
@@ -568,7 +594,9 @@ int moduleDelKeyIfEmpty(RedisModuleKey *key) {
  * named API, otherwise REDISMODULE_OK.
  *
  * This function is not meant to be used by modules developer, it is only
- * used implicitly by including redismodule.h. */
+ * used implicitly by including redismodule.h.
+ * 每个module会绑定一个函数 这里通过函数名 在dict中找到对应module  并用targetPtrPtr指向该module
+ * */
 int RM_GetApi(const char *funcname, void **targetPtrPtr) {
     dictEntry *he = dictFind(server.moduleapi, funcname);
     if (!he) return REDISMODULE_ERR;
@@ -577,25 +605,35 @@ int RM_GetApi(const char *funcname, void **targetPtrPtr) {
 }
 
 /* Helper function for when a command callback is called, in order to handle
- * details needed to correctly replicate commands. */
+ * details needed to correctly replicate commands.
+ * 当某个command 执行后 根据情况判断是否要传播到副本或者aof
+ * */
 void moduleHandlePropagationAfterCommandCallback(RedisModuleCtx *ctx) {
+    // 发起本次操作的是哪个client
     client *c = ctx->client;
 
     /* We don't need to do anything here if the context was never used
-     * in order to propagate commands. */
+     * in order to propagate commands.
+     * 如果不是这种 multi_emitted命令 不需要处理
+     * */
     if (!(ctx->flags & REDISMODULE_CTX_MULTI_EMITTED)) return;
 
+    // 忽略lua脚本
     if (c->flags & CLIENT_LUA) return;
 
     /* Handle the replication of the final EXEC, since whatever a command
-     * emits is always wrapped around MULTI/EXEC. */
+     * emits is always wrapped around MULTI/EXEC.
+     * 传播一条 exec命令
+     * */
     alsoPropagate(server.execCommand,c->db->id,&shared.exec,1,
         PROPAGATE_AOF|PROPAGATE_REPL);
 
     /* If this is not a module command context (but is instead a simple
      * callback context), we have to handle directly the "also propagate"
      * array and emit it. In a module command call this will be handled
-     * directly by call(). */
+     * directly by call().
+     * 如果包含该标记 由本线程直接执行传播
+     * */
     if (!(ctx->flags & REDISMODULE_CTX_MODULE_COMMAND_CALL) &&
         server.also_propagate.numops)
     {
@@ -613,10 +651,15 @@ void moduleHandlePropagationAfterCommandCallback(RedisModuleCtx *ctx) {
     }
 }
 
-/* Free the context after the user function was called. */
+/* Free the context after the user function was called.
+ * 释放module上下文
+ * */
 void moduleFreeContext(RedisModuleCtx *ctx) {
+    // 首先根据本次指定的command 判断是否要传播
     moduleHandlePropagationAfterCommandCallback(ctx);
+    // 回收context占用的内存
     autoMemoryCollect(ctx);
+    // 释放ctx相关的pool链表
     poolAllocRelease(ctx);
     if (ctx->postponed_arrays) {
         zfree(ctx->postponed_arrays);
@@ -632,7 +675,9 @@ void moduleFreeContext(RedisModuleCtx *ctx) {
 }
 
 /* This Redis command binds the normal Redis command invocation with commands
- * exported by modules. */
+ * exported by modules.
+ * 从client 接受某条命令 并进行分发
+ * */
 void RedisModuleCommandDispatcher(client *c) {
     RedisModuleCommandProxy *cp = (void*)(unsigned long)c->cmd->getkeys_proc;
     RedisModuleCtx ctx = REDISMODULE_CTX_INIT;
@@ -640,7 +685,10 @@ void RedisModuleCommandDispatcher(client *c) {
     ctx.flags |= REDISMODULE_CTX_MODULE_COMMAND_CALL;
     ctx.module = cp->module;
     ctx.client = c;
+    // 通过client此时的参数信息调用函数
     cp->func(&ctx,(void**)c->argv,c->argc);
+
+    // 此时函数已经调用完毕 释放ctx占用的内存
     moduleFreeContext(&ctx);
 
     /* In some cases processMultibulkBuffer uses sdsMakeRoomFor to
@@ -656,6 +704,7 @@ void RedisModuleCommandDispatcher(client *c) {
         /* Only do the work if the module took ownership of the object:
          * in that case the refcount is no longer 1. */
         if (c->argv[i]->refcount > 1)
+            // 参数使用完毕后释放空间
             trimStringObjectIfNeeded(c->argv[i]);
     }
 }
@@ -668,16 +717,21 @@ void RedisModuleCommandDispatcher(client *c) {
  *
  * In order to accomplish its work, the module command is called, flagging
  * the context in a way that the command can recognize this is a special
- * "get keys" call by calling RedisModule_IsKeysPositionRequest(ctx). */
+ * "get keys" call by calling RedisModule_IsKeysPositionRequest(ctx).
+ * 根据command的描述信息获取某些符合条件的key
+ * */
 int moduleGetCommandKeysViaAPI(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result) {
     RedisModuleCommandProxy *cp = (void*)(unsigned long)cmd->getkeys_proc;
     RedisModuleCtx ctx = REDISMODULE_CTX_INIT;
 
+    // 也是将相关信息填充到ctx中
     ctx.module = cp->module;
     ctx.client = NULL;
     ctx.flags |= REDISMODULE_CTX_KEYS_POS_REQUEST;
 
-    /* Initialize getKeysResult */
+    /* Initialize getKeysResult
+     * 做一些初始化工作 并设置到ctx上 这样当调用func时 结果就会被填充进去
+     * */
     getKeysPrepareResult(result, MAX_KEYS_BUFFER);
     ctx.keys_result = result;
 
@@ -691,7 +745,9 @@ int moduleGetCommandKeysViaAPI(struct redisCommand *cmd, robj **argv, int argc, 
 
 /* Return non-zero if a module command, that was declared with the
  * flag "getkeys-api", is called in a special way to get the keys positions
- * and not to get executed. Otherwise zero is returned. */
+ * and not to get executed. Otherwise zero is returned.
+ * 检测本次要执行的module command上下文是否携带 keysPosReq标记
+ * */
 int RM_IsKeysPositionRequest(RedisModuleCtx *ctx) {
     return (ctx->flags & REDISMODULE_CTX_KEYS_POS_REQUEST) != 0;
 }
@@ -709,7 +765,8 @@ int RM_IsKeysPositionRequest(RedisModuleCtx *ctx) {
  *
  *  Note: in the example below the get keys API would not be needed since
  *  keys are at fixed positions. This interface is only used for commands
- *  with a more complex structure. */
+ *  with a more complex structure.
+ *  */
 void RM_KeyAtPos(RedisModuleCtx *ctx, int pos) {
     if (!(ctx->flags & REDISMODULE_CTX_KEYS_POS_REQUEST) || !ctx->keys_result) return;
     if (pos <= 0) return;
@@ -728,7 +785,9 @@ void RM_KeyAtPos(RedisModuleCtx *ctx, int pos) {
 /* Helper for RM_CreateCommand(). Turns a string representing command
  * flags into the command flags used by the Redis core.
  *
- * It returns the set of flags, or -1 if unknown flags are found. */
+ * It returns the set of flags, or -1 if unknown flags are found.
+ * 基于某个字符串 生成command flags信息
+ * */
 int64_t commandFlagsFromString(char *s) {
     int count, j;
     int64_t flags = 0;
@@ -986,14 +1045,18 @@ int autoMemoryFreed(RedisModuleCtx *ctx, int type, void *ptr) {
     return 0;
 }
 
-/* Release all the objects in queue. */
+/* Release all the objects in queue.
+ * 回收某个module上下文的内存
+ * */
 void autoMemoryCollect(RedisModuleCtx *ctx) {
+    // 如果该上下文没有设置自动回收标识 本函数不处理
     if (!(ctx->flags & REDISMODULE_CTX_AUTO_MEMORY)) return;
     /* Clear the AUTO_MEMORY flag from the context, otherwise the functions
      * we call to free the resources, will try to scan the auto release
      * queue to mark the entries as freed. */
     ctx->flags &= ~REDISMODULE_CTX_AUTO_MEMORY;
     int j;
+    // 释放amqueue的引用计数
     for (j = 0; j < ctx->amqueue_used; j++) {
         void *ptr = ctx->amqueue[j].ptr;
         switch(ctx->amqueue[j].type) {
