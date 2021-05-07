@@ -50,6 +50,9 @@ typedef enum {
 #define CONN_FLAG_CLOSE_SCHEDULED   (1<<0)      /* Closed scheduled by a handler */
 #define CONN_FLAG_WRITE_BARRIER     (1<<1)      /* Write barrier requested */
 
+#define CONN_TYPE_SOCKET            1
+#define CONN_TYPE_TLS               2
+
 typedef void (*ConnectionCallbackFunc)(struct connection *conn);
 
 typedef struct ConnectionType {
@@ -66,6 +69,7 @@ typedef struct ConnectionType {
     ssize_t (*sync_write)(struct connection *conn, char *ptr, ssize_t size, long long timeout);
     ssize_t (*sync_read)(struct connection *conn, char *ptr, ssize_t size, long long timeout);
     ssize_t (*sync_readline)(struct connection *conn, char *ptr, ssize_t size, long long timeout);
+    int (*get_type)(struct connection *conn);
 } ConnectionType;
 
 struct connection {
@@ -105,7 +109,7 @@ static inline int connAccept(connection *conn, ConnectionCallbackFunc accept_han
 }
 
 /* Establish a connection.  The connect_handler will be called when the connection
- * is established, or if an error has occured.
+ * is established, or if an error has occurred.
  *
  * The connection handler will be responsible to set up any read/write handlers
  * as needed.
@@ -168,7 +172,7 @@ static inline int connSetReadHandler(connection *conn, ConnectionCallbackFunc fu
 
 /* Set a write handler, and possibly enable a write barrier, this flag is
  * cleared when write handler is changed or removed.
- * With barroer enabled, we never fire the event if the read handler already
+ * With barrier enabled, we never fire the event if the read handler already
  * fired in the same event loop iteration. Useful when you want to persist
  * things to disk before sending replies, and want to do that in a group fashion. */
 static inline int connSetWriteHandlerWithBarrier(connection *conn, ConnectionCallbackFunc func, int barrier) {
@@ -198,6 +202,11 @@ static inline ssize_t connSyncReadLine(connection *conn, char *ptr, ssize_t size
     return conn->type->sync_readline(conn, ptr, size, timeout);
 }
 
+/* Return CONN_TYPE_* for the specified connection */
+static inline int connGetType(connection *conn) {
+    return conn->type->get_type(conn);
+}
+
 connection *connCreateSocket();
 connection *connCreateAcceptedSocket(int fd);
 
@@ -225,7 +234,8 @@ int connSockName(connection *conn, char *ip, size_t ip_len, int *port);
 const char *connGetInfo(connection *conn, char *buf, size_t buf_len);
 
 /* Helpers for tls special considerations */
+sds connTLSGetPeerCert(connection *conn);
 int tlsHasPendingData();
-void tlsProcessPendingData();
+int tlsProcessPendingData();
 
 #endif  /* __REDIS_CONNECTION_H */

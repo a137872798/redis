@@ -36,7 +36,6 @@
  * Global state for ACLs
  * ==========================================================================*/
 
-// 使用rax来存储所有用户信息 ACL是做权限认证的么
 rax *Users; /* Table mapping usernames to user structures. */
 
 user *DefaultUser;  /* Global reference to the default user.
@@ -167,6 +166,25 @@ sds ACLHashPassword(unsigned char *cleartext, size_t len) {
     return sdsnewlen(hex,HASH_PASSWORD_LEN);
 }
 
+/* Given a hash and the hash length, returns C_OK if it is a valid password 
+ * hash, or C_ERR otherwise. */
+int ACLCheckPasswordHash(unsigned char *hash, int hashlen) {
+    if (hashlen != HASH_PASSWORD_LEN) {
+        return C_ERR;      
+    }
+ 
+    /* Password hashes can only be characters that represent
+     * hexadecimal values, which are numbers and lowercase 
+     * characters 'a' through 'f'. */
+    for(int i = 0; i < HASH_PASSWORD_LEN; i++) {
+        char c = hash[i];
+        if ((c < 'a' || c > 'f') && (c < '0' || c > '9')) {
+            return C_ERR;
+        }
+    }
+    return C_OK;
+}
+
 /* =============================================================================
  * Low level ACL API
  * ==========================================================================*/
@@ -195,9 +213,7 @@ uint64_t ACLGetCommandCategoryFlagByName(const char *name) {
 }
 
 /* Method for passwords/pattern comparison used for the user->passwords list
- * so that we can search for items with listSearchKey().
- * 当sds内容完全相同才认为匹配
- * */
+ * so that we can search for items with listSearchKey(). */
 int ACLListMatchSds(void *a, void *b) {
     return sdscmp(a,b) == 0;
 }
@@ -216,35 +232,22 @@ void *ACLListDupSds(void *item) {
  * of users (the Users global radix tree), and returns a reference to
  * the structure representing the user.
  *
- * If the user with such name already exists NULL is returned.
- * 创建一个新的用户
- * @param name 用户名
- * @param 标明char*长度
- * */
+ * If the user with such name already exists NULL is returned. */
 user *ACLCreateUser(const char *name, size_t namelen) {
-    // 如果此时用户信息已经存在与rax结构中 不需要重复插入
     if (raxFind(Users,(unsigned char*)name,namelen) != raxNotFound) return NULL;
     user *u = zmalloc(sizeof(*u));
-    // 用一个sds表示用户名
     u->name = sdsnewlen(name,namelen);
     u->flags = USER_FLAG_DISABLED;
-    // 当前用户允许执行的所有指令
     u->allowed_subcommands = NULL;
-    // 每个用户可以有一组密码么
     u->passwords = listCreate();
     u->patterns = listCreate();
-    // 定义passwords的match函数 当使用某个元素判断是否存在于链表中时 就是通过该函数进行匹配
     listSetMatchMethod(u->passwords,ACLListMatchSds);
-    // 释放元素时触发的回收函数
     listSetFreeMethod(u->passwords,ACLListFreeSds);
-    // 拷贝函数
     listSetDupMethod(u->passwords,ACLListDupSds);
     listSetMatchMethod(u->patterns,ACLListMatchSds);
     listSetFreeMethod(u->patterns,ACLListFreeSds);
     listSetDupMethod(u->patterns,ACLListDupSds);
-    // 内存置零
     memset(u->allowed_commands,0,sizeof(u->allowed_commands));
-    // 将用户以name作为key 存储到users中
     raxInsert(Users,(unsigned char*)name,namelen,u,NULL);
     return u;
 }
@@ -252,16 +255,13 @@ user *ACLCreateUser(const char *name, size_t namelen) {
 /* This function should be called when we need an unlinked "fake" user
  * we can use in order to validate ACL rules or for other similar reasons.
  * The user will not get linked to the Users radix tree. The returned
- * user should be released with ACLFreeUser() as usually.
- * */
+ * user should be released with ACLFreeUser() as usually. */
 user *ACLCreateUnlinkedUser(void) {
     char username[64];
     for (int j = 0; ; j++) {
-        // 生成无规则用户名
         snprintf(username,sizeof(username),"__fakeuser:%d__",j);
         user *fakeuser = ACLCreateUser(username,strlen(username));
         if (fakeuser == NULL) continue;
-        // 插入用户后 会立即进行移除
         int retval = raxRemove(Users,(unsigned char*) username,
                                strlen(username),NULL);
         serverAssert(retval != 0);
@@ -289,7 +289,7 @@ void ACLFreeUserAndKillClients(user *u) {
     while ((ln = listNext(&li)) != NULL) {
         client *c = listNodeValue(ln);
         if (c->user == u) {
-            /* We'll free the conenction asynchronously, so
+            /* We'll free the connection asynchronously, so
              * in theory to set a different user is not needed.
              * However if there are bugs in Redis, soon or later
              * this may result in some security hole: it's much
@@ -297,7 +297,13 @@ void ACLFreeUserAndKillClients(user *u) {
              * it in non authenticated mode. */
             c->user = DefaultUser;
             c->authenticated = 0;
-            freeClientAsync(c);
+            /* We will write replies to this client later, so we can't
+             * close it directly even if async. */
+            if (c == server.current_client) {
+                c->flags |= CLIENT_CLOSE_AFTER_COMMAND;
+            } else {
+                freeClientAsync(c);
+            }
         }
     }
     ACLFreeUser(u);
@@ -375,12 +381,13 @@ int ACLUserCanExecuteFutureCommands(user *u) {
  * to skip the command bit explicit test. */
 void ACLSetUserCommandBit(user *u, unsigned long id, int value) {
     uint64_t word, bit;
-    if (value == 0) u->flags &= ~USER_FLAG_ALLCOMMANDS;
     if (ACLGetCommandBitCoordinates(id,&word,&bit) == C_ERR) return;
-    if (value)
+    if (value) {
         u->allowed_commands[word] |= bit;
-    else
+    } else {
         u->allowed_commands[word] &= ~bit;
+        u->flags &= ~USER_FLAG_ALLCOMMANDS;
+    }
 }
 
 /* This is like ACLSetUserCommandBit(), but instead of setting the specified
@@ -388,13 +395,8 @@ void ACLSetUserCommandBit(user *u, unsigned long id, int value) {
  * and will set all the bits corresponding to such commands to the specified
  * value. Since the category passed by the user may be non existing, the
  * function returns C_ERR if the category was not found, or C_OK if it was
- * found and the operation was performed.
- * 为某个用户追加某些命令
- * @param category 代表命令类型
- * @param value 代表增加/减少
- * */
+ * found and the operation was performed. */
 int ACLSetUserCommandBitsForCategory(user *u, const char *category, int value) {
-    // 找到命令
     uint64_t cflag = ACLGetCommandCategoryFlagByName(category);
     if (!cflag) return C_ERR;
     dictIterator *di = dictGetIterator(server.orig_commands);
@@ -473,21 +475,68 @@ sds ACLDescribeUserCommandRules(user *u) {
         ACLSetUser(fakeuser,"-@all",-1);
     }
 
-    /* Try to add or subtract each category one after the other. Often a
-     * single category will not perfectly match the set of commands into
-     * it, so at the end we do a final pass adding/removing the single commands
-     * needed to make the bitmap exactly match. */
-    for (int j = 0; ACLCommandCategories[j].flag != 0; j++) {
-        unsigned long on, off;
-        ACLCountCategoryBitsForUser(u,&on,&off,ACLCommandCategories[j].name);
-        if ((additive && on > off) || (!additive && off > on)) {
-            sds op = sdsnewlen(additive ? "+@" : "-@", 2);
-            op = sdscat(op,ACLCommandCategories[j].name);
-            ACLSetUser(fakeuser,op,-1);
-            rules = sdscatsds(rules,op);
-            rules = sdscatlen(rules," ",1);
-            sdsfree(op);
+    /* Attempt to find a good approximation for categories and commands
+     * based on the current bits used, by looping over the category list
+     * and applying the best fit each time. Often a set of categories will not 
+     * perfectly match the set of commands into it, so at the end we do a 
+     * final pass adding/removing the single commands needed to make the bitmap
+     * exactly match. A temp user is maintained to keep track of categories 
+     * already applied. */
+    user tu = {0};
+    user *tempuser = &tu;
+    
+    /* Keep track of the categories that have been applied, to prevent
+     * applying them twice.  */
+    char applied[sizeof(ACLCommandCategories)/sizeof(ACLCommandCategories[0])];
+    memset(applied, 0, sizeof(applied));
+
+    memcpy(tempuser->allowed_commands,
+        u->allowed_commands, 
+        sizeof(u->allowed_commands));
+    while (1) {
+        int best = -1;
+        unsigned long mindiff = INT_MAX, maxsame = 0;
+        for (int j = 0; ACLCommandCategories[j].flag != 0; j++) {
+            if (applied[j]) continue;
+
+            unsigned long on, off, diff, same;
+            ACLCountCategoryBitsForUser(tempuser,&on,&off,ACLCommandCategories[j].name);
+            /* Check if the current category is the best this loop:
+             * * It has more commands in common with the user than commands
+             *   that are different.
+             * AND EITHER
+             * * It has the fewest number of differences
+             *    than the best match we have found so far. 
+             * * OR it matches the fewest number of differences
+             *   that we've seen but it has more in common. */
+            diff = additive ? off : on;
+            same = additive ? on : off;
+            if (same > diff && 
+                ((diff < mindiff) || (diff == mindiff && same > maxsame)))
+            {
+                best = j;
+                mindiff = diff;
+                maxsame = same;
+            }
         }
+
+        /* We didn't find a match */
+        if (best == -1) break;
+
+        sds op = sdsnewlen(additive ? "+@" : "-@", 2);
+        op = sdscat(op,ACLCommandCategories[best].name);
+        ACLSetUser(fakeuser,op,-1);
+
+        sds invop = sdsnewlen(additive ? "-@" : "+@", 2);
+        invop = sdscat(invop,ACLCommandCategories[best].name);
+        ACLSetUser(tempuser,invop,-1);
+
+        rules = sdscatsds(rules,op);
+        rules = sdscatlen(rules," ",1);
+        sdsfree(op);
+        sdsfree(invop);
+
+        applied[best] = 1;
     }
 
     /* Fix the final ACLs with single commands differences. */
@@ -614,9 +663,7 @@ void ACLResetSubcommandsForCommand(user *u, unsigned long id) {
 
 /* Flush the entire table of subcommands. This is useful on +@all, -@all
  * or similar to return back to the minimal memory usage (and checks to do)
- * for the user.
- * 这里是释放掉所有sub命令 以节省内存
- * */
+ * for the user. */
 void ACLResetSubcommands(user *u) {
     if (u->allowed_subcommands == NULL) return;
     for (int j = 0; j < USER_COMMAND_BITS_COUNT; j++) {
@@ -739,11 +786,10 @@ void ACLAddAllowedSubcommand(user *u, unsigned long id, const char *sub) {
  *         almost surely an error on the user side.
  * ENODEV: The password you are trying to remove from the user does not exist.
  * EBADMSG: The hash you are trying to add is not a valid hash.
- * 针对某些用户执行一些操作 比如赋予权限
  */
 int ACLSetUser(user *u, const char *op, ssize_t oplen) {
-    // 因为op使用的是普通字符串 可以直接通过strlen计算长度
     if (oplen == -1) oplen = strlen(op);
+    if (oplen == 0) return C_OK; /* Empty string is a no-operation. */
     if (!strcasecmp(op,"on")) {
         u->flags |= USER_FLAG_ENABLED;
         u->flags &= ~USER_FLAG_DISABLED;
@@ -758,15 +804,11 @@ int ACLSetUser(user *u, const char *op, ssize_t oplen) {
     } else if (!strcasecmp(op,"resetkeys")) {
         u->flags &= ~USER_FLAG_ALLKEYS;
         listEmpty(u->patterns);
-
-        // 将所有命令权限赋予该用户
     } else if (!strcasecmp(op,"allcommands") ||
                !strcasecmp(op,"+@all"))
     {
-        // 每个命令都设置成255
         memset(u->allowed_commands,255,sizeof(u->allowed_commands));
         u->flags |= USER_FLAG_ALLCOMMANDS;
-        // 清空subCommand
         ACLResetSubcommands(u);
     } else if (!strcasecmp(op,"nocommands") ||
                !strcasecmp(op,"-@all"))
@@ -785,21 +827,9 @@ int ACLSetUser(user *u, const char *op, ssize_t oplen) {
         if (op[0] == '>') {
             newpass = ACLHashPassword((unsigned char*)op+1,oplen-1);
         } else {
-            if (oplen != HASH_PASSWORD_LEN + 1) {
+            if (ACLCheckPasswordHash((unsigned char*)op+1,oplen-1) == C_ERR) {
                 errno = EBADMSG;
                 return C_ERR;
-            }
-
-            /* Password hashes can only be characters that represent
-             * hexadecimal values, which are numbers and lowercase
-             * characters 'a' through 'f'.
-             */
-            for(int i = 1; i < HASH_PASSWORD_LEN + 1; i++) {
-                char c = op[i];
-                if ((c < 'a' || c > 'f') && (c < '0' || c > '9')) {
-                    errno = EBADMSG;
-                    return C_ERR;
-                }
             }
             newpass = sdsnewlen(op+1,oplen-1);
         }
@@ -816,7 +846,7 @@ int ACLSetUser(user *u, const char *op, ssize_t oplen) {
         if (op[0] == '<') {
             delpass = ACLHashPassword((unsigned char*)op+1,oplen-1);
         } else {
-            if (oplen != HASH_PASSWORD_LEN + 1) {
+            if (ACLCheckPasswordHash((unsigned char*)op+1,oplen-1) == C_ERR) {
                 errno = EBADMSG;
                 return C_ERR;
             }
@@ -870,7 +900,6 @@ int ACLSetUser(user *u, const char *op, ssize_t oplen) {
                 errno = ENOENT;
                 return C_ERR;
             }
-            unsigned long id = ACLGetCommandID(copy);
 
             /* The subcommand cannot be empty, so things like DEBUG|
              * are syntax errors of course. */
@@ -883,6 +912,7 @@ int ACLSetUser(user *u, const char *op, ssize_t oplen) {
             /* The command should not be set right now in the command
              * bitmap, because adding a subcommand of a fully added
              * command is probably an error on the user side. */
+            unsigned long id = ACLGetCommandID(copy);
             if (ACLGetUserCommandBit(u,id) == 1) {
                 zfree(copy);
                 errno = EBUSY;
@@ -905,7 +935,6 @@ int ACLSetUser(user *u, const char *op, ssize_t oplen) {
         unsigned long id = ACLGetCommandID(op+1);
         ACLSetUserCommandBit(u,id,0);
         ACLResetSubcommandsForCommand(u,id);
-        // 代表为用户设置/移除某些命令
     } else if ((op[0] == '+' || op[0] == '-') && op[1] == '@') {
         int bitval = op[0] == '+' ? 1 : 0;
         if (ACLSetUserCommandBitsForCategory(u,op+2,bitval) == C_ERR) {
@@ -951,34 +980,21 @@ char *ACLSetUserStringError(void) {
 }
 
 /* Initialize the default user, that will always exist for all the process
- * lifetime.
- * acl应该是redis的权限验证模块  在启动redis服务器时 需要完成权限校验 这里会先设置一个默认用户
- * */
+ * lifetime. */
 void ACLInitDefaultUser(void) {
     DefaultUser = ACLCreateUser("default",7);
-    // 给默认用户设置各种权限
     ACLSetUser(DefaultUser,"+@all",-1);
-    // 清空user.pattern
     ACLSetUser(DefaultUser,"~*",-1);
-    // 启用该用户
     ACLSetUser(DefaultUser,"on",-1);
-    // 代表默认用户没有密码
     ACLSetUser(DefaultUser,"nopass",-1);
 }
 
-/*
- * Initialization of the ACL subsystem.
- * 在启动 redis server时 必须确保acl子系统完成初始化
- * */
+/* Initialization of the ACL subsystem. */
 void ACLInit(void) {
-    // 初始化一个 rax结构 用于存储所有的用户信息  rax与hash桶的区别就是实现复杂 但是更节省内存 (get/put会更耗时)
     Users = raxNew();
-    // adlist 是链表结构
     UsersToLoad = listCreate();
     ACLLog = listCreate();
-    // 初始化默认用户
     ACLInitDefaultUser();
-    // 兼容相关忽略
     server.requirepass = NULL; /* Only used for backward compatibility. */
 }
 
@@ -1047,18 +1063,12 @@ int ACLAuthenticateUser(client *c, robj *username, robj *password) {
  * should have an assigned ID (that is used to index the bitmap). This function
  * creates such an ID: it uses sequential IDs, reusing the same ID for the same
  * command name, so that a command retains the same ID in case of modules that
- * are unloaded and later reloaded.
- * 通过commandName兑换id
- * */
+ * are unloaded and later reloaded. */
 unsigned long ACLGetCommandID(const char *cmdname) {
-
-    // 静态变量
     static rax *map = NULL;
     static unsigned long nextid = 0;
 
-    // 基于参数文本转换成 sds结构
     sds lowername = sdsnew(cmdname);
-    // 全部转换成小写
     sdstolower(lowername);
     if (map == NULL) map = raxNew();
     void *id = raxFind(map,(unsigned char*)lowername,sdslen(lowername));
@@ -1066,7 +1076,6 @@ unsigned long ACLGetCommandID(const char *cmdname) {
         sdsfree(lowername);
         return (unsigned long)id;
     }
-    // id 是递增的
     raxInsert(map,(unsigned char*)lowername,strlen(lowername),
               (void*)nextid,NULL);
     sdsfree(lowername);
@@ -1100,17 +1109,12 @@ user *ACLGetUserByName(const char *name, size_t namelen) {
  * ACL_DENIED_CMD or ACL_DENIED_KEY is returned: the first in case the
  * command cannot be executed because the user is not allowed to run such
  * command, the second if the command is denied because the user is trying
- * to access keys that are not among the specified patterns.
- * 检测client上挂载的用户是否有权限执行command
- * */
+ * to access keys that are not among the specified patterns. */
 int ACLCheckCommandPerm(client *c, int *keyidxptr) {
     user *u = c->user;
-    // 此时要执行的command
     uint64_t id = c->cmd->id;
 
-    /* If there is no associated user, the connection can run anything.
-     * 没有关联用户 就具备全部权限
-     * */
+    /* If there is no associated user, the connection can run anything. */
     if (u == NULL) return ACL_OK;
 
     /* Check if the user can execute this command. */
@@ -1145,8 +1149,9 @@ int ACLCheckCommandPerm(client *c, int *keyidxptr) {
     if (!(c->user->flags & USER_FLAG_ALLKEYS) &&
         (c->cmd->getkeys_proc || c->cmd->firstkey))
     {
-        int numkeys;
-        int *keyidx = getKeysFromCommand(c->cmd,c->argv,c->argc,&numkeys);
+        getKeysResult result = GETKEYS_RESULT_INIT;
+        int numkeys = getKeysFromCommand(c->cmd,c->argv,c->argc,&result);
+        int *keyidx = result.keys;
         for (int j = 0; j < numkeys; j++) {
             listIter li;
             listNode *ln;
@@ -1167,11 +1172,11 @@ int ACLCheckCommandPerm(client *c, int *keyidxptr) {
             }
             if (!match) {
                 if (keyidxptr) *keyidxptr = keyidx[j];
-                getKeysFreeResult(keyidx);
+                getKeysFreeResult(&result);
                 return ACL_DENIED_KEY;
             }
         }
-        getKeysFreeResult(keyidx);
+        getKeysFreeResult(&result);
     }
 
     /* If we survived all the above checks, the user can execute the
@@ -1200,24 +1205,17 @@ int ACLCheckCommandPerm(client *c, int *keyidxptr) {
  *
  * When an error is detected and C_ERR is returned, the function populates
  * by reference (if not set to NULL) the argc_err argument with the index
- * of the argv vector that caused the error.
- * @param argv 对应配置文件中信息 必须以user开头
- * 当从配置文件中解析到user 信息后 会插入到acl中
- * */
+ * of the argv vector that caused the error. */
 int ACLAppendUserForLoading(sds *argv, int argc, int *argc_err) {
-    // 格式校验
     if (argc < 2 || strcasecmp(argv[0],"user")) {
         if (argc_err) *argc_err = 0;
         return C_ERR;
     }
 
     /* Try to apply the user rules in a fake user to see if they
-     * are actually valid.
-     * 此时创建一个虚拟用户 该用户不会存放到 User rax结构中
-     * */
+     * are actually valid. */
     user *fakeuser = ACLCreateUnlinkedUser();
 
-    // 从第3项开始 就是用户option信息  第2项 应该是username
     for (int j = 2; j < argc; j++) {
         if (ACLSetUser(fakeuser,argv[j],sdslen(argv[j])) == C_ERR) {
             if (errno != ENOENT) {
@@ -1228,13 +1226,10 @@ int ACLAppendUserForLoading(sds *argv, int argc, int *argc_err) {
         }
     }
 
-    /* Rules look valid, let's append the user to the list.
-     * 创建副本
-     * */
+    /* Rules look valid, let's append the user to the list. */
     sds *copy = zmalloc(sizeof(sds)*argc);
     for (int j = 1; j < argc; j++) copy[j-1] = sdsdup(argv[j]);
     copy[argc-1] = NULL;
-    // 将用户信息插入到 userstoLoad中
     listAddNodeTail(UsersToLoad,copy);
     ACLFreeUser(fakeuser);
     return C_OK;
@@ -1242,38 +1237,28 @@ int ACLAppendUserForLoading(sds *argv, int argc, int *argc_err) {
 
 /* This function will load the configured users appended to the server
  * configuration via ACLAppendUserForLoading(). On loading errors it will
- * log an error and return C_ERR, otherwise C_OK will be returned.
- * 通过配置文件的信息填充acl.users信息
- * */
+ * log an error and return C_ERR, otherwise C_OK will be returned. */
 int ACLLoadConfiguredUsers(void) {
     listIter li;
     listNode *ln;
     listRewind(UsersToLoad,&li);
     while ((ln = listNext(&li)) != NULL) {
-
-        // 每个user信息由一组数组组成
         sds *aclrules = listNodeValue(ln);
-        // 第一个字符串对应用户名字
         sds username = aclrules[0];
 
-        // 检测是否出现了空格
         if (ACLStringHasSpaces(aclrules[0],sdslen(aclrules[0]))) {
             serverLog(LL_WARNING,"Spaces not allowed in ACL usernames");
             return C_ERR;
         }
 
-        // 通过解析待加载的用户信息 生成user对象并填充到server.user中
         user *u = ACLCreateUser(username,sdslen(username));
         if (!u) {
-            // 如果存在旧用户信息 重置信息
             u = ACLGetUserByName(username,sdslen(username));
             serverAssert(u != NULL);
             ACLSetUser(u,"reset",-1);
         }
 
-        /* Load every rule defined for this user.
-         * 读取剩余的信息 并设置到用户上
-         * */
+        /* Load every rule defined for this user. */
         for (int j = 1; aclrules[j]; j++) {
             if (ACLSetUser(u,aclrules[j],sdslen(aclrules[j])) != C_OK) {
                 char *errmsg = ACLSetUserStringError();
@@ -1285,9 +1270,7 @@ int ACLLoadConfiguredUsers(void) {
         }
 
         /* Having a disabled user in the configuration may be an error,
-         * warn about it without returning any error to the caller.
-         * 如果该用户设置成 disable 打印日志
-         * */
+         * warn about it without returning any error to the caller. */
         if (u->flags & USER_FLAG_DISABLED) {
             serverLog(LL_NOTICE, "The user '%s' is disabled (there is no "
                                  "'on' modifier in the user description). Make "
@@ -1320,16 +1303,12 @@ int ACLLoadConfiguredUsers(void) {
  *
  * At the end of the process, if no errors were found in the whole file then
  * NULL is returned. Otherwise an SDS string describing in a single line
- * a description of all the issues found is returned.
- * 从acl配置文件中 解析数据生成user
- * */
+ * a description of all the issues found is returned. */
 sds ACLLoadFromFile(const char *filename) {
     FILE *fp;
     char buf[1024];
 
-    /* Open the ACL file.
-     * 仅以read方式打开
-     * */
+    /* Open the ACL file. */
     if ((fp = fopen(filename,"r")) == NULL) {
         sds errors = sdscatprintf(sdsempty(),
             "Error loading ACLs, opening file '%s': %s",
@@ -1339,7 +1318,6 @@ sds ACLLoadFromFile(const char *filename) {
 
     /* Load the whole file as a single string in memory. */
     sds acls = sdsempty();
-    // 按行读取数据 进行拼接  sds具备自动扩容功能
     while(fgets(buf,sizeof(buf),fp) != NULL)
         acls = sdscat(acls,buf);
     fclose(fp);
@@ -1347,45 +1325,34 @@ sds ACLLoadFromFile(const char *filename) {
     /* Split the file into lines and attempt to load each line. */
     int totlines;
     sds *lines, errors = sdsempty();
-    // 通过解析换行符 判断总计有多少行数据 并将结果设置到 totlines上
     lines = sdssplitlen(acls,strlen(acls),"\n",1,&totlines);
-
     sdsfree(acls);
 
     /* We need a fake user to validate the rules before making changes
-     * to the real user mentioned in the ACL line.
-     * 这里创建了一个虚假用户 并且该用户不会存在于 acl.user(rax) 中
-     * */
+     * to the real user mentioned in the ACL line. */
     user *fakeuser = ACLCreateUnlinkedUser();
 
     /* We do all the loading in a fresh instance of the Users radix tree,
      * so if there are errors loading the ACL file we can rollback to the
-     * old version.
-     * */
+     * old version. */
     rax *old_users = Users;
-    // 当acl模块被初始化时 会创建一个默认用户 具备全部的权限
     user *old_default_user = DefaultUser;
-
-    // 这里重置了 user/defaultUser 并通过2个old指针记录旧数据
     Users = raxNew();
     ACLInitDefaultUser();
 
-    /* Load each line of the file.
-     * 按行解析数据
-     * */
+    /* Load each line of the file. */
     for (int i = 0; i < totlines; i++) {
         sds *argv;
         int argc;
         int linenum = i+1;
 
-        // 裁剪掉无效的转义符
         lines[i] = sdstrim(lines[i]," \t\r\n");
 
-        /* Skip blank lines 代表是空行 */
+        /* Skip blank lines */
         if (lines[i][0] == '\0') continue;
 
-        /* Split into arguments 将字符串拆分后 设置到参数列表中 */
-        argv = sdssplitargs(lines[i],&argc);
+        /* Split into arguments */
+        argv = sdssplitlen(lines[i],sdslen(lines[i])," ",1,&argc);
         if (argv == NULL) {
             errors = sdscatprintf(errors,
                      "%s:%d: unbalanced quotes in acl line. ",
@@ -1399,9 +1366,7 @@ sds ACLLoadFromFile(const char *filename) {
             continue;
         }
 
-        /* The line should start with the "user" keyword.
-         * acl配置 每行应当以user开头
-         * */
+        /* The line should start with the "user" keyword. */
         if (strcmp(argv[0],"user") || argc < 2) {
             errors = sdscatprintf(errors,
                      "%s:%d should start with user keyword followed "
@@ -1416,16 +1381,18 @@ sds ACLLoadFromFile(const char *filename) {
             errors = sdscatprintf(errors,
                      "'%s:%d: username '%s' contains invalid characters. ",
                      server.acl_filename, linenum, argv[1]);
+            sdsfreesplitres(argv,argc);
             continue;
         }
 
-        /* Try to process the line using the fake user to validate iif
-         * the rules are able to apply cleanly. */
+        /* Try to process the line using the fake user to validate if
+         * the rules are able to apply cleanly. At this stage we also
+         * trim trailing spaces, so that we don't have to handle that
+         * in ACLSetUser(). */
         ACLSetUser(fakeuser,"reset",-1);
         int j;
-
-        // 这里认为每行参数应该是  user username 各种配置值...
         for (j = 2; j < argc; j++) {
+            argv[j] = sdstrim(argv[j],"\t\r\n");
             if (ACLSetUser(fakeuser,argv[j],sdslen(argv[j])) != C_OK) {
                 char *errmsg = ACLSetUserStringError();
                 errors = sdscatprintf(errors,
@@ -1444,12 +1411,9 @@ sds ACLLoadFromFile(const char *filename) {
         }
 
         /* We can finally lookup the user and apply the rule. If the
-         * user already exists we always reset it to start.
-         * 使用用户名 创建user对象
-         * */
+         * user already exists we always reset it to start. */
         user *u = ACLCreateUser(argv[1],sdslen(argv[1]));
         if (!u) {
-            // 如果用户信息已存储 修改成重置状态
             u = ACLGetUserByName(argv[1],sdslen(argv[1]));
             serverAssert(u != NULL);
             ACLSetUser(u,"reset",-1);
@@ -1458,13 +1422,11 @@ sds ACLLoadFromFile(const char *filename) {
         /* Note that the same rules already applied to the fake user, so
          * we just assert that everything goes well: it should. */
         for (j = 2; j < argc; j++)
-            // 这里使用配置项更新用户信息
             serverAssert(ACLSetUser(u,argv[j],sdslen(argv[j])) == C_OK);
 
         sdsfreesplitres(argv,argc);
     }
 
-    // 释放虚假用户内存
     ACLFreeUser(fakeuser);
     sdsfreesplitres(lines,totlines);
     DefaultUser = old_default_user; /* This pointer must never change. */
@@ -1474,15 +1436,11 @@ sds ACLLoadFromFile(const char *filename) {
         /* The default user pointer is referenced in different places: instead
          * of replacing such occurrences it is much simpler to copy the new
          * default user configuration in the old one. */
-        // 这里假定配置文件中 包含默认用户的配置项
         user *new = ACLGetUserByName("default",7);
         serverAssert(new != NULL);
-        // 用从配置文件中解析的默认用户信息去设置DefaultUser指针
         ACLCopyUser(DefaultUser,new);
-        // 这里是更正维护的指针关系  Users中default的指针应该就是DefaultUser
         ACLFreeUser(new);
         raxInsert(Users,(unsigned char*)"default",7,DefaultUser,NULL);
-        // old_user中default指针与DefaultUser指针是同一个 不能释放内存  所以要先从rax中移除 这样就不会被 ACLFreeUsersSet干扰
         raxRemove(old_users,(unsigned char*)"default",7,NULL);
         ACLFreeUsersSet(old_users);
         sdsfree(errors);
@@ -1563,12 +1521,8 @@ cleanup:
  * loaded, and we are ready to start, in order to load the ACLs either from
  * the pending list of users defined in redis.conf, or from the ACL file.
  * The function will just exit with an error if the user is trying to mix
- * both the loading methods.
- * 加载acl用户
- * */
+ * both the loading methods. */
 void ACLLoadUsersAtStartup(void) {
-    // 这里只能出现一种情况 要么从配置文件中加载user信息  要么从UsersToLoad中加载用户信息 不能同时设置
-    // 或者 二者都没设置
     if (server.acl_filename[0] != '\0' && listLength(UsersToLoad) != 0) {
         serverLog(LL_WARNING,
             "Configuring Redis with users defined in redis.conf and at "
@@ -1579,14 +1533,12 @@ void ACLLoadUsersAtStartup(void) {
         exit(1);
     }
 
-    // 通过解析UsersToLoad中的数据 生成user并设置到server中
     if (ACLLoadConfiguredUsers() == C_ERR) {
         serverLog(LL_WARNING,
             "Critical error while loading ACLs. Exiting.");
         exit(1);
     }
 
-    // 解析配置文件 从中读取user/defaultUser信息 并填充到acl相关容器中
     if (server.acl_filename[0] != '\0') {
         sds errors = ACLLoadFromFile(server.acl_filename);
         if (errors) {
@@ -2014,7 +1966,7 @@ void aclCommand(client *c) {
             addReplyBulkCString(c,"client-info");
             addReplyBulkCBuffer(c,le->cinfo,sdslen(le->cinfo));
         }
-    } else if (!strcasecmp(sub,"help")) {
+    } else if (c->argc == 2 && !strcasecmp(sub,"help")) {
         const char *help[] = {
 "LOAD                             -- Reload users from the ACL file.",
 "SAVE                             -- Save the current config to the ACL file.",

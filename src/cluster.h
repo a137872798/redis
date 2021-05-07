@@ -40,7 +40,7 @@ typedef struct clusterLink {
     sds sndbuf;                 /* Packet send buffer */
     char *rcvbuf;               /* Packet reception buffer */
     size_t rcvbuf_len;          /* Used size of rcvbuf */
-    size_t rcvbuf_alloc;        /* Allocated size of rcvbuf */
+    size_t rcvbuf_alloc;        /* Used size of rcvbuf */
     struct clusterNode *node;   /* Node related to this link if any, or NULL */
 } clusterLink;
 
@@ -79,7 +79,6 @@ typedef struct clusterLink {
 #define CLUSTER_TODO_UPDATE_STATE (1<<1)
 #define CLUSTER_TODO_SAVE_CONFIG (1<<2)
 #define CLUSTER_TODO_FSYNC_CONFIG (1<<3)
-#define CLUSTER_TODO_HANDLE_MANUALFAILOVER (1<<4)
 
 /* Message types.
  *
@@ -112,16 +111,12 @@ typedef struct clusterNodeFailReport {
     mstime_t time;             /* Time of the last report from this node. */
 } clusterNodeFailReport;
 
-/**
- * 描述集群中的某个节点
- */
 typedef struct clusterNode {
     mstime_t ctime; /* Node object creation time. */
     char name[CLUSTER_NAMELEN]; /* Node name, hex string, sha1-size */
     int flags;      /* CLUSTER_NODE_... */
     uint64_t configEpoch; /* Last configEpoch observed for this node */
     unsigned char slots[CLUSTER_SLOTS/8]; /* slots handled by this node */
-    sds slots_info; /* Slots info represented by string. */
     int numslots;   /* Number of slots handled by this node */
     int numslaves;  /* Number of slave nodes, if this is a master */
     struct clusterNode **slaves; /* pointers to slave nodes */
@@ -144,25 +139,17 @@ typedef struct clusterNode {
     list *fail_reports;         /* List of nodes signaling this as failing */
 } clusterNode;
 
-/**
- * 描述当前集群状态
- */
 typedef struct clusterState {
     clusterNode *myself;  /* This node */
     uint64_t currentEpoch;
     int state;            /* CLUSTER_OK, CLUSTER_FAIL, ... */
     int size;             /* Num of master nodes with at least one slot */
-    // 所有节点信息存储在字典中
     dict *nodes;          /* Hash table of name -> clusterNode structures */
-    // 代表某些节点在黑名单中 短期内无法加入到集群
     dict *nodes_black_list; /* Nodes we don't re-add for a few seconds. */
     clusterNode *migrating_slots_to[CLUSTER_SLOTS];
     clusterNode *importing_slots_from[CLUSTER_SLOTS];
     clusterNode *slots[CLUSTER_SLOTS];
-    // 记录当前server下每个slot下key的数量
     uint64_t slots_keys_count[CLUSTER_SLOTS];
-
-    // 所有key 以及计算出的hash值被存储在该rax结构中 难怪这么看重内存开销 因为这个结构可能要存储redis所有key的信息
     rax *slots_to_keys;
     /* The following fields are used to take the slave state on elections. */
     mstime_t failover_auth_time; /* Time of previous or next election. */
@@ -184,7 +171,6 @@ typedef struct clusterState {
                                    can start requesting masters vote. */
     /* The following fields are used by masters to take state on elections. */
     uint64_t lastVoteEpoch;     /* Epoch of the last vote granted. */
-    // 这是一个标记为 代表在新一轮事件循环开始前 cluster要做的事  完成后会归0 在新一轮中等待被修改
     int todo_before_sleep; /* Things to do in clusterBeforeSleep(). */
     /* Messages received and sent by type. */
     long long stats_bus_messages_sent[CLUSTERMSG_TYPE_COUNT];

@@ -33,18 +33,12 @@
  * List API
  *----------------------------------------------------------------------------*/
 
-// 定义值类型为redisList的api
-
 /* The function pushes an element to the specified list object 'subject',
  * at head or tail position as specified by 'where'.
  *
  * There is no need for the caller to increment the refcount of 'value' as
- * the function takes care of it if needed.
- * @param subject 对应快速列表的指针
- * @param where 数据应当存储在什么位置
- * */
+ * the function takes care of it if needed. */
 void listTypePush(robj *subject, robj *value, int where) {
-    // 要求这个对象的编码方式必须是快速列表
     if (subject->encoding == OBJ_ENCODING_QUICKLIST) {
         int pos = (where == LIST_HEAD) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
         value = getDecodedObject(value);
@@ -56,22 +50,10 @@ void listTypePush(robj *subject, robj *value, int where) {
     }
 }
 
-/**
- * 将char指针转换成 redisObject 同时内部数据是sds
- * @param data
- * @param sz
- * @return
- */
 void *listPopSaver(unsigned char *data, unsigned int sz) {
     return createStringObject((char*)data,sz);
 }
 
-/**
- * 仅支持从quicklist中 弹出某个数据 同时数据会被包装成redisString
- * @param subject
- * @param where
- * @return
- */
 robj *listTypePop(robj *subject, int where) {
     long long vlong;
     robj *value = NULL;
@@ -80,8 +62,6 @@ robj *listTypePop(robj *subject, int where) {
     if (subject->encoding == OBJ_ENCODING_QUICKLIST) {
         if (quicklistPopCustom(subject->ptr, ql_where, (unsigned char **)&value,
                                NULL, &vlong, listPopSaver)) {
-
-            // 代表读取出来的是一个 long 类型 直接将转换成redisString
             if (!value)
                 value = createStringObjectFromLongLong(vlong);
         }
@@ -91,9 +71,6 @@ robj *listTypePop(robj *subject, int where) {
     return value;
 }
 
-/**
- * 返回 quicklist内 所有ziplist.entry总数
- */
 unsigned long listTypeLength(const robj *subject) {
     if (subject->encoding == OBJ_ENCODING_QUICKLIST) {
         return quicklistCount(subject->ptr);
@@ -102,9 +79,7 @@ unsigned long listTypeLength(const robj *subject) {
     }
 }
 
-/* Initialize an iterator at the specified index.
- * 返回一个定向迭代器 从index指定的位置开始
- * */
+/* Initialize an iterator at the specified index. */
 listTypeIterator *listTypeInitIterator(robj *subject, long index,
                                        unsigned char direction) {
     listTypeIterator *li = zmalloc(sizeof(listTypeIterator));
@@ -116,7 +91,6 @@ listTypeIterator *listTypeInitIterator(robj *subject, long index,
      * LIST_TAIL means start at HEAD and move *towards tail. */
     int iter_direction =
         direction == LIST_HEAD ? AL_START_TAIL : AL_START_HEAD;
-    // 基于指定的下标初始化迭代器
     if (li->encoding == OBJ_ENCODING_QUICKLIST) {
         li->iter = quicklistGetIteratorAtIdx(li->subject->ptr,
                                              iter_direction, index);
@@ -134,9 +108,7 @@ void listTypeReleaseIterator(listTypeIterator *li) {
 
 /* Stores pointer to current the entry in the provided entry structure
  * and advances the position of the iterator. Returns 1 when the current
- * entry is in fact an entry, 0 otherwise.
- * 实际上内部委托给 quicklist
- * */
+ * entry is in fact an entry, 0 otherwise. */
 int listTypeNext(listTypeIterator *li, listTypeEntry *entry) {
     /* Protect from converting when iterating */
     serverAssert(li->subject->encoding == li->encoding);
@@ -150,9 +122,7 @@ int listTypeNext(listTypeIterator *li, listTypeEntry *entry) {
     return 0;
 }
 
-/* Return entry or NULL at the current position of the iterator.
- * 将entry此时指向的数据包装成redisObject
- * */
+/* Return entry or NULL at the current position of the iterator. */
 robj *listTypeGet(listTypeEntry *entry) {
     robj *value = NULL;
     if (entry->li->encoding == OBJ_ENCODING_QUICKLIST) {
@@ -168,12 +138,6 @@ robj *listTypeGet(listTypeEntry *entry) {
     return value;
 }
 
-/**
- * 将redisObject内的值插入到 quicklist中   位置在entry的前后
- * @param entry
- * @param value
- * @param where
- */
 void listTypeInsert(listTypeEntry *entry, robj *value, int where) {
     if (entry->li->encoding == OBJ_ENCODING_QUICKLIST) {
         value = getDecodedObject(value);
@@ -202,9 +166,7 @@ int listTypeEqual(listTypeEntry *entry, robj *o) {
     }
 }
 
-/* Delete the element pointed to.
- * 删除entry对应的数据 同时会反映到迭代器上
- * */
+/* Delete the element pointed to. */
 void listTypeDelete(listTypeIterator *iter, listTypeEntry *entry) {
     if (entry->li->encoding == OBJ_ENCODING_QUICKLIST) {
         quicklistDelEntry(iter->iter, &entry->entry);
@@ -213,9 +175,7 @@ void listTypeDelete(listTypeIterator *iter, listTypeEntry *entry) {
     }
 }
 
-/* Create a quicklist from a single ziplist
- * 通过一个ziplist指针初始化 quicklist
- * */
+/* Create a quicklist from a single ziplist */
 void listTypeConvert(robj *subject, int enc) {
     serverAssertWithInfo(NULL,subject,subject->type==OBJ_LIST);
     serverAssertWithInfo(NULL,subject,subject->encoding==OBJ_ENCODING_ZIPLIST);
@@ -234,15 +194,8 @@ void listTypeConvert(robj *subject, int enc) {
  * List Commands
  *----------------------------------------------------------------------------*/
 
-/**
- * 基于client此时解析的参数  执行push指令 将数据插入到对应的list结构
- * @param c
- * @param where
- */
 void pushGenericCommand(client *c, int where) {
     int j, pushed = 0;
-
-    // 首先一级key 是用来确定redis数据结构的
     robj *lobj = lookupKeyWrite(c->db,c->argv[1]);
 
     if (lobj && lobj->type != OBJ_LIST) {
@@ -250,35 +203,26 @@ void pushGenericCommand(client *c, int where) {
         return;
     }
 
-    // 代表本次可能是一次批量插入
     for (j = 2; j < c->argc; j++) {
-
-        // 代表此时quicklist还没有被创建
         if (!lobj) {
             lobj = createQuicklistObject();
             quicklistSetOptions(lobj->ptr, server.list_max_ziplist_size,
                                 server.list_compress_depth);
-            // 将redisList插入到db中
             dbAdd(c->db,c->argv[1],lobj);
         }
-        // 挨个将所有参数插入到quicklist结构中
         listTypePush(lobj,c->argv[j],where);
         pushed++;
     }
-    // 返回当前list总长度
     addReplyLongLong(c, (lobj ? listTypeLength(lobj) : 0));
     if (pushed) {
         char *event = (where == LIST_HEAD) ? "lpush" : "rpush";
 
-        // TODO 发起事件通知
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_LIST,event,c->argv[1],c->db->id);
     }
-    // 因为增加了脏数据 可能会在下次事件循环前执行aof刷盘 ?
     server.dirty += pushed;
 }
 
-// 这个就是左侧插入和右侧插入啊 双端队列
 void lpushCommand(client *c) {
     pushGenericCommand(c,LIST_HEAD);
 }
@@ -287,17 +231,10 @@ void rpushCommand(client *c) {
     pushGenericCommand(c,LIST_TAIL);
 }
 
-
-/**
- * 要求list已经存在才能插入
- * @param c
- * @param where
- */
 void pushxGenericCommand(client *c, int where) {
     int j, pushed = 0;
     robj *subject;
 
-    // 不存在直接返回异常信息 如果存在但是类型不匹配也不处理
     if ((subject = lookupKeyWriteOrReply(c,c->argv[1],shared.czero)) == NULL ||
         checkType(c,subject,OBJ_LIST)) return;
 
@@ -324,10 +261,6 @@ void rpushxCommand(client *c) {
     pushxGenericCommand(c,LIST_TAIL);
 }
 
-/**
- * 这里是直接插入到某个位置
- * @param c
- */
 void linsertCommand(client *c) {
     int where;
     robj *subject;
@@ -335,7 +268,6 @@ void linsertCommand(client *c) {
     listTypeEntry entry;
     int inserted = 0;
 
-    // 解析顺序
     if (strcasecmp(c->argv[2]->ptr,"after") == 0) {
         where = LIST_TAIL;
     } else if (strcasecmp(c->argv[2]->ptr,"before") == 0) {
@@ -345,13 +277,11 @@ void linsertCommand(client *c) {
         return;
     }
 
-    // 要求list必须存在
     if ((subject = lookupKeyWriteOrReply(c,c->argv[1],shared.czero)) == NULL ||
         checkType(c,subject,OBJ_LIST)) return;
 
     /* Seek pivot from head to tail */
     iter = listTypeInitIterator(subject,0,LIST_TAIL);
-    // 遍历直到遇到匹配的ziplist.entry
     while (listTypeNext(iter,&entry)) {
         if (listTypeEqual(&entry,c->argv[3])) {
             listTypeInsert(&entry,c->argv[4],where);
@@ -361,13 +291,11 @@ void linsertCommand(client *c) {
     }
     listTypeReleaseIterator(iter);
 
-    // 代表插入成功
     if (inserted) {
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_LIST,"linsert",
                             c->argv[1],c->db->id);
         server.dirty++;
-        // ziplist.entry 未找到
     } else {
         /* Notify client of a failed insert */
         addReplyLongLong(c,-1);
@@ -377,28 +305,18 @@ void linsertCommand(client *c) {
     addReplyLongLong(c,listTypeLength(subject));
 }
 
-
-/**
- * 根据key从db下找到对应的redisList 之后获取长度信息
- * @param c
- */
 void llenCommand(client *c) {
     robj *o = lookupKeyReadOrReply(c,c->argv[1],shared.czero);
     if (o == NULL || checkType(c,o,OBJ_LIST)) return;
     addReplyLongLong(c,listTypeLength(o));
 }
 
-/**
- * 返回参数中指定的index 在list下对应的值
- * @param c
- */
 void lindexCommand(client *c) {
     robj *o = lookupKeyReadOrReply(c,c->argv[1],shared.null[c->resp]);
     if (o == NULL || checkType(c,o,OBJ_LIST)) return;
     long index;
     robj *value = NULL;
 
-    // 如果解析出来的index不合法 返回异常
     if ((getLongFromObjectOrReply(c, c->argv[2], &index, NULL) != C_OK))
         return;
 
@@ -420,21 +338,15 @@ void lindexCommand(client *c) {
     }
 }
 
-/**
- * 执行redisList的set指令
- * @param c
- */
 void lsetCommand(client *c) {
     robj *o = lookupKeyWriteOrReply(c,c->argv[1],shared.nokeyerr);
     if (o == NULL || checkType(c,o,OBJ_LIST)) return;
     long index;
     robj *value = c->argv[3];
 
-    // 读取下标信息
     if ((getLongFromObjectOrReply(c, c->argv[2], &index, NULL) != C_OK))
         return;
 
-    // 执行replace
     if (o->encoding == OBJ_ENCODING_QUICKLIST) {
         quicklist *ql = o->ptr;
         int replaced = quicklistReplaceAtIndex(ql, index,
@@ -452,11 +364,6 @@ void lsetCommand(client *c) {
     }
 }
 
-/**
- * 弹出操作
- * @param c
- * @param where
- */
 void popGenericCommand(client *c, int where) {
     robj *o = lookupKeyWriteOrReply(c,c->argv[1],shared.null[c->resp]);
     if (o == NULL || checkType(c,o,OBJ_LIST)) return;
@@ -467,11 +374,9 @@ void popGenericCommand(client *c, int where) {
     } else {
         char *event = (where == LIST_HEAD) ? "lpop" : "rpop";
 
-        // 将结果返回给client
         addReplyBulk(c,value);
         decrRefCount(value);
         notifyKeyspaceEvent(NOTIFY_LIST,event,c->argv[1],c->db->id);
-        // 此时list为空 从db中删除
         if (listTypeLength(o) == 0) {
             notifyKeyspaceEvent(NOTIFY_GENERIC,"del",
                                 c->argv[1],c->db->id);
@@ -490,19 +395,13 @@ void rpopCommand(client *c) {
     popGenericCommand(c,LIST_TAIL);
 }
 
-/**
- * 将一组范围内的值返回给client
- * @param c
- */
 void lrangeCommand(client *c) {
     robj *o;
     long start, end, llen, rangelen;
 
-    // 确定参数完整性
     if ((getLongFromObjectOrReply(c, c->argv[2], &start, NULL) != C_OK) ||
         (getLongFromObjectOrReply(c, c->argv[3], &end, NULL) != C_OK)) return;
 
-    // 确保db中存在list
     if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.emptyarray)) == NULL
          || checkType(c,o,OBJ_LIST)) return;
     llen = listTypeLength(o);
@@ -521,9 +420,7 @@ void lrangeCommand(client *c) {
     if (end >= llen) end = llen-1;
     rangelen = (end-start)+1;
 
-    /* Return the result in form of a multi-bulk reply
-     * 将实际读取的长度写回到客户端
-     * */
+    /* Return the result in form of a multi-bulk reply */
     addReplyArrayLen(c,rangelen);
     if (o->encoding == OBJ_ENCODING_QUICKLIST) {
         listTypeIterator *iter = listTypeInitIterator(o, start, LIST_TAIL);
@@ -544,10 +441,6 @@ void lrangeCommand(client *c) {
     }
 }
 
-/**
- * 将范围内的数据移除
- * @param c
- */
 void ltrimCommand(client *c) {
     robj *o;
     long start, end, llen, ltrim, rtrim;
@@ -584,7 +477,6 @@ void ltrimCommand(client *c) {
         serverPanic("Unknown list encoding");
     }
 
-    // 同样要发起事件通知
     notifyKeyspaceEvent(NOTIFY_LIST,"ltrim",c->argv[1],c->db->id);
     if (listTypeLength(o) == 0) {
         dbDelete(c->db,c->argv[1]);
@@ -595,15 +487,126 @@ void ltrimCommand(client *c) {
     addReply(c,shared.ok);
 }
 
-/**
- * 移除某个指令
- * @param c
- */
+/* LPOS key element [RANK rank] [COUNT num-matches] [MAXLEN len]
+ *
+ * The "rank" is the position of the match, so if it is 1, the first match
+ * is returned, if it is 2 the second match is returned and so forth.
+ * It is 1 by default. If negative has the same meaning but the search is
+ * performed starting from the end of the list.
+ *
+ * If COUNT is given, instead of returning the single element, a list of
+ * all the matching elements up to "num-matches" are returned. COUNT can
+ * be combiled with RANK in order to returning only the element starting
+ * from the Nth. If COUNT is zero, all the matching elements are returned.
+ *
+ * MAXLEN tells the command to scan a max of len elements. If zero (the
+ * default), all the elements in the list are scanned if needed.
+ *
+ * The returned elements indexes are always referring to what LINDEX
+ * would return. So first element from head is 0, and so forth. */
+void lposCommand(client *c) {
+    robj *o, *ele;
+    ele = c->argv[2];
+    int direction = LIST_TAIL;
+    long rank = 1, count = -1, maxlen = 0; /* Count -1: option not given. */
+
+    /* Parse the optional arguments. */
+    for (int j = 3; j < c->argc; j++) {
+        char *opt = c->argv[j]->ptr;
+        int moreargs = (c->argc-1)-j;
+
+        if (!strcasecmp(opt,"RANK") && moreargs) {
+            j++;
+            if (getLongFromObjectOrReply(c, c->argv[j], &rank, NULL) != C_OK)
+                return;
+            if (rank == 0) {
+                addReplyError(c,"RANK can't be zero: use 1 to start from "
+                                "the first match, 2 from the second, ...");
+                return;
+            }
+        } else if (!strcasecmp(opt,"COUNT") && moreargs) {
+            j++;
+            if (getLongFromObjectOrReply(c, c->argv[j], &count, NULL) != C_OK)
+                return;
+            if (count < 0) {
+                addReplyError(c,"COUNT can't be negative");
+                return;
+            }
+        } else if (!strcasecmp(opt,"MAXLEN") && moreargs) {
+            j++;
+            if (getLongFromObjectOrReply(c, c->argv[j], &maxlen, NULL) != C_OK)
+                return;
+            if (maxlen < 0) {
+                addReplyError(c,"MAXLEN can't be negative");
+                return;
+            }
+        } else {
+            addReply(c,shared.syntaxerr);
+            return;
+        }
+    }
+
+    /* A negative rank means start from the tail. */
+    if (rank < 0) {
+        rank = -rank;
+        direction = LIST_HEAD;
+    }
+
+    /* We return NULL or an empty array if there is no such key (or
+     * if we find no matches, depending on the presence of the COUNT option. */
+    if ((o = lookupKeyRead(c->db,c->argv[1])) == NULL) {
+        if (count != -1)
+            addReply(c,shared.emptyarray);
+        else
+            addReply(c,shared.null[c->resp]);
+        return;
+    }
+    if (checkType(c,o,OBJ_LIST)) return;
+
+    /* If we got the COUNT option, prepare to emit an array. */
+    void *arraylenptr = NULL;
+    if (count != -1) arraylenptr = addReplyDeferredLen(c);
+
+    /* Seek the element. */
+    listTypeIterator *li;
+    li = listTypeInitIterator(o,direction == LIST_HEAD ? -1 : 0,direction);
+    listTypeEntry entry;
+    long llen = listTypeLength(o);
+    long index = 0, matches = 0, matchindex = -1, arraylen = 0;
+    while (listTypeNext(li,&entry) && (maxlen == 0 || index < maxlen)) {
+        if (listTypeEqual(&entry,ele)) {
+            matches++;
+            matchindex = (direction == LIST_TAIL) ? index : llen - index - 1;
+            if (matches >= rank) {
+                if (arraylenptr) {
+                    arraylen++;
+                    addReplyLongLong(c,matchindex);
+                    if (count && matches-rank+1 >= count) break;
+                } else {
+                    break;
+                }
+            }
+        }
+        index++;
+        matchindex = -1; /* Remember if we exit the loop without a match. */
+    }
+    listTypeReleaseIterator(li);
+
+    /* Reply to the client. Note that arraylenptr is not NULL only if
+     * the COUNT option was selected. */
+    if (arraylenptr != NULL) {
+        setDeferredArrayLen(c,arraylenptr,arraylen);
+    } else {
+        if (matchindex != -1)
+            addReplyLongLong(c,matchindex);
+        else
+            addReply(c,shared.null[c->resp]);
+    }
+}
+
 void lremCommand(client *c) {
     robj *subject, *obj;
     obj = c->argv[3];
-
-    // 代表要移除几个元素
     long toremove;
     long removed = 0;
 
@@ -659,7 +662,6 @@ void lremCommand(client *c) {
  * The idea is to be able to get an element from a list in a reliable way
  * since the element is not just returned but pushed against another list
  * as well. This command was originally proposed by Ezra Zygmuntowicz.
- * 将元素移动到另一个队列中
  */
 
 void rpoplpushHandlePush(client *c, robj *dstkey, robj *dstobj, robj *value) {
@@ -677,9 +679,6 @@ void rpoplpushHandlePush(client *c, robj *dstkey, robj *dstobj, robj *value) {
     addReplyBulk(c,value);
 }
 
-/**
- * @param c
- */
 void rpoplpushCommand(client *c) {
     robj *sobj, *value;
     if ((sobj = lookupKeyWriteOrReply(c,c->argv[1],shared.null[c->resp]))
@@ -690,19 +689,15 @@ void rpoplpushCommand(client *c) {
          * versions of Redis delete keys of empty lists. */
         addReplyNull(c);
     } else {
-        // 检测目标队列是否存在
         robj *dobj = lookupKeyWrite(c->db,c->argv[2]);
         robj *touchedkey = c->argv[1];
 
         if (dobj && checkType(c,dobj,OBJ_LIST)) return;
-
-        // 从源队列中弹出一个元素
         value = listTypePop(sobj,LIST_TAIL);
         /* We saved touched key, and protect it, since rpoplpushHandlePush
          * may change the client command argument vector (it does not
          * currently). */
         incrRefCount(touchedkey);
-        // 设置到目标队列中
         rpoplpushHandlePush(c,c->argv[2],dobj,value);
 
         /* listTypePop returns an object with its refcount incremented */
@@ -718,7 +713,6 @@ void rpoplpushCommand(client *c) {
         signalModifiedKey(c,c->db,touchedkey);
         decrRefCount(touchedkey);
         server.dirty++;
-        // 自动更新client内部的命令
         if (c->cmd->proc == brpoplpushCommand) {
             rewriteClientCommandVector(c,3,shared.rpoplpush,c->argv[1],c->argv[2]);
         }
@@ -726,10 +720,10 @@ void rpoplpushCommand(client *c) {
 }
 
 /*-----------------------------------------------------------------------------
- * Blocking POP operations   有关block的先放置
+ * Blocking POP operations
  *----------------------------------------------------------------------------*/
 
-/* This is a helper function for handleClientsBlockedOnKeys(). It's work
+/* This is a helper function for handleClientsBlockedOnKeys(). Its work
  * is to serve a specific client (receiver) that is blocked on 'key'
  * in the context of the specified 'db', doing the following:
  *
@@ -815,7 +809,7 @@ void blockingPopGenericCommand(client *c, int where) {
                 return;
             } else {
                 if (listTypeLength(o) != 0) {
-                    /* Non empty list, this is like a non normal [LR]POP. */
+                    /* Non empty list, this is like a normal [LR]POP. */
                     char *event = (where == LIST_HEAD) ? "lpop" : "rpop";
                     robj *value = listTypePop(o,where);
                     serverAssert(value != NULL);
@@ -851,7 +845,7 @@ void blockingPopGenericCommand(client *c, int where) {
         return;
     }
 
-    /* If the list is empty or the key does not exists we must block */
+    /* If the keys do not exist we must block */
     blockForKeys(c,BLOCKED_LIST,c->argv + 1,c->argc - 2,timeout,NULL,NULL);
 }
 

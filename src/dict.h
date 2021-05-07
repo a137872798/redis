@@ -186,6 +186,13 @@ typedef void (dictScanBucketFunction)(void *privdata, dictEntry **bucketref);
 #define randomULong() random()
 #endif
 
+/* If our unsigned long type can store a 64 bit number, use a 64 bit PRNG. */
+#if ULONG_MAX >= 0xffffffffffffffff
+#define randomULong() ((unsigned long) genrand64_int64())
+#else
+#define randomULong() random()
+#endif
+
 /* API */
 dict *dictCreate(dictType *type, void *privDataPtr);
 int dictExpand(dict *d, unsigned long size);

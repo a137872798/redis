@@ -3,79 +3,13 @@
 #include "atomicvar.h"
 #include "cluster.h"
 
-// 有多少待释放的对象 以及总计释放了多少对象
-static redisAtomic size_t lazyfree_objects = 0;
-static redisAtomic size_t lazyfreed_objects = 0;
-
-/* Release objects from the lazyfree thread. It's just decrRefCount()
- * updating the count of objects to release.
- * 释放某个对象内存
- * */
-void lazyfreeFreeObject(void *args[]) {
-    robj *o = (robj *) args[0];
-    decrRefCount(o);
-    // 修改统计数据
-    atomicDecr(lazyfree_objects,1);
-    atomicIncr(lazyfreed_objects,1);
-}
-
-/* Release a database from the lazyfree thread. The 'db' pointer is the
- * database which was substituted with a fresh one in the main thread
- * when the database was logically deleted.
- * 清空字典
- * */
-void lazyfreeFreeDatabase(void *args[]) {
-    dict *ht1 = (dict *) args[0];
-    dict *ht2 = (dict *) args[1];
-
-    size_t numkeys = dictSize(ht1);
-    dictRelease(ht1);
-    dictRelease(ht2);
-    atomicDecr(lazyfree_objects,numkeys);
-    atomicIncr(lazyfreed_objects,numkeys);
-}
-
-/* Release the skiplist mapping Redis Cluster keys to slots in the
- * lazyfree thread.
- * 就是释放rax结构
- * */
-void lazyfreeFreeSlotsMap(void *args[]) {
-    rax *rt = args[0];
-    size_t len = rt->numele;
-    raxFree(rt);
-    atomicDecr(lazyfree_objects,len);
-    atomicIncr(lazyfreed_objects,len);
-}
-
-/* Release the rax mapping Redis Cluster keys to slots in the
- * lazyfree thread. */
-void lazyFreeTrackingTable(void *args[]) {
-    rax *rt = args[0];
-    size_t len = rt->numele;
-    raxFree(rt);
-    atomicDecr(lazyfree_objects,len);
-    atomicIncr(lazyfreed_objects,len);
-}
-
-void lazyFreeLuaScripts(void *args[]) {
-    dict *lua_scripts = args[0];
-    long long len = dictSize(lua_scripts);
-    dictRelease(lua_scripts);
-    atomicDecr(lazyfree_objects,len);
-    atomicIncr(lazyfreed_objects,len);
-}
+static size_t lazyfree_objects = 0;
+pthread_mutex_t lazyfree_objects_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Return the number of currently pending objects to free. */
 size_t lazyfreeGetPendingObjectsCount(void) {
     size_t aux;
     atomicGet(lazyfree_objects,aux);
-    return aux;
-}
-
-/* Return the number of objects that have been freed. */
-size_t lazyfreeGetFreedObjectsCount(void) {
-    size_t aux;
-    atomicGet(lazyfreed_objects,aux);
     return aux;
 }
 
@@ -94,7 +28,7 @@ size_t lazyfreeGetFreedObjectsCount(void) {
  *
  * For lists the function returns the number of elements in the quicklist
  * representing the list. */
-size_t lazyfreeGetFreeEffort(robj *key, robj *obj) {
+size_t lazyfreeGetFreeEffort(robj *obj) {
     if (obj->type == OBJ_LIST) {
         quicklist *ql = obj->ptr;
         return ql->len;
@@ -131,17 +65,6 @@ size_t lazyfreeGetFreeEffort(robj *key, robj *obj) {
             raxStop(&ri);
         }
         return effort;
-    } else if (obj->type == OBJ_MODULE) {
-        moduleValue *mv = obj->ptr;
-        moduleType *mt = mv->type;
-        if (mt->free_effort != NULL) {
-            size_t effort  = mt->free_effort(key,mv->value);
-            /* If the module's free_effort returns 0, it will use asynchronous free
-             memory by default */
-            return effort == 0 ? ULONG_MAX : effort;
-        } else {
-            return 1;
-        }
     } else {
         return 1; /* Everything else is a single allocation. */
     }
@@ -163,11 +86,7 @@ int dbAsyncDelete(redisDb *db, robj *key) {
     dictEntry *de = dictUnlink(db->dict,key->ptr);
     if (de) {
         robj *val = dictGetVal(de);
-
-        /* Tells the module that the key has been unlinked from the database. */
-        moduleNotifyKeyUnlink(key,val);
-
-        size_t free_effort = lazyfreeGetFreeEffort(key,val);
+        size_t free_effort = lazyfreeGetFreeEffort(val);
 
         /* If releasing the object is too much work, do it in the background
          * by adding the object to the lazy free list.
@@ -179,7 +98,7 @@ int dbAsyncDelete(redisDb *db, robj *key) {
          * equivalent to just calling decrRefCount(). */
         if (free_effort > LAZYFREE_THRESHOLD && val->refcount == 1) {
             atomicIncr(lazyfree_objects,1);
-            bioCreateLazyFreeJob(lazyfreeFreeObject,1, val);
+            bioCreateBackgroundJob(BIO_LAZY_FREE,val,NULL,NULL);
             dictSetVal(db->dict,de,NULL);
         }
     }
@@ -196,13 +115,13 @@ int dbAsyncDelete(redisDb *db, robj *key) {
 }
 
 /* Free an object, if the object is huge enough, free it in async way. */
-void freeObjAsync(robj *key, robj *obj) {
-    size_t free_effort = lazyfreeGetFreeEffort(key,obj);
-    if (free_effort > LAZYFREE_THRESHOLD && obj->refcount == 1) {
+void freeObjAsync(robj *o) {
+    size_t free_effort = lazyfreeGetFreeEffort(o);
+    if (free_effort > LAZYFREE_THRESHOLD && o->refcount == 1) {
         atomicIncr(lazyfree_objects,1);
-        bioCreateLazyFreeJob(lazyfreeFreeObject,1,obj);
+        bioCreateBackgroundJob(BIO_LAZY_FREE,o,NULL,NULL);
     } else {
-        decrRefCount(obj);
+        decrRefCount(o);
     }
 }
 
@@ -212,29 +131,38 @@ void freeObjAsync(robj *key, robj *obj) {
 void emptyDbAsync(redisDb *db) {
     dict *oldht1 = db->dict, *oldht2 = db->expires;
     db->dict = dictCreate(&dbDictType,NULL);
-    db->expires = dictCreate(&dbExpiresDictType,NULL);
+    db->expires = dictCreate(&keyptrDictType,NULL);
     atomicIncr(lazyfree_objects,dictSize(oldht1));
-    bioCreateLazyFreeJob(lazyfreeFreeDatabase,2,oldht1,oldht2);
+    bioCreateBackgroundJob(BIO_LAZY_FREE,NULL,oldht1,oldht2);
 }
 
 /* Release the radix tree mapping Redis Cluster keys to slots asynchronously. */
 void freeSlotsToKeysMapAsync(rax *rt) {
     atomicIncr(lazyfree_objects,rt->numele);
-    bioCreateLazyFreeJob(lazyfreeFreeSlotsMap,1,rt);
+    bioCreateBackgroundJob(BIO_LAZY_FREE,NULL,NULL,rt);
 }
 
-/* Free an object, if the object is huge enough, free it in async way. */
-void freeTrackingRadixTreeAsync(rax *tracking) {
-    atomicIncr(lazyfree_objects,tracking->numele);
-    bioCreateLazyFreeJob(lazyFreeTrackingTable,1,tracking);
+/* Release objects from the lazyfree thread. It's just decrRefCount()
+ * updating the count of objects to release. */
+void lazyfreeFreeObjectFromBioThread(robj *o) {
+    decrRefCount(o);
+    atomicDecr(lazyfree_objects,1);
 }
 
-/* Free lua_scripts dict, if the dict is huge enough, free it in async way. */
-void freeLuaScriptsAsync(dict *lua_scripts) {
-    if (dictSize(lua_scripts) > LAZYFREE_THRESHOLD) {
-        atomicIncr(lazyfree_objects,dictSize(lua_scripts));
-        bioCreateLazyFreeJob(lazyFreeLuaScripts,1,lua_scripts);
-    } else {
-        dictRelease(lua_scripts);
-    }
+/* Release a database from the lazyfree thread. The 'db' pointer is the
+ * database which was substituted with a fresh one in the main thread
+ * when the database was logically deleted. */
+void lazyfreeFreeDatabaseFromBioThread(dict *ht1, dict *ht2) {
+    size_t numkeys = dictSize(ht1);
+    dictRelease(ht1);
+    dictRelease(ht2);
+    atomicDecr(lazyfree_objects,numkeys);
+}
+
+/* Release the radix tree mapping Redis Cluster keys to slots in the
+ * lazyfree thread. */
+void lazyfreeFreeSlotsMapFromBioThread(rax *rt) {
+    size_t len = rt->numele;
+    raxFree(rt);
+    atomicDecr(lazyfree_objects,len);
 }

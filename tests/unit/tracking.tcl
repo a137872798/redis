@@ -16,9 +16,10 @@ start_server {tags {"tracking"}} {
 
     test {The other connection is able to get invalidations} {
         r SET a 1
+        r SET b 1
         r GET a
-        r INCR a
-        r INCR b ; # This key should not be notified, since it wasn't fetched.
+        r INCR b ; # This key should not be notified, since it wasn't fetched. 
+        r INCR a 
         set keys [lindex [$rd1 read] 2]
         assert {[llength $keys] == 1}
         assert {[lindex $keys 0] eq {a}}
@@ -105,6 +106,28 @@ start_server {tags {"tracking"}} {
         set keys1 [lsort [lindex [$rd1 read] 2]]
         set keys [lsort [list {*}$keys1]]
         assert {$keys eq {mykey}}
+    }
+
+    test {Tracking gets notification on tracking table key eviction} {
+        r CLIENT TRACKING off
+        r CLIENT TRACKING on REDIRECT $redir NOLOOP
+        r MSET key1 1 key2 2
+        # Let the server track the two keys for us
+        r MGET key1 key2
+        # Force the eviction of all the keys but one:
+        r config set tracking-table-max-keys 1
+        # Note that we may have other keys in the table for this client,
+        # since we disabled/enabled tracking multiple time with the same
+        # ID, and tracking does not do ID cleanups for performance reasons.
+        # So we check that eventually we'll receive one or the other key,
+        # otherwise the test will die for timeout.
+        while 1 {
+            set keys [lindex [$rd1 read] 2]
+            if {$keys eq {key1} || $keys eq {key2}} break
+        }
+        # We should receive an expire notification for one of
+        # the two keys (only one must remain)
+        assert {$keys eq {key1} || $keys eq {key2}}
     }
 
     $rd1 close

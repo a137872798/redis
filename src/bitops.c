@@ -36,7 +36,7 @@
 
 /* Count number of bits set in the binary array pointed by 's' and long
  * 'count' bytes. The implementation of this function is required to
- * work with an input string length up to 512 MB or more (server.proto_max_bulk_len) */
+ * work with an input string length up to 512 MB. */
 size_t redisPopcount(void *s, long count) {
     size_t bits = 0;
     unsigned char *p = s;
@@ -405,7 +405,7 @@ void printBits(unsigned char *p, unsigned long count) {
 
 /* This helper function used by GETBIT / SETBIT parses the bit offset argument
  * making sure an error is returned if it is negative or if it overflows
- * Redis 512 MB limit for the string value or more (server.proto_max_bulk_len).
+ * Redis 512 MB limit for the string value.
  *
  * If the 'hash' argument is true, and 'bits is positive, then the command
  * will also parse bit offsets prefixed by "#". In such a case the offset
@@ -428,8 +428,8 @@ int getBitOffsetFromArgument(client *c, robj *o, size_t *offset, int hash, int b
     /* Adjust the offset by 'bits' for #<offset> form. */
     if (usehash) loffset *= bits;
 
-    /* Limit offset to server.proto_max_bulk_len (512MB in bytes by default) */
-    if ((loffset < 0) || (loffset >> 3) >= server.proto_max_bulk_len)
+    /* Limit offset to 512MB in bytes */
+    if ((loffset < 0) || ((unsigned long long)loffset >> 3) >= (512*1024*1024))
     {
         addReplyError(c,err);
         return C_ERR;
@@ -480,12 +480,12 @@ int getBitfieldTypeFromArgument(client *c, robj *o, int *sign, int *bits) {
 robj *lookupStringForBitCommand(client *c, size_t maxbit) {
     size_t byte = maxbit >> 3;
     robj *o = lookupKeyWrite(c->db,c->argv[1]);
-    if (checkType(c,o,OBJ_STRING)) return NULL;
 
     if (o == NULL) {
         o = createObject(OBJ_STRING,sdsnewlen(NULL, byte+1));
         dbAdd(c->db,c->argv[1],o);
     } else {
+        if (checkType(c,o,OBJ_STRING)) return NULL;
         o = dbUnshareStringValue(c->db,c->argv[1],o);
         o->ptr = sdsgrowzero(o->ptr,byte+1);
     }
@@ -611,7 +611,7 @@ void bitopCommand(client *c) {
     else if((opname[0] == 'n' || opname[0] == 'N') && !strcasecmp(opname,"not"))
         op = BITOP_NOT;
     else {
-        addReplyErrorObject(c,shared.syntaxerr);
+        addReply(c,shared.syntaxerr);
         return;
     }
 
@@ -735,22 +735,11 @@ void bitopCommand(client *c) {
             output = (len[0] <= j) ? 0 : src[0][j];
             if (op == BITOP_NOT) output = ~output;
             for (i = 1; i < numkeys; i++) {
-                int skip = 0;
                 byte = (len[i] <= j) ? 0 : src[i][j];
                 switch(op) {
-                case BITOP_AND:
-                    output &= byte;
-                    skip = (output == 0);
-                    break;
-                case BITOP_OR:
-                    output |= byte;
-                    skip = (output == 0xff);
-                    break;
+                case BITOP_AND: output &= byte; break;
+                case BITOP_OR:  output |= byte; break;
                 case BITOP_XOR: output ^= byte; break;
-                }
-
-                if (skip) {
-                    break;
                 }
             }
             res[j] = output;
@@ -813,7 +802,7 @@ void bitcountCommand(client *c) {
         end = strlen-1;
     } else {
         /* Syntax error. */
-        addReplyErrorObject(c,shared.syntaxerr);
+        addReply(c,shared.syntaxerr);
         return;
     }
 
@@ -878,7 +867,7 @@ void bitposCommand(client *c) {
         end = strlen-1;
     } else {
         /* Syntax error. */
-        addReplyErrorObject(c,shared.syntaxerr);
+        addReply(c,shared.syntaxerr);
         return;
     }
 
@@ -970,7 +959,7 @@ void bitfieldGeneric(client *c, int flags) {
             }
             continue;
         } else {
-            addReplyErrorObject(c,shared.syntaxerr);
+            addReply(c,shared.syntaxerr);
             zfree(ops);
             return;
         }

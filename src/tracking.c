@@ -102,7 +102,7 @@ void disableTracking(client *c) {
 /* Set the client 'c' to track the prefix 'prefix'. If the client 'c' is
  * already registered for the specified prefix, no operation is performed. */
 void enableBcastTrackingForPrefix(client *c, char *prefix, size_t plen) {
-    bcastState *bs = raxFind(PrefixTable,(unsigned char*)prefix,sdslen(prefix));
+    bcastState *bs = raxFind(PrefixTable,(unsigned char*)prefix,plen);
     /* If this is the first client subscribing to such prefix, create
      * the prefix in the table. */
     if (bs == raxNotFound) {
@@ -134,7 +134,7 @@ void enableTracking(client *c, uint64_t redirect_to, uint64_t options, robj **pr
                   CLIENT_TRACKING_NOLOOP);
     c->client_tracking_redirection = redirect_to;
 
-    /* This may be the first client we ever enable. Crete the tracking
+    /* This may be the first client we ever enable. Create the tracking
      * table if it does not exist. */
     if (TrackingTable == NULL) {
         TrackingTable = raxNew();
@@ -171,9 +171,14 @@ void trackingRememberKeys(client *c) {
     uint64_t caching_given = c->flags & CLIENT_TRACKING_CACHING;
     if ((optin && !caching_given) || (optout && caching_given)) return;
 
-    int numkeys;
-    int *keys = getKeysFromCommand(c->cmd,c->argv,c->argc,&numkeys);
-    if (keys == NULL) return;
+    getKeysResult result = GETKEYS_RESULT_INIT;
+    int numkeys = getKeysFromCommand(c->cmd,c->argv,c->argc,&result);
+    if (!numkeys) {
+        getKeysFreeResult(&result);
+        return;
+    }
+
+    int *keys = result.keys;
 
     for(int j = 0; j < numkeys; j++) {
         int idx = keys[j];
@@ -188,7 +193,7 @@ void trackingRememberKeys(client *c) {
         if (raxTryInsert(ids,(unsigned char*)&c->id,sizeof(c->id),NULL,NULL))
             TrackingTableTotalItems++;
     }
-    getKeysFreeResult(keys);
+    getKeysFreeResult(&result);
 }
 
 /* Given a key name, this function sends an invalidation message in the
@@ -198,19 +203,22 @@ void trackingRememberKeys(client *c) {
  *
  * In case the 'proto' argument is non zero, the function will assume that
  * 'keyname' points to a buffer of 'keylen' bytes already expressed in the
- * form of Redis RESP protocol, representing an array of keys to send
- * to the client as value of the invalidation. This is used in BCAST mode
- * in order to optimized the implementation to use less CPU time. */
+ * form of Redis RESP protocol. This is used for:
+ * - In BCAST mode, to send an array of invalidated keys to all
+ *   applicable clients
+ * - Following a flush command, to send a single RESP NULL to indicate
+ *   that all keys are now invalid. */
 void sendTrackingMessage(client *c, char *keyname, size_t keylen, int proto) {
     int using_redirection = 0;
     if (c->client_tracking_redirection) {
         client *redir = lookupClientByID(c->client_tracking_redirection);
         if (!redir) {
+            c->flags |= CLIENT_TRACKING_BROKEN_REDIR;
             /* We need to signal to the original connection that we
              * are unable to send invalidation messages to the redirected
              * connection, because the client no longer exist. */
             if (c->resp > 2) {
-                addReplyPushLen(c,3);
+                addReplyPushLen(c,2);
                 addReplyBulkCBuffer(c,"tracking-redir-broken",21);
                 addReplyLongLong(c,c->client_tracking_redirection);
             }
@@ -279,15 +287,22 @@ void trackingRememberKeyToBroadcast(client *c, char *keyname, size_t keylen) {
  *
  * Note that 'c' may be NULL in case the operation was performed outside the
  * context of a client modifying the database (for instance when we delete a
- * key because of expire). */
-void trackingInvalidateKey(client *c, robj *keyobj) {
+ * key because of expire).
+ *
+ * The last argument 'bcast' tells the function if it should also schedule
+ * the key for broadcasting to clients in BCAST mode. This is the case when
+ * the function is called from the Redis core once a key is modified, however
+ * we also call the function in order to evict keys in the key table in case
+ * of memory pressure: in that case the key didn't really change, so we want
+ * just to notify the clients that are in the table for this key, that would
+ * otherwise miss the fact we are no longer tracking the key for them. */
+void trackingInvalidateKeyRaw(client *c, char *key, size_t keylen, int bcast) {
     if (TrackingTable == NULL) return;
-    sds sdskey = keyobj->ptr;
 
-    if (raxSize(PrefixTable) > 0)
-        trackingRememberKeyToBroadcast(c,sdskey,sdslen(sdskey));
+    if (bcast && raxSize(PrefixTable) > 0)
+        trackingRememberKeyToBroadcast(c,key,keylen);
 
-    rax *ids = raxFind(TrackingTable,(unsigned char*)sdskey,sdslen(sdskey));
+    rax *ids = raxFind(TrackingTable,(unsigned char*)key,keylen);
     if (ids == raxNotFound) return;
 
     raxIterator ri;
@@ -317,7 +332,7 @@ void trackingInvalidateKey(client *c, robj *keyobj) {
             continue;
         }
 
-        sendTrackingMessage(target,sdskey,sdslen(sdskey),0);
+        sendTrackingMessage(target,key,keylen,0);
     }
     raxStop(&ri);
 
@@ -325,20 +340,28 @@ void trackingInvalidateKey(client *c, robj *keyobj) {
      * again if more keys will be modified in this caching slot. */
     TrackingTableTotalItems -= raxSize(ids);
     raxFree(ids);
-    raxRemove(TrackingTable,(unsigned char*)sdskey,sdslen(sdskey),NULL);
+    raxRemove(TrackingTable,(unsigned char*)key,keylen,NULL);
 }
 
-/* This function is called when one or all the Redis databases are flushed
- * (dbid == -1 in case of FLUSHALL). Caching keys are not specific for
- * each DB but are global: currently what we do is send a special
- * notification to clients with tracking enabled, invalidating the caching
- * key "", which means, "all the keys", in order to avoid flooding clients
- * with many invalidation messages for all the keys they may hold.
+/* Wrapper (the one actually called across the core) to pass the key
+ * as object. */
+void trackingInvalidateKey(client *c, robj *keyobj) {
+    trackingInvalidateKeyRaw(c,keyobj->ptr,sdslen(keyobj->ptr),1);
+}
+
+/* This function is called when one or all the Redis databases are
+ * flushed (dbid == -1 in case of FLUSHALL). Caching keys are not
+ * specific for each DB but are global: currently what we do is send a
+ * special notification to clients with tracking enabled, sending a
+ * RESP NULL, which means, "all the keys", in order to avoid flooding
+ * clients with many invalidation messages for all the keys they may
+ * hold.
  */
 void freeTrackingRadixTree(void *rt) {
     raxFree(rt);
 }
 
+/* A RESP NULL is sent to indicate that all keys are invalid */
 void trackingInvalidateKeysOnFlush(int dbid) {
     if (server.tracking_clients) {
         listNode *ln;
@@ -347,7 +370,7 @@ void trackingInvalidateKeysOnFlush(int dbid) {
         while ((ln = listNext(&li)) != NULL) {
             client *c = listNodeValue(ln);
             if (c->flags & CLIENT_TRACKING) {
-                sendTrackingMessage(c,"",1,0);
+                sendTrackingMessage(c,shared.null[c->resp]->ptr,sdslen(shared.null[c->resp]->ptr),1);
             }
         }
     }
@@ -392,10 +415,8 @@ void trackingLimitUsedSlots(void) {
         effort--;
         raxSeek(&ri,"^",NULL,0);
         raxRandomWalk(&ri,0);
-        rax *ids = ri.data;
-        TrackingTableTotalItems -= raxSize(ids);
-        raxFree(ids);
-        raxRemove(TrackingTable,ri.key,ri.key_len,NULL);
+        if (raxEOF(&ri)) break;
+        trackingInvalidateKeyRaw(NULL,(char*)ri.key,ri.key_len,0);
         if (raxSize(TrackingTable) <= max_keys) {
             timeout_counter = 0;
             raxStop(&ri);
