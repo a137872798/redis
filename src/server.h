@@ -1200,6 +1200,8 @@ struct redisServer {
     long long stat_active_defrag_key_misses;/* number of keys scanned and not moved */
     long long stat_active_defrag_scanned;   /* number of dictEntries scanned */
     size_t stat_peak_memory;        /* Max used memory record */
+
+    // 记录分离出子进程花费的时间
     long long stat_fork_time;       /* Time needed to perform latest fork() */
     double stat_fork_rate;          /* Fork rate in GB/sec. */
     // 因为超过连接数上限而被关闭的conn数量
@@ -1277,6 +1279,7 @@ struct redisServer {
     int aof_lastbgrewrite_status;   /* C_OK or C_ERR */
     unsigned long aof_delayed_fsync;  /* delayed AOF fsync() counter */
     int aof_rewrite_incremental_fsync;/* fsync incrementally while aof rewriting? */
+    // 当该标识为true时 会开启自动刷盘
     int rdb_save_incremental_fsync;   /* fsync incrementally while rdb saving? */
     int aof_last_write_status;      /* C_OK or C_ERR */
     int aof_last_write_errno;       /* Valid if aof_last_write_status is ERR */
@@ -1296,6 +1299,7 @@ struct redisServer {
      * 应该有一个生成rdb文件的后台线程 通过检测这个标记判断是否要刷盘
      * */
     long long dirty;                /* Changes to DB from the last save */
+    // 在使用后台线程存储rdb数据前 用该标记记录server.dirty
     long long dirty_before_bgsave;  /* Used to restore dirty on failed BGSAVE */
     pid_t rdb_child_pid;            /* PID of RDB saving child */
     struct saveparam *saveparams;   /* Save points array for RDB */
@@ -1306,6 +1310,8 @@ struct redisServer {
     int rdb_del_sync_files;         /* Remove RDB files used only for SYNC if
                                        the instance does not use persistence. */
     time_t lastsave;                /* Unix time of last successful save */
+
+    // 最近一次尝试使用后台线程存储rdb
     time_t lastbgsave_try;          /* Unix time of last attempted bgsave */
     time_t rdb_save_time_last;      /* Time used by last RDB save run. */
     time_t rdb_save_time_start;     /* Current RDB save start time. */
@@ -1526,6 +1532,8 @@ struct redisServer {
     char *server_cpulist; /* cpu affinity list of redis server main/io thread. */
     char *bio_cpulist; /* cpu affinity list of bio thread. */
     char *aof_rewrite_cpulist; /* cpu affinity list of aof rewrite process. */
+
+    // 存储后台进程cpu  主要是使用cpu亲和性 提升性能
     char *bgsave_cpulist; /* cpu affinity list of bgsave process. */
 };
 

@@ -66,7 +66,9 @@ struct _rio {
     /* maximum single read or write chunk size */
     size_t max_processing_chunk;
 
-    /* Backend-specific vars. */
+    /* Backend-specific vars.
+     * rio流底层可以对接不同的类型 比如是一个文件 可能是一个sds结构 可能是一个网络连接(与socket缓冲区打交道)
+     * */
     union {
         /* In-memory buffer target. */
         struct {

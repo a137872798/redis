@@ -1416,6 +1416,7 @@ werr:
 int rdbSaveRioWithEOFMark(rio *rdb, int *error, rdbSaveInfo *rsi) {
     char eofmark[RDB_EOF_MARK_SIZE];
 
+    // 这里会发出一个开始写入rdb文件的事件
     startSaving(RDBFLAGS_REPLICATION);
     getRandomHexChars(eofmark,RDB_EOF_MARK_SIZE);
     if (error) *error = 0;
@@ -1434,7 +1435,9 @@ werr: /* Write error. */
     return C_ERR;
 }
 
-/* Save the DB on disk. Return C_ERR on error, C_OK on success. */
+/* Save the DB on disk. Return C_ERR on error, C_OK on success.
+ * 打开一个临时文件 用于写入rdb数据
+ * */
 int rdbSave(char *filename, rdbSaveInfo *rsi) {
     char tmpfile[256];
     char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
@@ -1455,12 +1458,16 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
         return C_ERR;
     }
 
+    // 将文件包装成rio流 因为rdb的api都是基于rio的
     rioInitWithFile(&rdb,fp);
+    // 触发rdb事件
     startSaving(RDBFLAGS_NONE);
 
+    // 开启自动刷盘策略
     if (server.rdb_save_incremental_fsync)
         rioSetAutoSync(&rdb,REDIS_AUTOSYNC_BYTES);
 
+    // 将数据存储到临时文件中
     if (rdbSaveRio(&rdb,&error,RDBFLAGS_NONE,rsi) == C_ERR) {
         errno = error;
         goto werr;
@@ -1472,7 +1479,9 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
     if (fclose(fp) == EOF) goto werr;
 
     /* Use RENAME to make sure the DB file is changed atomically only
-     * if the generate DB file is ok. */
+     * if the generate DB file is ok.
+     * 当数据写入成功后 重命名成一开始指定的文件名
+     * */
     if (rename(tmpfile,filename) == -1) {
         char *cwdp = getcwd(cwd,MAXPATHLEN);
         serverLog(LL_WARNING,
@@ -1502,27 +1511,42 @@ werr:
     return C_ERR;
 }
 
+/**
+ * 开启后台进程存储rdb数据
+ * @param filename
+ * @param rsi
+ * @return
+ */
 int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
     pid_t childpid;
 
+    // 如果此时存在子进程 忽略本次操作
     if (hasActiveChildProcess()) return C_ERR;
 
+    // 在使用后台线程执行存储前会先记录server是否有脏数据
     server.dirty_before_bgsave = server.dirty;
     server.lastbgsave_try = time(NULL);
+    // 开启父子进程间的通道
     openChildInfoPipe();
 
+    // 分离出子进程时 走下面的分支
     if ((childpid = redisFork()) == 0) {
         int retval;
 
         /* Child */
         redisSetProcTitle("redis-rdb-bgsave");
+        // 设置cpu亲和性
         redisSetCpuAffinity(server.bgsave_cpulist);
+
+        // 使用子进程存储rdb数据
         retval = rdbSave(filename,rsi);
         if (retval == C_OK) {
+            // 当子进程完成任务后 需要通知父进程
             sendChildCOWInfo(CHILD_INFO_TYPE_RDB, "RDB");
         }
         exitFromChild((retval == C_OK) ? 0 : 1);
     } else {
+        // 父进程逻辑
         /* Parent */
         if (childpid == -1) {
             closeChildInfoPipe();

@@ -39,20 +39,28 @@ typedef struct {
 
 /* Open a child-parent channel used in order to move information about the
  * RDB / AOF saving process from the child to the parent (for instance
- * the amount of copy on write memory used) */
+ * the amount of copy on write memory used)
+ * 开启一个父子进程的管道
+ * */
 void openChildInfoPipe(void) {
+    // 为child_info_pipe 中的2个元素 打开通道 [0]是读通道 [1]是写通道
+    // 返回-1代表开启通道失败
     if (pipe(server.child_info_pipe) == -1) {
         /* On error our two file descriptors should be still set to -1,
          * but we call anyway closeChildInfoPipe() since can't hurt. */
         closeChildInfoPipe();
+        // 将通道设置成非阻塞模式 设置失败则关闭管道
     } else if (anetNonBlock(NULL,server.child_info_pipe[0]) != ANET_OK) {
         closeChildInfoPipe();
     } else {
+        // 正常开启通道 并成功设置成非阻塞模式后触发该方法
         server.child_info_nread = 0;
     }
 }
 
-/* Close the pipes opened with openChildInfoPipe(). */
+/* Close the pipes opened with openChildInfoPipe().
+ * 当通道开启失败 通过pipe数组中的句柄关闭通道 同时将通道重置成-1
+ * */
 void closeChildInfoPipe(void) {
     if (server.child_info_pipe[0] != -1 ||
         server.child_info_pipe[1] != -1)

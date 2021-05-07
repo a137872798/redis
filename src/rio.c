@@ -486,7 +486,7 @@ void rioGenericUpdateChecksum(rio *r, const void *buf, size_t len) {
  * way instead the I/O pressure is more distributed across time.
  * */
 void rioSetAutoSync(rio *r, off_t bytes) {
-    // 首先确保write函数没有被篡改
+    // 只有当rio底层为文件时 才可以设置自动刷盘配置
     if(r->write != rioFileIO.write) return;
     r->io.file.autosync = bytes;
 }

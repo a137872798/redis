@@ -3816,7 +3816,9 @@ int processCommand(client *c) {
 /*================================== Shutdown =============================== */
 
 /* Close listening sockets. Also unlink the unix domain socket if
- * unlink_unix_socket is non-zero. */
+ * unlink_unix_socket is non-zero.
+ * 把所有socket句柄关闭
+ * */
 void closeListeningSockets(int unlink_unix_socket) {
     int j;
 
@@ -4959,6 +4961,9 @@ static void sigKillChildHandler(int sig) {
     exitFromChild(SERVER_CHILD_NOERROR_RETVAL);
 }
 
+/**
+ * 设置子进程的信号处理器
+ */
 void setupChildSignalHandlers(void) {
     struct sigaction act;
 
@@ -4971,12 +4976,19 @@ void setupChildSignalHandlers(void) {
     return;
 }
 
+/**
+ * 开启一个子进程
+ * @return
+ */
 int redisFork() {
     int childpid;
     long long start = ustime();
     if ((childpid = fork()) == 0) {
-        /* Child */
+        /* Child
+         * 子进程分离出来后 取消所有的socket句柄监听
+         * */
         closeListeningSockets(0);
+        // 设置子进程的信号处理器
         setupChildSignalHandlers();
     } else {
         /* Parent */
@@ -4987,6 +4999,7 @@ int redisFork() {
         if (childpid == -1) {
             return -1;
         }
+        // 因为此时存在多个进程 可能会导致并发问题 此时拒绝扩容策略
         updateDictResizePolicy();
     }
     return childpid;
@@ -5085,7 +5098,7 @@ void redisOutOfMemoryHandler(size_t allocation_size) {
 }
 
 /**
- * 设置标题信息 先忽略
+ * 设置标题信息
  * @param title
  */
 void redisSetProcTitle(char *title) {
