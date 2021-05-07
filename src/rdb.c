@@ -1379,13 +1379,22 @@ werr:
     return C_ERR;
 }
 
+/**
+ * 使用子进程存储rdb数据
+ * @param filename
+ * @param rsi
+ * @return
+ */
 int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
     pid_t childpid;
 
+    // 如果此时已经有 aof/rdb/module中任意一个子进程 拒绝本次的创建
     if (hasActiveChildProcess()) return C_ERR;
 
     server.dirty_before_bgsave = server.dirty;
     server.lastbgsave_try = time(NULL);
+
+    // 开启server.child_info_pipe
     openChildInfoPipe();
 
     if ((childpid = redisFork(CHILD_TYPE_RDB)) == 0) {
