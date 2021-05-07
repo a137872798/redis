@@ -1260,6 +1260,8 @@ struct redisServer {
     /* RDB persistence */
     long long dirty;                /* Changes to DB from the last save */
     long long dirty_before_bgsave;  /* Used to restore dirty on failed BGSAVE */
+
+    // 此时执行rdb的子进程id
     pid_t rdb_child_pid;            /* PID of RDB saving child */
     struct saveparam *saveparams;   /* Save points array for RDB */
     int saveparamslen;              /* Number of saving points */
@@ -1273,6 +1275,8 @@ struct redisServer {
     time_t rdb_save_time_last;      /* Time used by last RDB save run. */
     time_t rdb_save_time_start;     /* Current RDB save start time. */
     int rdb_bgsave_scheduled;       /* BGSAVE when possible if true. */
+
+    // 子进程存储rdb数据的方式
     int rdb_child_type;             /* Type of save by active child. */
     int lastbgsave_status;          /* C_OK or C_ERR */
     int stop_writes_on_bgsave_err;  /* Don't allow writes if can't BGSAVE */
@@ -1289,7 +1293,10 @@ struct redisServer {
                                      * loading aof or rdb. (for testings) */
     /* Pipe and data structures for child -> parent info sharing. */
     int child_info_pipe[2];         /* Pipe used to write the child_info_data. */
+
+    // 子进程完成任务后的一些描述信息
     struct {
+        // 子进程本次执行的是 rdb/aof操作
         int process_type;           /* AOF or RDB child? */
         size_t cow_size;            /* Copy on write size. */
         unsigned long long magic;   /* Magic value to make sure data is valid. */

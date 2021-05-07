@@ -3005,7 +3005,9 @@ int clientsArePaused(void) {
  * some event was processed, in order to go forward with the accept, read,
  * write, close sequence needed to serve a client.
  *
- * The function returns the total number of events processed. */
+ * The function returns the total number of events processed.
+ * TODO
+ * */
 void processEventsWhileBlocked(void) {
     int iterations = 4; /* See the function top-comment. */
 

@@ -1757,7 +1757,9 @@ void databasesCron(void) {
  * in call(), so it is possible to decide if to update the daylight saving
  * info or not using the 'update_daylight_info' argument. Normally we update
  * such info only when calling this function from serverCron() but not when
- * calling it from call(). */
+ * calling it from call().
+ * 更新缓存的时间戳  这里缓存时间是为了避免频繁的调用系统函数
+ * */
 void updateCachedTime(int update_daylight_info) {
     server.ustime = ustime();
     server.mstime = server.ustime / 1000;
@@ -5109,7 +5111,9 @@ void setupChildSignalHandlers(void) {
 /* After fork, the child process will inherit the resources
  * of the parent process, e.g. fd(socket or flock) etc.
  * should close the resources not used by the child process, so that if the
- * parent restarts it can bind/lock despite the child possibly still running. */
+ * parent restarts it can bind/lock despite the child possibly still running.
+ * 关闭一些子进程不该使用的资源 比如socket监听
+ * */
 void closeClildUnusedResourceAfterFork() {
     closeListeningSockets(0);
     if (server.cluster_enabled && server.cluster_config_file_lock_fd != -1)
@@ -5121,7 +5125,9 @@ void closeClildUnusedResourceAfterFork() {
     server.pidfile = NULL;
 }
 
-/* purpose is one of CHILD_TYPE_ types */
+/* purpose is one of CHILD_TYPE_ types
+ * 开启一个子进程
+ * */
 int redisFork(int purpose) {
     int childpid;
     long long start = ustime();
@@ -5132,7 +5138,7 @@ int redisFork(int purpose) {
         setupChildSignalHandlers();
         closeClildUnusedResourceAfterFork();
     } else {
-        /* Parent */
+        /* Parent 记录fork花费的时间 */
         server.stat_fork_time = ustime()-start;
         server.stat_fork_rate = (double) zmalloc_used_memory() * 1000000 / server.stat_fork_time / (1024*1024*1024); /* GB per second. */
         latencyAddSampleIfNeeded("fork",server.stat_fork_time/1000);
@@ -5143,6 +5149,11 @@ int redisFork(int purpose) {
     return childpid;
 }
 
+/**
+ * 将子进程本次执行任务拷贝的数据大小通知到父进程
+ * @param ptype
+ * @param pname
+ */
 void sendChildCOWInfo(int ptype, char *pname) {
     size_t private_dirty = zmalloc_get_private_dirty(-1);
 

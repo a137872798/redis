@@ -204,7 +204,9 @@ void dbAdd(redisDb *db, robj *key, robj *val) {
  *
  * The function returns 1 if the key was added to the database, taking
  * ownership of the SDS string, otherwise 0 is returned, and is up to the
- * caller to free the SDS string. */
+ * caller to free the SDS string.
+ * 某个从rdb中加载的redisObject 重新加入到db中
+ * */
 int dbAddRDBLoad(redisDb *db, sds key, robj *val) {
     int retval = dictAdd(db->dict, key, val);
     if (retval != DICT_OK) return 0;

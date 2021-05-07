@@ -493,6 +493,7 @@ void *rdbGenericLoadStringObject(rio *rdb, int flags, size_t *lenptr) {
     int isencoded;
     unsigned long long len;
 
+    // 读取下一个对象的长度
     len = rdbLoadLen(rdb,&isencoded);
     if (isencoded) {
         switch(len) {
@@ -508,6 +509,7 @@ void *rdbGenericLoadStringObject(rio *rdb, int flags, size_t *lenptr) {
         }
     }
 
+    // 根据要求的长度 从rdb中读取一定的数据并填充到buffer 或者包装成sds
     if (len == RDB_LENERR) return NULL;
     if (plain || sds) {
         void *buf = plain ? zmalloc(len) : sdsnewlen(SDS_NOINIT,len);
@@ -1405,11 +1407,15 @@ int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
         redisSetCpuAffinity(server.bgsave_cpulist);
         retval = rdbSave(filename,rsi);
         if (retval == C_OK) {
+            // 当子进程完成rdb写入后 将本次cow的数据大小通知到父进程
             sendChildCOWInfo(CHILD_TYPE_RDB, "RDB");
         }
+        // 完成任务后 退出子进程
         exitFromChild((retval == C_OK) ? 0 : 1);
     } else {
-        /* Parent */
+        /* Parent
+         * 代表子进程创建失败
+         * */
         if (childpid == -1) {
             closeChildInfoPipe();
             server.lastbgsave_status = C_ERR;
@@ -1418,6 +1424,8 @@ int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
             return C_ERR;
         }
         serverLog(LL_NOTICE,"Background saving started by pid %d",childpid);
+
+        // 记录此时的rdb子进程id
         server.rdb_save_time_start = time(NULL);
         server.rdb_child_pid = childpid;
         server.rdb_child_type = RDB_CHILD_TYPE_DISK;
@@ -1430,7 +1438,9 @@ int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
 /* Note that we may call this function in signal handle 'sigShutdownHandler',
  * so we need guarantee all functions we call are async-signal-safe.
  * If  we call this function from signal handle, we won't call bg_unlik that
- * is not async-signal-safe. */
+ * is not async-signal-safe.
+ * 删除掉临时文件
+ * */
 void rdbRemoveTempFile(pid_t childpid, int from_signal) {
     char tmpfile[256];
     char pid[32];
@@ -1441,6 +1451,7 @@ void rdbRemoveTempFile(pid_t childpid, int from_signal) {
     strncpy(tmpfile+5, pid, pid_len);
     strcpy(tmpfile+5+pid_len, ".rdb");
 
+    // 由于某个异常信号导致的删除任务 就要立即删除文件
     if (from_signal) {
         /* bg_unlink is not async-signal-safe, but in this case we don't really
          * need to close the fd, it'll be released when the process exists. */
@@ -1448,6 +1459,7 @@ void rdbRemoveTempFile(pid_t childpid, int from_signal) {
         UNUSED(fd);
         unlink(tmpfile);
     } else {
+        // 在后台进程中删除
         bg_unlink(tmpfile);
     }
 }
@@ -1455,9 +1467,13 @@ void rdbRemoveTempFile(pid_t childpid, int from_signal) {
 /* This function is called by rdbLoadObject() when the code is in RDB-check
  * mode and we find a module value of type 2 that can be parsed without
  * the need of the actual module. The value is parsed for errors, finally
- * a dummy redis object is returned just to conform to the API. */
+ * a dummy redis object is returned just to conform to the API.
+ * 当从rdb中恢复数据时需要通过该方法检查
+ * */
 robj *rdbLoadCheckModuleValue(rio *rdb, char *modulename) {
     uint64_t opcode;
+
+    // 先读取第一个数据信息  根据code的类型 读取不同的值 这里只是检测数据能否正常读取 失败时抛出异常
     while((opcode = rdbLoadLen(rdb,NULL)) != RDB_MODULE_OPCODE_EOF) {
         if (opcode == RDB_MODULE_OPCODE_SINT ||
             opcode == RDB_MODULE_OPCODE_UINT)
@@ -1492,18 +1508,26 @@ robj *rdbLoadCheckModuleValue(rio *rdb, char *modulename) {
 }
 
 /* Load a Redis object of the specified type from the specified file.
- * On success a newly allocated object is returned, otherwise NULL. */
+ * On success a newly allocated object is returned, otherwise NULL.
+ * 从rdb中加载某个数据
+ * */
 robj *rdbLoadObject(int rdbtype, rio *rdb, sds key) {
     robj *o = NULL, *ele, *dec;
     uint64_t len;
     unsigned int i;
 
+    // 根据rdbtype的类型 读取不同的数据
     if (rdbtype == RDB_TYPE_STRING) {
-        /* Read string value */
+        /* Read string value
+         * 从rdb中读取数据 并转换成string
+         * */
         if ((o = rdbLoadEncodedStringObject(rdb)) == NULL) return NULL;
+        // 对内部数据进行编码
         o = tryObjectEncoding(o);
     } else if (rdbtype == RDB_TYPE_LIST) {
-        /* Read list value */
+        /* Read list value
+         * len 代表quicklist内部的entry数量
+         * */
         if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return NULL;
 
         o = createQuicklistObject();
@@ -1512,25 +1536,34 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key) {
 
         /* Load every single element of the list */
         while(len--) {
+            // 读取每个ele的长度
             if ((ele = rdbLoadEncodedStringObject(rdb)) == NULL) {
                 decrRefCount(o);
                 return NULL;
             }
+
+            // 将获取到的每个ele解码后插入到quicklist中
             dec = getDecodedObject(ele);
             size_t len = sdslen(dec->ptr);
             quicklistPushTail(o->ptr, dec->ptr, len);
             decrRefCount(dec);
             decrRefCount(ele);
         }
+
+        // 本次要读取的数据类型是 set
     } else if (rdbtype == RDB_TYPE_SET) {
-        /* Read Set value */
+        /* Read Set value
+         * 也是先读取entry的数量
+         * */
         if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return NULL;
 
-        /* Use a regular set when there are too many entries. */
+        /* Use a regular set when there are too many entries.
+         * 根据ele总数判断set的实际结构是intset/dict
+         * */
         if (len > server.set_max_intset_entries) {
             o = createSetObject();
             /* It's faster to expand the dict to the right size asap in order
-             * to avoid rehashing */
+             * to avoid rehashing 提前指定大小 避免之后扩容 */
             if (len > DICT_HT_INITIAL_SIZE)
                 dictExpand(o->ptr,len);
         } else {
@@ -1542,6 +1575,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key) {
             long long llval;
             sds sdsele;
 
+            // 根据ele数量读取数据
             if ((sdsele = rdbGenericLoadStringObject(rdb,RDB_LOAD_SDS,NULL)) == NULL) {
                 decrRefCount(o);
                 return NULL;
@@ -1565,12 +1599,14 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key) {
                 sdsfree(sdsele);
             }
         }
+        // 本次要读取的是一个skiplist结构
     } else if (rdbtype == RDB_TYPE_ZSET_2 || rdbtype == RDB_TYPE_ZSET) {
         /* Read list/set value. */
         uint64_t zsetlen;
         size_t maxelelen = 0;
         zset *zs;
 
+        // 这里直接使用skiplist 而没有考虑使用ziplist
         if ((zsetlen = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return NULL;
         o = createZsetObject();
         zs = o->ptr;
@@ -1610,7 +1646,10 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key) {
             dictAdd(zs->dict,sdsele,&znode->score);
         }
 
-        /* Convert *after* loading, since sorted sets are not stored ordered. */
+        /* Convert *after* loading, since sorted sets are not stored ordered.
+         * 通过skiplist的排序能力 之后根据需要转换成ziplist
+         * 如果直接生成ziplist 不能保证数据有序
+         * */
         if (zsetLength(o) <= server.zset_max_ziplist_entries &&
             maxelelen <= server.zset_max_ziplist_value)
                 zsetConvert(o,OBJ_ENCODING_ZIPLIST);
@@ -2025,7 +2064,9 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key) {
 }
 
 /* Mark that we are loading in the global state and setup the fields
- * needed to provide loading stats. */
+ * needed to provide loading stats.
+ * 开始加载rdb中的数据
+ * */
 void startLoading(size_t size, int rdbflags) {
     /* Load the DB */
     server.loading = 1;
@@ -2041,28 +2082,37 @@ void startLoading(size_t size, int rdbflags) {
         subevent = REDISMODULE_SUBEVENT_LOADING_REPL_START;
     else
         subevent = REDISMODULE_SUBEVENT_LOADING_RDB_START;
+
+    // 触发事件
     moduleFireServerEvent(REDISMODULE_EVENT_LOADING,subevent,NULL);
 }
 
 /* Mark that we are loading in the global state and setup the fields
  * needed to provide loading stats.
- * 'filename' is optional and used for rdb-check on error */
+ * 'filename' is optional and used for rdb-check on error
+ * 开始加载某个rdb文件
+ * */
 void startLoadingFile(FILE *fp, char* filename, int rdbflags) {
     struct stat sb;
     if (fstat(fileno(fp), &sb) == -1)
         sb.st_size = 0;
+    // 记录此时正在加载的rdb文件
     rdbFileBeingLoaded = filename;
     startLoading(sb.st_size, rdbflags);
 }
 
-/* Refresh the loading progress info */
+/* Refresh the loading progress info
+ * 刷新加载进度
+ * */
 void loadingProgress(off_t pos) {
     server.loading_loaded_bytes = pos;
     if (server.stat_peak_memory < zmalloc_used_memory())
         server.stat_peak_memory = zmalloc_used_memory();
 }
 
-/* Loading finished */
+/* Loading finished
+ * rdb文件加载完毕后 发出一个相关事件
+ * */
 void stopLoading(int success) {
     server.loading = 0;
     rdbFileBeingLoaded = NULL;
@@ -2075,6 +2125,10 @@ void stopLoading(int success) {
                           NULL);
 }
 
+/**
+ * 开始生成rdb
+ * @param rdbflags
+ */
 void startSaving(int rdbflags) {
     /* Fire the persistence modules end event. */
     int subevent;
@@ -2100,24 +2154,35 @@ void stopSaving(int success) {
    and if needed calculate rdb checksum  */
 void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
     if (server.rdb_checksum)
+        // 重新计算校验和
         rioGenericUpdateChecksum(r, buf, len);
+    // 代表每当加载了多少数据时 就要触发一次回调函数
     if (server.loading_process_events_interval_bytes &&
+
+    // 代表此时总处理数量至少超过了loading_process_events_interval_bytes 允许触发一次回调
         (r->processed_bytes + len)/server.loading_process_events_interval_bytes > r->processed_bytes/server.loading_process_events_interval_bytes)
     {
         /* The DB can take some non trivial amount of time to load. Update
          * our cached time since it is used to create and update the last
-         * interaction time with clients and for other important things. */
+         * interaction time with clients and for other important things.
+         * 更新服务器系统缓存时间
+         * */
         updateCachedTime(0);
         if (server.masterhost && server.repl_state == REPL_STATE_TRANSFER)
+            // 副本发现时间戳变化 通知到master
             replicationSendNewlineToMaster();
         loadingProgress(r->processed_bytes);
         processEventsWhileBlocked();
+
+        // 通过module 来处理加载事件
         processModuleLoadingProgressEvent(0);
     }
 }
 
 /* Load an RDB file from the rio stream 'rdb'. On success C_OK is returned,
- * otherwise C_ERR is returned and 'errno' is set accordingly. */
+ * otherwise C_ERR is returned and 'errno' is set accordingly.
+ * 从rio流中获取rdb文件
+ * */
 int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
     uint64_t dbid;
     int type, rdbver;
@@ -2126,13 +2191,17 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
 
     rdb->update_cksum = rdbLoadProgressCallback;
     rdb->max_processing_chunk = server.loading_process_events_interval_bytes;
+
+    // 从rio流中读取数据  rdb文件会以 REDID+VERSION开头
     if (rioRead(rdb,buf,9) == 0) goto eoferr;
     buf[9] = '\0';
+    // 代表该文件不是rdb文件
     if (memcmp(buf,"REDIS",5) != 0) {
         serverLog(LL_WARNING,"Wrong signature trying to load DB from file");
         errno = EINVAL;
         return C_ERR;
     }
+    // 该rdb文件版本不兼容 无法解析
     rdbver = atoi(buf+5);
     if (rdbver < 1 || rdbver > RDB_VERSION) {
         serverLog(LL_WARNING,"Can't handle RDB format version %d",rdbver);
@@ -2317,6 +2386,7 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
             }
         }
 
+        // 还原redisObject
         /* Read key */
         if ((key = rdbGenericLoadStringObject(rdb,RDB_LOAD_SDS,NULL)) == NULL)
             goto eoferr;
@@ -2333,7 +2403,9 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
          * snapshot taken by the master may not be reflected on the slave.
          * Similarly if the RDB is the preamble of an AOF file, we want to
          * load all the keys as they are, since the log of operations later
-         * assume to work in an exact keyspace state. */
+         * assume to work in an exact keyspace state.
+         * 当前节点是集群master节点 并且该数据已经过期 释放数据
+         * */
         if (iAmMaster() &&
             !(rdbflags&RDBFLAGS_AOF_PREAMBLE) &&
             expiretime != -1 && expiretime < now)
@@ -2344,7 +2416,9 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
             robj keyobj;
             initStaticStringObject(keyobj,key);
 
-            /* Add the new object in the hash table */
+            /* Add the new object in the hash table
+             * 将从rdb中读取出来的数据插入到db中
+             * */
             int added = dbAddRDBLoad(db,key,val);
             if (!added) {
                 if (rdbflags & RDBFLAGS_ALLOW_DUP) {
@@ -2360,12 +2434,16 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
                 }
             }
 
-            /* Set the expire time if needed */
+            /* Set the expire time if needed
+             * 设置过期时间
+             * */
             if (expiretime != -1) {
                 setExpire(NULL,db,&keyobj,expiretime);
             }
 
-            /* Set usage information (for eviction). */
+            /* Set usage information (for eviction).
+             * 设置redisObject的过期策略
+             * */
             objectSetLRUOrLFU(val,lfu_freq,lru_idle,lru_clock,1000);
 
             /* call key space notification on key loaded for modules only */
@@ -2373,7 +2451,9 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
         }
 
         /* Loading the database more slowly is useful in order to test
-         * certain edge cases. */
+         * certain edge cases.
+         * 之前有某些线程可能处于睡眠状态 (在等待数据恢复) 一旦rdb/aof完成数据恢复后 就可以唤醒该线程了
+         * */
         if (server.key_load_delay) usleep(server.key_load_delay);
 
         /* Reset the state that is key-specified and is populated by
@@ -2419,15 +2499,19 @@ eoferr:
  * output is initialized and finalized.
  *
  * If you pass an 'rsi' structure initialied with RDB_SAVE_OPTION_INIT, the
- * loading code will fiil the information fields in the structure. */
+ * loading code will fiil the information fields in the structure.
+ * 加载rdb文件
+ * */
 int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     FILE *fp;
     rio rdb;
     int retval;
 
     if ((fp = fopen(filename,"r")) == NULL) return C_ERR;
+    // 设置此时正在加载的rdb文件 同时发出事件
     startLoadingFile(fp, filename,rdbflags);
     rioInitWithFile(&rdb,fp);
+    // 通过rdb完成数据恢复
     retval = rdbLoadRio(&rdb,rdbflags,rsi);
     fclose(fp);
     stopLoading(retval==C_OK);

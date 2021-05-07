@@ -32,20 +32,26 @@
 
 /* Open a child-parent channel used in order to move information about the
  * RDB / AOF saving process from the child to the parent (for instance
- * the amount of copy on write memory used) */
+ * the amount of copy on write memory used)
+ * 打开父子进程通道
+ * */
 void openChildInfoPipe(void) {
     if (pipe(server.child_info_pipe) == -1) {
         /* On error our two file descriptors should be still set to -1,
          * but we call anyway cloesChildInfoPipe() since can't hurt. */
         closeChildInfoPipe();
+        // 设置成非阻塞模式
     } else if (anetNonBlock(NULL,server.child_info_pipe[0]) != ANET_OK) {
         closeChildInfoPipe();
     } else {
+        // 当开启成功后 会清理child_info_data之前的数据
         memset(&server.child_info_data,0,sizeof(server.child_info_data));
     }
 }
 
-/* Close the pipes opened with openChildInfoPipe(). */
+/* Close the pipes opened with openChildInfoPipe().
+ * 关闭通道 同时将通道句柄置空
+ * */
 void closeChildInfoPipe(void) {
     if (server.child_info_pipe[0] != -1 ||
         server.child_info_pipe[1] != -1)
@@ -58,7 +64,9 @@ void closeChildInfoPipe(void) {
 }
 
 /* Send COW data to parent. The child should call this function after populating
- * the corresponding fields it want to sent (according to the process type). */
+ * the corresponding fields it want to sent (according to the process type).
+ * 这里是将某个type操作完成后 通知到父进程
+ * */
 void sendChildInfo(int ptype) {
     if (server.child_info_pipe[1] == -1) return;
     server.child_info_data.magic = CHILD_INFO_MAGIC;
@@ -69,13 +77,16 @@ void sendChildInfo(int ptype) {
     }
 }
 
-/* Receive COW data from parent. */
+/* Receive COW data from parent.
+ * 当父进程接收到子进程传播过来的数据
+ * */
 void receiveChildInfo(void) {
     if (server.child_info_pipe[0] == -1) return;
     ssize_t wlen = sizeof(server.child_info_data);
     if (read(server.child_info_pipe[0],&server.child_info_data,wlen) == wlen &&
         server.child_info_data.magic == CHILD_INFO_MAGIC)
     {
+        // 这里只是更新 copyOnWrite的数值
         if (server.child_info_data.process_type == CHILD_TYPE_RDB) {
             server.stat_rdb_cow_bytes = server.child_info_data.cow_size;
         } else if (server.child_info_data.process_type == CHILD_TYPE_AOF) {

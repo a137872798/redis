@@ -5078,7 +5078,10 @@ int RM_NotifyKeyspaceEvent(RedisModuleCtx *ctx, int type, const char *event, Red
 
 /* Dispatcher for keyspace notifications to module subscriber functions.
  * This gets called  only if at least one module requested to be notified on
- * keyspace notifications */
+ * keyspace notifications
+ * 某个db下的某个redisObject发生了某种事件 通知订阅者
+ * @param event 事件类型
+ * */
 void moduleNotifyKeyspaceEvent(int type, const char *event, robj *key, int dbid) {
     /* Don't do anything if there aren't any subscribers */
     if (listLength(moduleKeyspaceSubscribers) == 0) return;
@@ -7367,7 +7370,10 @@ int RM_IsSubEventSupported(RedisModuleEvent event, int64_t subevent) {
  * to return the structure with more information to the callback.
  *
  * 'eid' and 'subid' are just the main event ID and the sub event associated
- * with the event, depending on what exactly happened. */
+ * with the event, depending on what exactly happened.
+ * @param eid 事件id
+ * 某个事件被触发 通知所有监听器
+ * */
 void moduleFireServerEvent(uint64_t eid, int subid, void *data) {
     /* Fast path to return ASAP if there is nothing to do, avoiding to
      * setup the iterator and so forth: we want this call to be extremely
@@ -7468,6 +7474,10 @@ void moduleUnsubscribeAllServerEvents(RedisModule *module) {
     }
 }
 
+/**
+ * 在加载数据时 发出一些进度事件
+ * @param is_aof 本次是否是由于加载aof文件触发 否则是加载rdb触发
+ */
 void processModuleLoadingProgressEvent(int is_aof) {
     long long now = ustime();
     static long long next_event = 0;

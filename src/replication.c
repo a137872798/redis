@@ -84,11 +84,14 @@ char *replicationGetSlaveName(client *c) {
  * background thread instead. We actually just do close() in the thread,
  * by using the fact that if there is another instance of the same file open,
  * the foreground unlink() will only remove the fs name, and deleting the
- * file's storage space will only happen once the last reference is lost. */
+ * file's storage space will only happen once the last reference is lost.
+ * 在后台进程中删除某个文件
+ * */
 int bg_unlink(const char *filename) {
     int fd = open(filename,O_RDONLY|O_NONBLOCK);
     if (fd == -1) {
         /* Can't open the file? Fall back to unlinking in the main thread. */
+        // 此时文件无法正常打开 直接删除
         return unlink(filename);
     } else {
         /* The following unlink() removes the name but doesn't free the
@@ -102,6 +105,7 @@ int bg_unlink(const char *filename) {
             errno = old_errno;
             return -1;
         }
+        // 通过后台线程执行关闭文件的任务
         bioCreateBackgroundJob(BIO_CLOSE_FILE,(void*)(long)fd,NULL,NULL);
         return 0; /* Success. */
     }
@@ -1368,7 +1372,9 @@ int slaveIsInHandshakeState(void) {
  *
  * The function is called in two contexts: while we flush the current
  * data with emptyDb(), and while we load the new data received as an
- * RDB file from the master. */
+ * RDB file from the master.
+ * 副本时间戳发生了变化 通知到master
+ * */
 void replicationSendNewlineToMaster(void) {
     static time_t newline_sent;
     if (time(NULL) != newline_sent) {
