@@ -518,7 +518,7 @@ typedef void (*moduleTypeDigestFunc)(struct RedisModuleDigest *digest, void *val
 typedef size_t (*moduleTypeMemUsageFunc)(const void *value);
 typedef void (*moduleTypeFreeFunc)(void *value);
 
-/* A callback that is called when the client authentication changes. This
+/* A callback that is calaled when the client authentication changes. This
  * needs to be exposed since you can't cast a function pointer to (void *) */
 typedef void (*RedisModuleUserChangedFunc) (uint64_t client_id, void *privdata);
 
@@ -562,7 +562,9 @@ typedef struct moduleValue {
 
 /* This is a wrapper for the 'rio' streams used inside rdb.c in Redis, so that
  * the user does not have to take the total count of the written bytes nor
- * to care about error conditions. */
+ * to care about error conditions.
+ * 为rio赋予module属性
+ * */
 typedef struct RedisModuleIO {
     size_t bytes;       /* Bytes read / written so far. */
     rio *rio;           /* Rio stream. */
