@@ -56,7 +56,7 @@
  */
 typedef struct dictEntry {
     void *key;
-    // 下面v可能是各种类型
+    // 下面v可能是各种类型  主要是保存超时时间
     union {
         void *val;
         uint64_t u64;

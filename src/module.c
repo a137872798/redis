@@ -903,8 +903,7 @@ int64_t commandFlagsFromString(char *s) {
  *                     to authenticate a client.
  *                     根据相关参数生成一个command 并插入到dict中
  */
-int
-RM_CreateCommand(RedisModuleCtx *ctx, const char *name, RedisModuleCmdFunc cmdfunc, const char *strflags, int firstkey,
+int RM_CreateCommand(RedisModuleCtx *ctx, const char *name, RedisModuleCmdFunc cmdfunc, const char *strflags, int firstkey,
                  int lastkey, int keystep) {
     int64_t flags = strflags ? commandFlagsFromString((char *) strflags) : 0;
     if (flags == -1) return REDISMODULE_ERR;

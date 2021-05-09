@@ -1059,7 +1059,9 @@ void computeDefragCycles() {
 
 /* Perform incremental defragmentation work from the serverCron.
  * This works in a similar way to activeExpireCycle, in the sense that
- * we do incremental work across calls. */
+ * we do incremental work across calls.
+ * 针对此时存在的每个db 进行碎片整理
+ * */
 void activeDefragCycle(void) {
     static int current_db = -1;
     static unsigned long cursor = 0;
@@ -1072,7 +1074,9 @@ void activeDefragCycle(void) {
     mstime_t latency;
     int quit = 0;
 
+    // 代表此时没有开启碎片整理功能
     if (!server.active_defrag_enabled) {
+        // 代表此时正在执行碎片整理
         if (server.active_defrag_running) {
             /* if active defrag was disabled mid-run, start from fresh next time. */
             server.active_defrag_running = 0;

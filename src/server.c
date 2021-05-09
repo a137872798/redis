@@ -181,8 +181,8 @@ struct redisServer server; /* Server global state */
  *    that interact with keys without having anything to do with
  *    specific data structures, such as: DEL, RENAME, MOVE, SELECT,
  *    TYPE, EXPIRE*, PEXPIRE*, TTL, PTTL, ...
+ *    服务器支持的所有redisCommand 都在这里
  */
-
 struct redisCommand redisCommandTable[] = {
     {"module",moduleCommand,-2,
      "admin no-script",
@@ -1026,7 +1026,9 @@ struct redisCommand redisCommandTable[] = {
 void nolocks_localtime(struct tm *tmp, time_t t, time_t tz, int dst);
 
 /* Low level logging. To use only for very big messages, otherwise
- * serverLog() is to prefer. */
+ * serverLog() is to prefer.
+ * 忽略日志方法
+ * */
 void serverLogRaw(int level, const char *msg) {
     const int syslogLevelMap[] = { LOG_DEBUG, LOG_INFO, LOG_NOTICE, LOG_WARNING };
     const char *c = ".-*#";
@@ -1114,7 +1116,9 @@ err:
     if (!log_to_stdout) close(fd);
 }
 
-/* Return the UNIX time in microseconds */
+/* Return the UNIX time in microseconds
+ * 获取unix系统当前微秒
+ * */
 long long ustime(void) {
     struct timeval tv;
     long long ust;
@@ -1133,7 +1137,9 @@ mstime_t mstime(void) {
 /* After an RDB dump or AOF rewrite we exit from children using _exit() instead of
  * exit(), because the latter may interact with the same file objects used by
  * the parent process. However if we are testing the coverage normal exit() is
- * used in order to obtain the right coverage information. */
+ * used in order to obtain the right coverage information.
+ * 当某个aof/rdb完成任务后 结束子进程
+ * */
 void exitFromChild(int retcode) {
 #ifdef COVERAGE_TEST
     exit(retcode);
@@ -1146,20 +1152,33 @@ void exitFromChild(int retcode) {
 
 /* This is a hash table type that uses the SDS dynamic strings library as
  * keys and redis objects as values (objects can hold SDS strings,
- * lists, sets). */
-
+ * lists, sets).
+ * 释放val对应的内存
+ * */
 void dictVanillaFree(void *privdata, void *val)
 {
     DICT_NOTUSED(privdata);
     zfree(val);
 }
 
+/**
+ * 释放list对象
+ * @param privdata
+ * @param val
+ */
 void dictListDestructor(void *privdata, void *val)
 {
     DICT_NOTUSED(privdata);
     listRelease((list*)val);
 }
 
+/**
+ * 检测2个sds是否一样
+ * @param privdata
+ * @param key1
+ * @param key2
+ * @return
+ */
 int dictSdsKeyCompare(void *privdata, const void *key1,
         const void *key2)
 {
@@ -1168,6 +1187,7 @@ int dictSdsKeyCompare(void *privdata, const void *key1,
 
     l1 = sdslen((sds)key1);
     l2 = sdslen((sds)key2);
+    // 先比较长度是否相等
     if (l1 != l2) return 0;
     return memcmp(key1, key2, l1) == 0;
 }
@@ -1182,6 +1202,7 @@ int dictSdsKeyCaseCompare(void *privdata, const void *key1,
     return strcasecmp(key1, key2) == 0;
 }
 
+// 以下方法都是用于回收内存
 void dictObjectDestructor(void *privdata, void *val)
 {
     DICT_NOTUSED(privdata);
@@ -1197,6 +1218,13 @@ void dictSdsDestructor(void *privdata, void *val)
     sdsfree(val);
 }
 
+/**
+ * 比较这2个指针指向的sds结构
+ * @param privdata
+ * @param key1
+ * @param key2
+ * @return
+ */
 int dictObjKeyCompare(void *privdata, const void *key1,
         const void *key2)
 {
@@ -1204,25 +1232,50 @@ int dictObjKeyCompare(void *privdata, const void *key1,
     return dictSdsKeyCompare(privdata,o1->ptr,o2->ptr);
 }
 
+/**
+ * 计算传入字符串的hash值
+ * @param key
+ * @return
+ */
 uint64_t dictObjHash(const void *key) {
     const robj *o = key;
     return dictGenHashFunction(o->ptr, sdslen((sds)o->ptr));
 }
 
+/**
+ * 认为该指针是一个sds指针 计算对应的hash值
+ * @param key
+ * @return
+ */
 uint64_t dictSdsHash(const void *key) {
     return dictGenHashFunction((unsigned char*)key, sdslen((char*)key));
 }
 
+/**
+ * 在忽略大小写的前提下 计算hash值
+ * @param key
+ * @return
+ */
 uint64_t dictSdsCaseHash(const void *key) {
     return dictGenCaseHashFunction((unsigned char*)key, sdslen((char*)key));
 }
 
+/**
+ * 比较2个redisObject
+ * @param privdata
+ * @param key1
+ * @param key2
+ * @return
+ */
 int dictEncObjKeyCompare(void *privdata, const void *key1,
         const void *key2)
 {
     robj *o1 = (robj*) key1, *o2 = (robj*) key2;
     int cmp;
 
+    /**
+     * 如果2个对象已经被编码成int类型 直接比较2个int值是否相同
+     */
     if (o1->encoding == OBJ_ENCODING_INT &&
         o2->encoding == OBJ_ENCODING_INT)
             return o1->ptr == o2->ptr;
@@ -1233,6 +1286,8 @@ int dictEncObjKeyCompare(void *privdata, const void *key1,
      * objects as well. */
     if (o1->refcount != OBJ_STATIC_REFCOUNT) o1 = getDecodedObject(o1);
     if (o2->refcount != OBJ_STATIC_REFCOUNT) o2 = getDecodedObject(o2);
+
+    // 解码后比较sds的值
     cmp = dictSdsKeyCompare(privdata,o1->ptr,o2->ptr);
     if (o1->refcount != OBJ_STATIC_REFCOUNT) decrRefCount(o1);
     if (o2->refcount != OBJ_STATIC_REFCOUNT) decrRefCount(o2);
@@ -1242,9 +1297,12 @@ int dictEncObjKeyCompare(void *privdata, const void *key1,
 uint64_t dictEncObjHash(const void *key) {
     robj *o = (robj*) key;
 
+    // 检测某个redisObject 此时是否已经被编码 应该是未编码会进入这个分支
     if (sdsEncodedObject(o)) {
+        // 返回它指向对象的hash值
         return dictGenHashFunction(o->ptr, sdslen((sds)o->ptr));
     } else {
+        // 如果已经被编码成int类型  取出int值后 计算它的hash值
         if (o->encoding == OBJ_ENCODING_INT) {
             char buf[32];
             int len;
@@ -1252,6 +1310,7 @@ uint64_t dictEncObjHash(const void *key) {
             len = ll2string(buf,32,(long)o->ptr);
             return dictGenHashFunction((unsigned char*)buf, len);
         } else {
+            // 在对对象解码后 计算它的hash值
             uint64_t hash;
 
             o = getDecodedObject(o);
@@ -1273,6 +1332,7 @@ dictType objectKeyPointerValueDictType = {
     NULL                       /* val destructor */
 };
 
+// 下面是定义了一些 dictType dict对象将计算hash值 compare函数 析构函数 free函数抽取出来包装成了一个结构体
 /* Like objectKeyPointerValueDictType(), but values can be destroyed, if
  * not NULL, calling zfree(). */
 dictType objectKeyHeapPointerValueDictType = {
@@ -1422,6 +1482,11 @@ dictType replScriptCacheDictType = {
     NULL                        /* val destructor */
 };
 
+/**
+ * 判断某个字典是否需要扩容
+ * @param dict
+ * @return
+ */
 int htNeedsResize(dict *dict) {
     long long size, used;
 
@@ -1432,7 +1497,9 @@ int htNeedsResize(dict *dict) {
 }
 
 /* If the percentage of used slots in the HT reaches HASHTABLE_MIN_FILL
- * we resize the hash table to save memory */
+ * we resize the hash table to save memory
+ * 尝试为某个db扩容  每个db内存在2个dict对象 一个存储所有的redisObject 一个存储redisObject的超时时间
+ * */
 void tryResizeHashTables(int dbid) {
     if (htNeedsResize(server.db[dbid].dict))
         dictResize(server.db[dbid].dict);
@@ -1446,7 +1513,9 @@ void tryResizeHashTables(int dbid) {
  * of CPU time at every call of this function to perform some rehashing.
  *
  * The function returns 1 if some rehashing was performed, otherwise 0
- * is returned. */
+ * is returned.
+ * 如果某个db下的2个dict此时设置了 待rehash的标记 对他们进行重hash 这里有一个处理时间
+ * */
 int incrementallyRehash(int dbid) {
     /* Keys dictionary */
     if (dictIsRehashing(server.db[dbid].dict)) {
@@ -1466,7 +1535,9 @@ int incrementallyRehash(int dbid) {
  * to play well with copy-on-write (otherwise when a resize happens lots of
  * memory pages are copied). The goal of this function is to update the ability
  * for dict.c to resize the hash tables accordingly to the fact we have an
- * active fork child running. */
+ * active fork child running.
+ * 如果此时存在子进程 关闭dict的自动扩容功能 应该是避免并发问题
+ * */
 void updateDictResizePolicy(void) {
     if (!hasActiveChildProcess())
         dictEnableResize();
@@ -1483,12 +1554,16 @@ int hasActiveChildProcess() {
 }
 
 /* Return true if this instance has persistence completely turned off:
- * both RDB and AOF are disabled. */
+ * both RDB and AOF are disabled.
+ * 判断此时是否关闭了 aof/rdb
+ * */
 int allPersistenceDisabled(void) {
     return server.saveparamslen == 0 && server.aof_state == AOF_OFF;
 }
 
-/* ======================= Cron: called every 100 ms ======================== */
+/* ======================= Cron: called every 100 ms ========================
+ * 有关统计的逻辑先忽略
+ * */
 
 /* Add a sample to the operations per second array of samples. */
 void trackInstantaneousMetric(int metric, long long current_reading) {
@@ -1520,33 +1595,44 @@ long long getInstantaneousMetric(int metric) {
 /* The client query buffer is an sds.c string that can end with a lot of
  * free space not used, this function reclaims space if needed.
  *
- * The function always returns 0 as it never terminates the client. */
+ * The function always returns 0 as it never terminates the client.
+ * 该方法是回收一些之前没有使用的空间  有一个后台定时任务 会定期检测每个client此时的queryBuffer大小 并进行调整
+ * */
 int clientsCronResizeQueryBuffer(client *c) {
+    // 获取此时queryBuffer的大小
     size_t querybuf_size = sdsAllocSize(c->querybuf);
+
+    // 距离client最近一次交互已经过了多久
     time_t idletime = server.unixtime - c->lastinteraction;
 
     /* There are two conditions to resize the query buffer:
      * 1) Query buffer is > BIG_ARG and too big for latest peak.
-     * 2) Query buffer is > BIG_ARG and client is idle. */
+     * 2) Query buffer is > BIG_ARG and client is idle.
+     * 当满足其中一个条件时 会回收之前开辟的内存空间
+     * */
     if (querybuf_size > PROTO_MBULK_BIG_ARG &&
          ((querybuf_size/(c->querybuf_peak+1)) > 2 ||
           idletime > 2))
     {
         /* Only resize the query buffer if it is actually wasting
-         * at least a few kbytes. */
+         * at least a few kbytes.
+         * 此时可用空间超过了  4*1024 回收空间
+         * */
         if (sdsavail(c->querybuf) > 1024*4) {
             c->querybuf = sdsRemoveFreeSpace(c->querybuf);
         }
     }
     /* Reset the peak again to capture the peak memory usage in the next
-     * cycle. */
+     * cycle. 重置peak */
     c->querybuf_peak = 0;
 
     /* Clients representing masters also use a "pending query buffer" that
      * is the yet not applied part of the stream we are reading. Such buffer
      * also needs resizing from time to time, otherwise after a very large
      * transfer (a huge value or a big MIGRATE operation) it will keep using
-     * a lot of memory. */
+     * a lot of memory.
+     * 如果该client是leader节点对应的client 它的内存回收条件会简单点
+     * */
     if (c->flags & CLIENT_MASTER) {
         /* There are two conditions to resize the pending query buffer:
          * 1) Pending Query buffer is > LIMIT_PENDING_QUERYBUF.
@@ -1574,13 +1660,23 @@ int clientsCronResizeQueryBuffer(client *c) {
  * When we want to know what was recently the peak memory usage, we just scan
  * such few slots searching for the maximum value. */
 #define CLIENTS_PEAK_MEM_USAGE_SLOTS 8
+
+// 按时间为维度 存储某个时间段内与该server交互的clients中读写缓冲区占用内存最大的那个
 size_t ClientsPeakMemInput[CLIENTS_PEAK_MEM_USAGE_SLOTS];
 size_t ClientsPeakMemOutput[CLIENTS_PEAK_MEM_USAGE_SLOTS];
 
+/**
+ * 这是一个时间轮算法吗  将某个时间点与该server交互的所有client中 读写缓冲区占用最大的数值(峰值)记录下来
+ * @param c
+ * @return
+ */
 int clientsCronTrackExpansiveClients(client *c) {
+    // 获取此时client 读写缓冲区中的数据大小
     size_t in_usage = sdsZmallocSize(c->querybuf) + c->argv_len_sum;
     size_t out_usage = getClientOutputBufferMemoryUsage(c);
+    // 找到本次要存储的槽
     int i = server.unixtime % CLIENTS_PEAK_MEM_USAGE_SLOTS;
+    // 因为是轮式算法 下一个槽的数据会被清空
     int zeroidx = (i+1) % CLIENTS_PEAK_MEM_USAGE_SLOTS;
 
     /* Always zero the next sample, so that when we switch to that second, we'll
@@ -1593,11 +1689,15 @@ int clientsCronTrackExpansiveClients(client *c) {
      * case our array may end containing data which is potentially older
      * than CLIENTS_PEAK_MEM_USAGE_SLOTS seconds: however this is not a problem
      * since here we want just to track if "recently" there were very expansive
-     * clients from the POV of memory usage. */
+     * clients from the POV of memory usage.
+     * 将下标对应的数据清空
+     * */
     ClientsPeakMemInput[zeroidx] = 0;
     ClientsPeakMemOutput[zeroidx] = 0;
 
-    /* Track the biggest values observed so far in this slot. */
+    /* Track the biggest values observed so far in this slot.
+     * 只记录峰值数据
+     * */
     if (in_usage > ClientsPeakMemInput[i]) ClientsPeakMemInput[i] = in_usage;
     if (out_usage > ClientsPeakMemOutput[i]) ClientsPeakMemOutput[i] = out_usage;
 
@@ -1608,12 +1708,18 @@ int clientsCronTrackExpansiveClients(client *c) {
  * in turn would make the INFO command too slow. So we perform this
  * computation incrementally and track the (not instantaneous but updated
  * to the second) total memory used by clients using clinetsCron() in
- * a more incremental way (depending on server.hz). */
+ * a more incremental way (depending on server.hz).
+ * 在定时任务中触发  计算某个client最近一次占用的内存
+ * */
 int clientsCronTrackClientsMemUsage(client *c) {
     size_t mem = 0;
+    // 根据client的flags 判断类型
     int type = getClientType(c);
+    // 计算此时往该client缓冲区中写入的数据
     mem += getClientOutputBufferMemoryUsage(c);
+    // querybuf内的数据长度
     mem += sdsZmallocSize(c->querybuf);
+    // client指针大小
     mem += zmalloc_size(c);
     mem += c->argv_len_sum;
     if (c->argv) mem += zmalloc_size(c->argv);
@@ -1654,6 +1760,7 @@ void getExpansiveClientsInfo(size_t *in_usage, size_t *out_usage) {
  * very fast: sometimes Redis has tens of hundreds of connected clients, and the
  * default server.hz value is 10, so sometimes here we need to process thousands
  * of clients per second, turning this function into a source of latency.
+ * 执行一些client相关的定时任务
  */
 #define CLIENTS_CRON_MIN_ITERATIONS 5
 void clientsCron(void) {
@@ -1662,51 +1769,71 @@ void clientsCron(void) {
      * function is called server.hz times per second, in the average case we
      * process all the clients in 1 second. */
     int numclients = listLength(server.clients);
+    // 计算每秒迭代多少个client
     int iterations = numclients/server.hz;
     mstime_t now = mstime();
 
     /* Process at least a few clients while we are at it, even if we need
      * to process less than CLIENTS_CRON_MIN_ITERATIONS to meet our contract
-     * of processing each client once per second. */
+     * of processing each client once per second.
+     * 当每秒迭代的client数量小于5 就按照client数量 超过5按5个处理
+     * */
     if (iterations < CLIENTS_CRON_MIN_ITERATIONS)
         iterations = (numclients < CLIENTS_CRON_MIN_ITERATIONS) ?
                      numclients : CLIENTS_CRON_MIN_ITERATIONS;
 
+    // 执行一个循环
     while(listLength(server.clients) && iterations--) {
         client *c;
         listNode *head;
 
         /* Rotate the list, take the current head, process.
          * This way if the client must be removed from the list it's the
-         * first element and we don't incur into O(N) computation. */
+         * first element and we don't incur into O(N) computation.
+         * 将链表尾节点移动到头部
+         * */
         listRotateTailToHead(server.clients);
         head = listFirst(server.clients);
         c = listNodeValue(head);
         /* The following functions do different service checks on the client.
          * The protocol is that they return non-zero if the client was
-         * terminated. */
+         * terminated.
+         * */
+        // 判断client是否已经超时 如果超时且client是外部节点(非集群内部节点 可以断开连接) 判断client此时是否处于阻塞状态 并且是否满足解除阻塞状态的条件
         if (clientsCronHandleTimeout(c,now)) continue;
+        // 定时更新querybuffer的大小 主要是为了避免内存的浪费
         if (clientsCronResizeQueryBuffer(c)) continue;
+        // 计算时间槽内读写缓冲区占用最大的client
         if (clientsCronTrackExpansiveClients(c)) continue;
+        // 计算此时client占用的内存大小
         if (clientsCronTrackClientsMemUsage(c)) continue;
     }
 }
 
 /* This function handles 'background' operations we are required to do
  * incrementally in Redis databases, such as active key expiring, resizing,
- * rehashing. */
+ * rehashing.
+ * 有关db的定时任务
+ * */
 void databasesCron(void) {
     /* Expire keys by random sampling. Not required for slaves
-     * as master will synthesize DELs for us. */
+     * as master will synthesize DELs for us.
+     * 检查db中有哪些key已经过期 并根据情况判断是采用惰性删除 还是立即删除
+     * */
     if (server.active_expire_enabled) {
+        // 根据当前节点是否是master节点 走不同的逻辑
         if (iAmMaster()) {
+            // 本次传入的过期检测模式是慢检测
             activeExpireCycle(ACTIVE_EXPIRE_CYCLE_SLOW);
         } else {
+            // 副本删除过期key
             expireSlaveKeys();
         }
     }
 
-    /* Defrag keys gradually. */
+    /* Defrag keys gradually.
+     * 进行碎片整理
+     * */
     activeDefragCycle();
 
     /* Perform hash tables rehashing if needed, but only if there are no
@@ -5312,6 +5439,9 @@ int redisIsSupervised(int mode) {
     return 0;
 }
 
+/**
+ * 判断当前节点是否是master节点  主要是判断当前节点是否是以集群模式启动的 以及master节点是否是自身
+ */
 int iAmMaster(void) {
     return ((!server.cluster_enabled && server.masterhost == NULL) ||
             (server.cluster_enabled && nodeIsMaster(server.cluster->myself)));

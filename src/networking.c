@@ -1184,17 +1184,25 @@ void unlinkClient(client *c) {
     if (c->flags & CLIENT_TRACKING) disableTracking(c);
 }
 
+/**
+ * 与某个client断开连接
+ * @param c
+ */
 void freeClient(client *c) {
     listNode *ln;
 
     /* If a client is protected, yet we need to free it right now, make sure
-     * to at least use asynchronous freeing. */
+     * to at least use asynchronous freeing.
+     * 如果此时client处于保护模式 会采用异步关闭的方式
+     * */
     if (c->flags & CLIENT_PROTECTED) {
         freeClientAsync(c);
         return;
     }
 
-    /* For connected clients, call the disconnection event of modules hooks. */
+    /* For connected clients, call the disconnection event of modules hooks.
+     * 当连接被断开时会发起一个断连事件
+     * */
     if (c->conn) {
         moduleFireServerEvent(REDISMODULE_EVENT_CLIENT_CHANGE,
                               REDISMODULE_SUBEVENT_CLIENT_CHANGE_DISCONNECTED,
@@ -2798,7 +2806,9 @@ void rewriteClientCommandArgument(client *c, int i, robj *newval) {
  *
  * Note: this function is very fast so can be called as many time as
  * the caller wishes. The main usage of this function currently is
- * enforcing the client output length limits. */
+ * enforcing the client output length limits.
+ * 获取往client中写入的数据大小
+ * */
 unsigned long getClientOutputBufferMemoryUsage(client *c) {
     unsigned long list_item_size = sizeof(listNode) + sizeof(clientReplyBlock);
     return c->reply_bytes + (list_item_size*listLength(c->reply));
@@ -2812,6 +2822,7 @@ unsigned long getClientOutputBufferMemoryUsage(client *c) {
  * CLIENT_TYPE_SLAVE  -> Slave
  * CLIENT_TYPE_PUBSUB -> Client subscribed to Pub/Sub channels
  * CLIENT_TYPE_MASTER -> The client representing our replication master.
+ * 根据client携带的flag 判断client的类型 可能是某个master节点 可能是某个slave
  */
 int getClientType(client *c) {
     if (c->flags & CLIENT_MASTER) return CLIENT_TYPE_MASTER;
@@ -2968,8 +2979,11 @@ void pauseClients(mstime_t end) {
 }
 
 /* Return non-zero if clients are currently paused. As a side effect the
- * function checks if the pause time was reached and clear it. */
+ * function checks if the pause time was reached and clear it.
+ * 判断当前client是否处于暂停状态
+ * */
 int clientsArePaused(void) {
+    // 当client处于暂停状态 且endtime 小于当前时间 代表需要取消client的暂停标记了  (惰性检查)
     if (server.clients_paused &&
         server.clients_pause_end_time < server.mstime)
     {
@@ -2986,7 +3000,9 @@ int clientsArePaused(void) {
             c = listNodeValue(ln);
 
             /* Don't touch slaves and blocked clients.
-             * The latter pending requests will be processed when unblocked. */
+             * The latter pending requests will be processed when unblocked.
+             * 跳过 slave|blocked的client
+             * */
             if (c->flags & (CLIENT_SLAVE|CLIENT_BLOCKED)) continue;
             queueClientForReprocessing(c);
         }

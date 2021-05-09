@@ -140,6 +140,9 @@ typedef struct clusterNode {
 } clusterNode;
 
 typedef struct clusterState {
+    /**
+     * 在集群中本节点信息
+     */
     clusterNode *myself;  /* This node */
     uint64_t currentEpoch;
     int state;            /* CLUSTER_OK, CLUSTER_FAIL, ... */

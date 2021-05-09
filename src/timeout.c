@@ -57,26 +57,36 @@ int checkBlockedClientTimeout(client *c, mstime_t now) {
 /* Check for timeouts. Returns non-zero if the client was terminated.
  * The function gets the current time in milliseconds as argument since
  * it gets called multiple times in a loop, so calling gettimeofday() for
- * each iteration would be costly without any actual gain. */
+ * each iteration would be costly without any actual gain.
+ * 处理client的超时任务
+ * @param now_ms 当前时间 毫秒
+ * */
 int clientsCronHandleTimeout(client *c, mstime_t now_ms) {
+    // 将当前时间转换成秒
     time_t now = now_ms/1000;
 
+    // server设置了每个client的最大空闲时间 应该是等待这么长时间 没有下一次通信就断开连接
     if (server.maxidletime &&
-        /* This handles the idle clients connection timeout if set. */
+        /* This handles the idle clients connection timeout if set.
+         * 这几种client是不会断开连接的 (redis集群内各个节点保持长连接)
+         * */
         !(c->flags & CLIENT_SLAVE) &&   /* No timeout for slaves and monitors */
         !(c->flags & CLIENT_MASTER) &&  /* No timeout for masters */
         !(c->flags & CLIENT_BLOCKED) && /* No timeout for BLPOP */
         !(c->flags & CLIENT_PUBSUB) &&  /* No timeout for Pub/Sub clients */
+        // 代表此时client长时间未与server交互 断开连接
         (now - c->lastinteraction > server.maxidletime))
     {
         serverLog(LL_VERBOSE,"Closing idle client");
         freeClient(c);
         return 1;
+        // redisServer 没有设置client的超时时间 此时client处于阻塞状态  检查此时是否满足解除阻塞状态的条件
     } else if (c->flags & CLIENT_BLOCKED) {
         /* Cluster: handle unblock & redirect of clients blocked
          * into keys no longer served by this server. */
         if (server.cluster_enabled) {
             if (clusterRedirectBlockedClientIfNeeded(c))
+                // 解除client的阻塞状态
                 unblockClient(c);
         }
     }

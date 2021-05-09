@@ -50,20 +50,30 @@
  * When a key is expired, server.stat_expiredkeys is incremented.
  *
  * The parameter 'now' is the current time in milliseconds as is passed
- * to the function to avoid too many gettimeofday() syscalls. */
+ * to the function to avoid too many gettimeofday() syscalls.
+ * @param db 当前de属于哪个db
+ * @param de 当前正在检测的entry
+ * @param now 当前时间戳 通过比较可以判断entry对应的key是否已经过期
+ * */
 int activeExpireCycleTryExpire(redisDb *db, dictEntry *de, long long now) {
+    // 获取该key预估的过期时间
     long long t = dictGetSignedIntegerVal(de);
     if (now > t) {
         sds key = dictGetKey(de);
+        // 将key转换成redisObject
         robj *keyobj = createStringObject(key,sdslen(key));
 
+        // 将本次过期命令同步到aof和其他副本上
         propagateExpire(db,keyobj,server.lazyfree_lazy_expire);
+        // 如果是惰性处理方式 也就是执行异步删除
         if (server.lazyfree_lazy_expire)
             dbAsyncDelete(db,keyobj);
         else
             dbSyncDelete(db,keyobj);
+        // 发起一个事件
         notifyKeyspaceEvent(NOTIFY_EXPIRED,
             "expired",keyobj,db->id);
+        // 某些client在执行multi命令时会检测key的变化 此时就要进行通知
         signalModifiedKey(NULL, db, keyobj);
         decrRefCount(keyobj);
         server.stat_expiredkeys++;
@@ -121,19 +131,24 @@ int activeExpireCycleTryExpire(redisDb *db, dictEntry *de, long long now) {
                                                    we do extra efforts. */
 
 /**
- * 激活过期循环
- * @param type
+ * 如果本节点是master节点 在dbCron中会定期触发该方法
+ * @param type 检测模式  在dbCron中触发采用的是slow检测模式
  */
 void activeExpireCycle(int type) {
     /* Adjust the running parameters according to the configured expire
      * effort. The default effort is 1, and the maximum configurable effort
-     * is 10. */
-    unsigned long
-    effort = server.active_expire_effort-1, /* Rescale from 0 to 9. */
+     * is 10.
+     * 该值范围为1~10  effort为0~9
+     * */
+    unsigned long effort = server.active_expire_effort-1, /* Rescale from 0 to 9. */
+    // 每次循环会检查多少key
     config_keys_per_loop = ACTIVE_EXPIRE_CYCLE_KEYS_PER_LOOP +
                            ACTIVE_EXPIRE_CYCLE_KEYS_PER_LOOP/4*effort,
+
+                           // 每100毫秒进行一次检查
     config_cycle_fast_duration = ACTIVE_EXPIRE_CYCLE_FAST_DURATION +
                                  ACTIVE_EXPIRE_CYCLE_FAST_DURATION/4*effort,
+
     config_cycle_slow_time_perc = ACTIVE_EXPIRE_CYCLE_SLOW_TIME_PERC +
                                   2*effort,
     config_cycle_acceptable_stale = ACTIVE_EXPIRE_CYCLE_ACCEPTABLE_STALE-
@@ -151,9 +166,12 @@ void activeExpireCycle(int type) {
 
     /* When clients are paused the dataset should be static not just from the
      * POV of clients not being able to write, but also from the POV of
-     * expires and evictions of keys not being performed. */
+     * expires and evictions of keys not being performed.
+     * 如果此时server暂停了所有client 不进行过期检测
+     * */
     if (clientsArePaused()) return;
 
+    // TODO
     if (type == ACTIVE_EXPIRE_CYCLE_FAST) {
         /* Don't start a fast cycle if the previous cycle did not exit
          * for time limit, unless the percentage of estimated stale keys is
@@ -175,18 +193,23 @@ void activeExpireCycle(int type) {
      * 1) Don't test more DBs than we have.
      * 2) If last time we hit the time limit, we want to scan all DBs
      * in this iteration, as there is work to do in some DB and we don't want
-     * expired keys to use memory for too much time. */
+     * expired keys to use memory for too much time.
+     * 代表每次检查会涉及到多少个db  如果每次检查超过了db数上限 则修改成跟db等量
+     * */
     if (dbs_per_call > server.dbnum || timelimit_exit)
         dbs_per_call = server.dbnum;
 
     /* We can use at max 'config_cycle_slow_time_perc' percentage of CPU
      * time per iteration. Since this function gets called with a frequency of
      * server.hz times per second, the following is the max amount of
-     * microseconds we can spend in this function. */
+     * microseconds we can spend in this function.
+     * 每次检查有一个时间限制
+     * */
     timelimit = config_cycle_slow_time_perc*1000000/server.hz/100;
     timelimit_exit = 0;
     if (timelimit <= 0) timelimit = 1;
 
+    // FAST TODO
     if (type == ACTIVE_EXPIRE_CYCLE_FAST)
         timelimit = config_cycle_fast_duration; /* in microseconds. */
 
@@ -196,38 +219,50 @@ void activeExpireCycle(int type) {
     long total_sampled = 0;
     long total_expired = 0;
 
+    // 开始从每个db下抽样 (检查过期的key)  timelimit_exit 在刚开始循环时默认为0 如果为1 代表到达时间限制 无法继续检测
     for (j = 0; j < dbs_per_call && timelimit_exit == 0; j++) {
         /* Expired and checked in a single loop. */
         unsigned long expired, sampled;
 
+        // 获取当前正在检查的db对象
         redisDb *db = server.db+(current_db % server.dbnum);
 
         /* Increment the DB now so we are sure if we run out of time
          * in the current DB we'll restart from the next. This allows to
-         * distribute the time evenly across DBs. */
+         * distribute the time evenly across DBs.
+         * 这样下一轮就会获取不同的db
+         * */
         current_db++;
 
         /* Continue to expire if at the end of the cycle there are still
          * a big percentage of keys to expire, compared to the number of keys
          * we scanned. The percentage, stored in config_cycle_acceptable_stale
-         * is not fixed, but depends on the Redis configured "expire effort". */
+         * is not fixed, but depends on the Redis configured "expire effort".
+         * 这里是针对db级 每轮检查最多20个key 每检查16轮时会判断是否达到时间限制
+         * */
         do {
+            // 针对每个db的检测逻辑
             unsigned long num, slots;
             long long now, ttl_sum;
             int ttl_samples;
             iteration++;
 
-            /* If there is nothing to expire try next DB ASAP. */
+            /* If there is nothing to expire try next DB ASAP.
+             * 代表当前db下没有任何被设置了超时时间的key
+             * */
             if ((num = dictSize(db->expires)) == 0) {
                 db->avg_ttl = 0;
                 break;
             }
+            // 该dict下总计有多少个slot  (内部2个hash桶的槽总数)
             slots = dictSlots(db->expires);
             now = mstime();
 
             /* When there are less than 1% filled slots, sampling the key
              * space is expensive, so stop here waiting for better times...
-             * The dictionary will be resized asap. */
+             * The dictionary will be resized asap.
+             * 如果此时超时key的总数 不到hash槽的1% 认为抽样太耗时间 不容易命中过期的key 所以放弃检测
+             * */
             if (num && slots > DICT_HT_INITIAL_SIZE &&
                 (num*100/slots < 1)) break;
 
@@ -238,6 +273,7 @@ void activeExpireCycle(int type) {
             ttl_sum = 0;
             ttl_samples = 0;
 
+            // 此时key的总数超过了抽样的总数 就将num修改成每轮的抽样数量
             if (num > config_keys_per_loop)
                 num = config_keys_per_loop;
 
@@ -254,25 +290,35 @@ void activeExpireCycle(int type) {
             long max_buckets = num*20;
             long checked_buckets = 0;
 
+            // 只要此时抽样的数量没有达到本轮的上限(num) 并且此时检查的桶数量没有达到上限 应该是这样 num是确切的key的数量 而bucket中不一定每个槽都有key 所以bucket的值会比num大
             while (sampled < num && checked_buckets < max_buckets) {
+                // 因为dict内有2个hash桶 这里循环2次
                 for (int table = 0; table < 2; table++) {
+                    // 代表此时没有数据存储在2号桶 不需要处理
                     if (table == 1 && !dictIsRehashing(db->expires)) break;
 
                     unsigned long idx = db->expires_cursor;
+                    // 获取此时的扫描下标
                     idx &= db->expires->ht[table].sizemask;
+                    // 获取slot对应entry
                     dictEntry *de = db->expires->ht[table].table[idx];
                     long long ttl;
 
                     /* Scan the current bucket of the current table. */
                     checked_buckets++;
+                    // 这里代表entry有数据 并且开始扫描链表
                     while(de) {
                         /* Get the next entry now since this entry may get
                          * deleted. */
                         dictEntry *e = de;
                         de = de->next;
 
+                        // 计算该key的超时时间
                         ttl = dictGetSignedIntegerVal(e)-now;
+                        // 比较entry.ttl与now 可以知道某个key此时是否已经过期 并发起通知事件 以及同步到aof和slave节点
                         if (activeExpireCycleTryExpire(db,e,now)) expired++;
+
+                        // 当前未超时
                         if (ttl > 0) {
                             /* We want the average TTL of keys yet
                              * not expired. */
@@ -282,28 +328,38 @@ void activeExpireCycle(int type) {
                         sampled++;
                     }
                 }
+                // 每当检测完一个slot时 移动下标 并且下次就会从这个下标开始检测 避免每次都检测相同的key
                 db->expires_cursor++;
             }
+            // 此时检查完成了 记录本次抽样的数量 以及有多少key过期
             total_expired += expired;
             total_sampled += sampled;
 
-            /* Update the average TTL stats for this database. */
+            /* Update the average TTL stats for this database.
+             * 代表某些抽查到的key没有过期
+             * */
             if (ttl_samples) {
+                // 这些未过期的key 平均还有多久过期
                 long long avg_ttl = ttl_sum/ttl_samples;
 
                 /* Do a simple running average with a few samples.
                  * We just use the current estimate with a weight of 2%
                  * and the previous estimate with a weight of 98%. */
                 if (db->avg_ttl == 0) db->avg_ttl = avg_ttl;
+                // 这个数据有什么意义呢 每次新的avg_ttl 占比只有2%
                 db->avg_ttl = (db->avg_ttl/50)*49 + (avg_ttl/50);
             }
 
             /* We can't block forever here even if there are many keys to
              * expire. So after a given amount of milliseconds return to the
-             * caller waiting for the other active expire cycle. */
+             * caller waiting for the other active expire cycle.
+             * 每当对一个db发起检查时 iteration都会+1  每当检查满16个db后 触发下面的逻辑
+             * */
             if ((iteration & 0xf) == 0) { /* check once every 16 iterations. */
+                // 记录此时花费的总时间 并判断是否超过了本次检查的限制时间
                 elapsed = ustime()-start;
                 if (elapsed > timelimit) {
+                    // 设置超过时间限制的标记
                     timelimit_exit = 1;
                     server.stat_expired_time_cap_reached_count++;
                     break;
@@ -311,22 +367,28 @@ void activeExpireCycle(int type) {
             }
             /* We don't repeat the cycle for the current database if there are
              * an acceptable amount of stale keys (logically expired but yet
-             * not reclaimed). */
+             * not reclaimed).
+             * 当采样数量为0 或者 此时检测到的过期key比率大于某个值 就代表成效比较大 可以继续检测
+             * */
         } while (sampled == 0 ||
                  (expired*100/sampled) > config_cycle_acceptable_stale);
     }
 
+    // 从上面的循环中退出有几种情况 可能是每次检查的db数量达到要求值 可能是超过时间限制
     elapsed = ustime()-start;
+    // 统计相关的先忽略
     server.stat_expire_cycle_time_used += elapsed;
     latencyAddSampleIfNeeded("expire-cycle",elapsed/1000);
 
     /* Update our estimate of keys existing but yet to be expired.
      * Running average with this sample accounting for 5%. */
     double current_perc;
+    // 计算本次抽样中过期key的比率
     if (total_sampled) {
         current_perc = (double)total_expired/total_sampled;
     } else
         current_perc = 0;
+    // 以5%的比重影响到之前的统计数据
     server.stat_expired_stale_perc = (current_perc*0.05)+
                                      (server.stat_expired_stale_perc*0.95);
 }
@@ -365,20 +427,28 @@ void activeExpireCycle(int type) {
  * to the DB where the keys may exist set to 1. Currently the keys created
  * with a DB id > 63 are not expired, but a trivial fix is to set the bitmap
  * to the max 64 bit unsigned value when we know there is a key with a DB
- * ID greater than 63, and check all the configured DBs in such a case. */
+ * ID greater than 63, and check all the configured DBs in such a case.
+ * 这里存储了slave下所有过期的key 推测是通过接收master的过期命令来确认哪些key需要被删除
+ * */
 dict *slaveKeysWithExpire = NULL;
 
 /* Check the set of keys created by the master with an expire set in order to
- * check if they should be evicted. */
+ * check if they should be evicted.
+ * 针对当前节点是slave的情况下 删除所有过期的节点
+ * */
 void expireSlaveKeys(void) {
+    // 当存储过期key的容器为空时直接返回
     if (slaveKeysWithExpire == NULL ||
         dictSize(slaveKeysWithExpire) == 0) return;
 
     int cycles = 0, noexpire = 0;
     mstime_t start = mstime();
+
     while(1) {
+        // 随机获取某个key (抽样 )
         dictEntry *de = dictGetRandomKey(slaveKeysWithExpire);
         sds keyname = dictGetKey(de);
+        // 该key可能存在于多个db中
         uint64_t dbids = dictGetUnsignedIntegerVal(de);
         uint64_t new_dbids = 0;
 
@@ -386,11 +456,14 @@ void expireSlaveKeys(void) {
          * bits set in the value bitmap. */
         int dbid = 0;
         while(dbids && dbid < server.dbnum) {
+            // 获取到的dbids是基于位图算法计算出来的 代表该key可能存在于多个db下
             if ((dbids & 1) != 0) {
+                // 通过位图算法反推该key所在的每个db 并检测该key是否过期
                 redisDb *db = server.db+dbid;
                 dictEntry *expire = dictFind(db->expires,keyname);
                 int expired = 0;
 
+                // 检测该key是否已经过期
                 if (expire &&
                     activeExpireCycleTryExpire(server.db+dbid,expire,start))
                 {
@@ -400,7 +473,9 @@ void expireSlaveKeys(void) {
                 /* If the key was not expired in this DB, we need to set the
                  * corresponding bit in the new bitmap we set as value.
                  * At the end of the loop if the bitmap is zero, it means we
-                 * no longer need to keep track of this key. */
+                 * no longer need to keep track of this key.
+                 * 发现当前key 之后由于又被访问到 不属于过期key了
+                 * */
                 if (expire && !expired) {
                     noexpire++;
                     new_dbids |= (uint64_t)1 << dbid;
@@ -412,17 +487,25 @@ void expireSlaveKeys(void) {
 
         /* Set the new bitmap as value of the key, in the dictionary
          * of keys with an expire set directly in the writable slave. Otherwise
-         * if the bitmap is zero, we no longer need to keep track of it. */
+         * if the bitmap is zero, we no longer need to keep track of it.
+         * 代表该key在某些db 下又变的有效了 不应该被删除
+         * 更新entry下需要检测的dbid
+         * */
         if (new_dbids)
             dictSetUnsignedIntegerVal(de,new_dbids);
         else
+            // 代表本轮所有key都已经过期 将entry从待检测的dict中删除
             dictDelete(slaveKeysWithExpire,keyname);
 
         /* Stop conditions: found 3 keys we can't expire in a row or
-         * time limit was reached. */
+         * time limit was reached.
+         * 最外层是一个死循环 目的就是为了将所有存在于slaveKeysWithExpire中的key删除
+         * */
         cycles++;
         if (noexpire > 3) break;
+        // 每当检测满64个key后 检测时间是否超过1秒 slave的检测也有一个时间限制
         if ((cycles % 64) == 0 && mstime()-start > 1) break;
+        // 代表所有key都被移除干净 退出死循环
         if (dictSize(slaveKeysWithExpire) == 0) break;
     }
 }
