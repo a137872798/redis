@@ -1128,6 +1128,7 @@ struct redisServer {
     int cfd_count;              /* Used slots in cfd[] */
     list *clients;              /* List of active clients */
     list *clients_to_close;     /* Clients to close asynchronously */
+    // 代表此时有多少待写任务
     list *clients_pending_write; /* There is to write or install handler. */
     list *clients_pending_read;  /* Client has pending read socket buffers. */
     list *slaves, *monitors;    /* List of slaves and MONITORs */
@@ -1139,6 +1140,7 @@ struct redisServer {
     int clients_paused;         /* True if clients are currently paused */
     mstime_t clients_pause_end_time; /* Time when we undo clients_paused */
     char neterr[ANET_ERR_LEN];   /* Error buffer for anet.c */
+    // 迁移过程中缓存的socket 之后会在serverCron的主循环中被关闭
     dict *migrate_cached_sockets;/* MIGRATE cached sockets */
     _Atomic uint64_t next_client_id; /* Next client unique ID. Incremental. */
     int protected_mode;         /* Don't accept external connections. */

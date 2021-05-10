@@ -3134,7 +3134,9 @@ long long replicationGetSlaveOffset(void) {
 
 /* --------------------------- REPLICATION CRON  ---------------------------- */
 
-/* Replication cron function, called 1 time per second. */
+/* Replication cron function, called 1 time per second.
+ * 在server的主循环中会触发 每隔一秒执行一次  主要是执行副本相关的定时任务
+ * */
 void replicationCron(void) {
     static long long replication_cron_loops = 0;
 

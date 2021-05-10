@@ -2026,13 +2026,19 @@ void processInputBuffer(client *c) {
     }
 }
 
+/**
+ * 从conn中读取数据
+ * @param conn
+ */
 void readQueryFromClient(connection *conn) {
     client *c = connGetPrivateData(conn);
     int nread, readlen;
     size_t qblen;
 
     /* Check if we want to read from the client later when exiting from
-     * the event loop. This is the case if threaded I/O is enabled. */
+     * the event loop. This is the case if threaded I/O is enabled.
+     * 如果有关该client的数据读取被推迟了 先返回
+     * */
     if (postponeClientRead(c)) return;
 
     /* Update total number of reads on server */
@@ -2044,7 +2050,9 @@ void readQueryFromClient(connection *conn) {
      * buffer contains exactly the SDS string representing the object, even
      * at the risk of requiring more read(2) calls. This way the function
      * processMultiBulkBuffer() can avoid copying buffers to create the
-     * Redis Object representing the argument. */
+     * Redis Object representing the argument.
+     * 如果本次发起的是一个 大块请求 应该就是几个请求被合并在一起 主要就是计算本次要读取的数据长度
+     * */
     if (c->reqtype == PROTO_REQ_MULTIBULK && c->multibulklen && c->bulklen != -1
         && c->bulklen >= PROTO_MBULK_BIG_ARG)
     {
@@ -2055,11 +2063,16 @@ void readQueryFromClient(connection *conn) {
         if (remaining > 0 && remaining < readlen) readlen = remaining;
     }
 
+    // 此时该client的读缓冲区中 已经存储了多少数据
     qblen = sdslen(c->querybuf);
+
+    // 有关querybuf存储了多少数据 也有一个峰值指标
     if (c->querybuf_peak < qblen) c->querybuf_peak = qblen;
+    // 为buf扩容 确保有足够的空间存储数据
     c->querybuf = sdsMakeRoomFor(c->querybuf, readlen);
     nread = connRead(c->conn, c->querybuf+qblen, readlen);
     if (nread == -1) {
+        // 本次没有读取到任何数据 检查连接是否断开 如果已断开连接 释放client
         if (connGetState(conn) == CONN_STATE_CONNECTED) {
             return;
         } else {
@@ -2067,10 +2080,12 @@ void readQueryFromClient(connection *conn) {
             freeClientAsync(c);
             return;
         }
+        // 当读取长度为0时代表已经被关闭 应该是connRead返回的特殊值
     } else if (nread == 0) {
         serverLog(LL_VERBOSE, "Client closed connection");
         freeClientAsync(c);
         return;
+        // 将queryBuf中的数据 拷贝一份到pending_querybuf中
     } else if (c->flags & CLIENT_MASTER) {
         /* Append the query buffer to the pending (not applied) buffer
          * of the master. We'll use this buffer later in order to have a
@@ -3193,17 +3208,24 @@ void startThreadedIO(void) {
     server.io_threads_active = 1;
 }
 
+/**
+ * 代表此时io任务不是很重 减少活跃线程
+ */
 void stopThreadedIO(void) {
     /* We may have still clients with pending reads when this function
-     * is called: handle them before stopping the threads. */
+     * is called: handle them before stopping the threads.
+     * 先通过这些线程处理掉所有待读取数据
+     * */
     handleClientsWithPendingReadsUsingThreads();
     if (tio_debug) { printf("E"); fflush(stdout); }
     if (tio_debug) printf("--- STOPPING THREADED IO [R%d] [W%d] ---\n",
         (int) listLength(server.clients_pending_read),
         (int) listLength(server.clients_pending_write));
     serverAssert(server.io_threads_active == 1);
+    // 将线程上锁 就任务是暂停这些io线程  对应的应该有个解锁的地方
     for (int j = 1; j < server.io_threads_num; j++)
         pthread_mutex_lock(&io_threads_mutex[j]);
+    // 更新active标识
     server.io_threads_active = 0;
 }
 
@@ -3215,13 +3237,16 @@ void stopThreadedIO(void) {
  *
  * The function returns 0 if the I/O threading should be used because there
  * are enough active threads, otherwise 1 is returned and the I/O threads
- * could be possibly stopped (if already active) as a side effect. */
+ * could be possibly stopped (if already active) as a side effect.
+ * 检查是否可以暂停某些io线程
+ * */
 int stopThreadedIOIfNeeded(void) {
     int pending = listLength(server.clients_pending_write);
 
-    /* Return ASAP if IO threads are disabled (single threaded mode). */
+    /* Return ASAP if IO threads are disabled (single threaded mode). 如果没有开启线程组模式 不需要做处理 */
     if (server.io_threads_num == 1) return 1;
 
+    // 当此时待处理任务数量不足 io线程的2倍 就可以开始关闭线程了
     if (pending < (server.io_threads_num*2)) {
         if (server.io_threads_active) stopThreadedIO();
         return 1;
@@ -3316,7 +3341,9 @@ int handleClientsWithPendingWritesUsingThreads(void) {
 /* Return 1 if we want to handle the client read later using threaded I/O.
  * This is called by the readable handler of the event loop.
  * As a side effect of calling this function the client is put in the
- * pending read clients and flagged as such. */
+ * pending read clients and flagged as such.
+ * 有关该client数据的读取是否被延时了
+ * */
 int postponeClientRead(client *c) {
     if (server.io_threads_active &&
         server.io_threads_do_reads &&
@@ -3337,7 +3364,9 @@ int postponeClientRead(client *c) {
  * process (instead of serving them synchronously). This function runs
  * the queue using the I/O threads, and process them in order to accumulate
  * the reads in the buffers, and also parse the first command available
- * rendering it in the client structures. */
+ * rendering it in the client structures.
+ * 使用这些io线程处理所有待读取数据
+ * */
 int handleClientsWithPendingReadsUsingThreads(void) {
     if (!server.io_threads_active || !server.io_threads_do_reads) return 0;
     int processed = listLength(server.clients_pending_read);
@@ -3350,6 +3379,8 @@ int handleClientsWithPendingReadsUsingThreads(void) {
     listNode *ln;
     listRewind(server.clients_pending_read,&li);
     int item_id = 0;
+
+    // 通过轮询算法 将client挂载到不同的线程上
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
         int target_id = item_id % server.io_threads_num;
@@ -3362,10 +3393,13 @@ int handleClientsWithPendingReadsUsingThreads(void) {
     io_threads_op = IO_THREADS_OP_READ;
     for (int j = 1; j < server.io_threads_num; j++) {
         int count = listLength(io_threads_list[j]);
+        // 更新每个线程此时待处理的任务数
         io_threads_pending[j] = count;
     }
 
-    /* Also use the main thread to process a slice of clients. */
+    /* Also use the main thread to process a slice of clients.
+     * 0对应的线程是主线程
+     * */
     listRewind(io_threads_list[0],&li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
@@ -3386,14 +3420,18 @@ int handleClientsWithPendingReadsUsingThreads(void) {
     while(listLength(server.clients_pending_read)) {
         ln = listFirst(server.clients_pending_read);
         client *c = listNodeValue(ln);
+        // 移除掉pending标记
         c->flags &= ~CLIENT_PENDING_READ;
         listDelNode(server.clients_pending_read,ln);
         /* Clients can become paused while executing the queued commands,
          * so we need to check in between each command. If a pause was
          * executed, we still remove the command and it will get picked up
-         * later when clients are unpaused and we re-queue all clients. */
+         * later when clients are unpaused and we re-queue all clients.
+         * 如果此时该client被暂停 跳过
+         * */
         if (clientsArePaused()) continue;
 
+        // TODO
         if (processPendingCommandsAndResetClient(c) == C_ERR) {
             /* If the client is no longer valid, we avoid
              * processing the client later. So we just go

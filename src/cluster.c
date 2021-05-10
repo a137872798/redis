@@ -5179,13 +5179,18 @@ void migrateCloseSocket(robj *host, robj *port) {
     sdsfree(name);
 }
 
+/**
+ * 关闭已经超时的socket
+ */
 void migrateCloseTimedoutSockets(void) {
     dictIterator *di = dictGetSafeIterator(server.migrate_cached_sockets);
     dictEntry *de;
 
     while((de = dictNext(di)) != NULL) {
+        // 遍历每个缓存的socket
         migrateCachedSocket *cs = dictGetVal(de);
 
+        // 判断距离最近一次使用时间是否超过了 ttl 是的话断开连接释放内存
         if ((server.unixtime - cs->last_use_time) > MIGRATE_SOCKET_CACHE_TTL) {
             connClose(cs->conn);
             zfree(cs);

@@ -2155,30 +2155,38 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* Start a scheduled AOF rewrite if this was requested by the user while
      * a BGSAVE was in progress.
-     * 当尝试为 aof/rdb开启子进程时 如果发现
+     * 当尝试为 aof/rdb开启子进程时 如果发现此时有其他子进程 就会打上一个延时的标记 这里是在检查标记
      * */
     if (!hasActiveChildProcess() &&
         server.aof_rewrite_scheduled)
     {
+        // 开启子进程 执行写入任务
         rewriteAppendOnlyFileBackground();
     }
 
     /* Check if a background saving or AOF rewrite in progress terminated. */
     if (hasActiveChildProcess() || ldbPendingChildren())
     {
+        // 这里会阻塞主进程 直到子进程完成了自己的任务
         checkChildrenDone();
     } else {
         /* If there is not a background saving/rewrite in progress check if
-         * we have to save/rewrite now. */
+         * we have to save/rewrite now.
+         * 遍历redisServer设置的保存条件 比如多少时间内有多少数据发生了变化 就会触发rdb保存
+         * */
         for (j = 0; j < server.saveparamslen; j++) {
+            // 遍历所有保存条件
             struct saveparam *sp = server.saveparams+j;
 
             /* Save if we reached the given amount of changes,
              * the given amount of seconds, and if the latest bgsave was
              * successful or if, in case of an error, at least
-             * CONFIG_BGSAVE_RETRY_DELAY seconds already elapsed. */
+             * CONFIG_BGSAVE_RETRY_DELAY seconds already elapsed.
+             * 只要满足任意一个保存条件 即触发rdb生成
+             * */
             if (server.dirty >= sp->changes &&
                 server.unixtime-server.lastsave > sp->seconds &&
+                // 后台进程开始存储数据的时间戳
                 (server.unixtime-server.lastbgsave_try >
                  CONFIG_BGSAVE_RETRY_DELAY ||
                  server.lastbgsave_status == C_OK))
@@ -2186,34 +2194,45 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
                 serverLog(LL_NOTICE,"%d changes in %d seconds. Saving...",
                     sp->changes, (int)sp->seconds);
                 rdbSaveInfo rsi, *rsiptr;
+                // 通过db信息填充saveInfo
                 rsiptr = rdbPopulateSaveInfo(&rsi);
                 rdbSaveBackground(server.rdb_filename,rsiptr);
                 break;
             }
         }
 
-        /* Trigger an AOF rewrite if needed. */
+        /* Trigger an AOF rewrite if needed.
+         * 这里的aof重做 好像就是生成aof文件
+         * 看来redis并没有追求强一致性 每次command并没有立即刷盘  会等待aof缓冲区中存储足够多的数据后 才进行刷盘
+         * */
         if (server.aof_state == AOF_ON &&
             !hasActiveChildProcess() &&
+            // 这里要求写入了aof增长比率
             server.aof_rewrite_perc &&
             server.aof_current_size > server.aof_rewrite_min_size)
         {
+            // 判断是否设置了重做的基本长度
             long long base = server.aof_rewrite_base_size ?
                 server.aof_rewrite_base_size : 1;
             long long growth = (server.aof_current_size*100/base) - 100;
             if (growth >= server.aof_rewrite_perc) {
                 serverLog(LL_NOTICE,"Starting automatic rewriting of AOF on %lld%% growth",growth);
+                // 将缓冲区中的数据写入到aof中 注意这里是开启子进程
                 rewriteAppendOnlyFileBackground();
             }
         }
     }
     /* Just for the sake of defensive programming, to avoid forgeting to
-     * call this function when need. */
+     * call this function when need.
+     * 因为此时开启了子进程 调整dict的resize
+     * */
     updateDictResizePolicy();
 
 
     /* AOF postponed flush: Try at every cron cycle if the slow fsync
-     * completed. */
+     * completed.
+     * 代表之前某次写入aof不是强制刷盘   这里尝试性刷盘 主要就是检测是否长时间未执行刷盘操作 是的话就会执行刷盘
+     * */
     if (server.aof_flush_postponed_start) flushAppendOnlyFile(0);
 
     /* AOF write errors: in this case we have a buffer to flush as well and
@@ -2225,8 +2244,12 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
             flushAppendOnlyFile(0);
     }
 
-    /* Clear the paused clients flag if needed. */
+    /* Clear the paused clients flag if needed.
+     * 检测某些client是否可以从阻塞状态中解除 惰性检测 同时这些client会被加入到 unblocked_clients 链表中
+     * */
     clientsArePaused(); /* Don't check return value, just use the side effect.*/
+
+    // TODO 先忽略有关副本和集群的定时任务
 
     /* Replication cron function -- used to reconnect to master,
      * detect transfer failures, start background RDB transfers and so forth. */
@@ -2237,21 +2260,29 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         if (server.cluster_enabled) clusterCron();
     }
 
-    /* Run the Sentinel timer if we are in sentinel mode. */
+    /* Run the Sentinel timer if we are in sentinel mode.
+     * TODO 忽略哨兵模式
+     * */
     if (server.sentinel_mode) sentinelTimer();
 
     /* Cleanup expired MIGRATE cached sockets. */
     run_with_period(1000) {
+        // 关闭一些已经超时的socket
         migrateCloseTimedoutSockets();
     }
 
-    /* Stop the I/O threads if we don't have enough pending work. */
+    /* Stop the I/O threads if we don't have enough pending work.
+     * 检查是否要暂停其他的io线程 默认情况下只使用一个io线程 但是当与其他client的交互工作加重的时候 就会需要使用额外的线程组
+     * 在暂停线程前会进尽可能处理完剩余任务
+     * */
     stopThreadedIOIfNeeded();
 
     /* Resize tracking keys table if needed. This is also done at every
      * command execution, but we want to be sure that if the last command
      * executed changes the value via CONFIG SET, the server will perform
-     * the operation even if completely idle. */
+     * the operation even if completely idle.
+     * TODO
+     * */
     if (server.tracking_clients) trackingLimitUsedSlots();
 
     /* Start a scheduled BGSAVE if the corresponding flag is set. This is
@@ -2260,7 +2291,9 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      *
      * Note: this code must be after the replicationCron() call above so
      * make sure when refactoring this file to keep this order. This is useful
-     * because we want to give priority to RDB savings for replication. */
+     * because we want to give priority to RDB savings for replication.
+     * 这里判断是否需要启动子进程处理rdb
+     * */
     if (!hasActiveChildProcess() &&
         server.rdb_bgsave_scheduled &&
         (server.unixtime-server.lastbgsave_try > CONFIG_BGSAVE_RETRY_DELAY ||
@@ -2272,12 +2305,13 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
             server.rdb_bgsave_scheduled = 0;
     }
 
-    /* Fire the cron loop modules event. */
+    /* Fire the cron loop modules event. 每当完成一次循环 发出一个事件 */
     RedisModuleCronLoopV1 ei = {REDISMODULE_CRON_LOOP_VERSION,server.hz};
     moduleFireServerEvent(REDISMODULE_EVENT_CRON_LOOP,
                           0,
                           &ei);
 
+    // 代表完成了一次主循环
     server.cronloops++;
     return 1000/server.hz;
 }
@@ -2297,11 +2331,14 @@ extern int ProcessingEventsWhileBlocked;
  * keys), but we do need to perform some actions.
  *
  * The most important is freeClientsInAsyncFreeQueue but we also
- * call some other low-risk functions. */
+ * call some other low-risk functions.
+ * 在redis的主循环线程中 在sleep前后会调用相关函数  该方法在sleep前调用
+ * */
 void beforeSleep(struct aeEventLoop *eventLoop) {
     UNUSED(eventLoop);
 
     size_t zmalloc_used = zmalloc_used_memory();
+    // 尝试更新内存使用峰值
     if (zmalloc_used > server.stat_peak_memory)
         server.stat_peak_memory = zmalloc_used;
 
@@ -2309,10 +2346,14 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * the event loop from processEventsWhileBlocked(). Note that in this
      * case we keep track of the number of events we are processing, since
      * processEventsWhileBlocked() wants to stop ASAP if there are no longer
-     * events to handle. */
+     * events to handle.
+     * 这里尝试处理之前所有阻塞的任务
+     * */
     if (ProcessingEventsWhileBlocked) {
         uint64_t processed = 0;
+        // 使用io线程组 尽可能多的处理此时client囤积的任务
         processed += handleClientsWithPendingReadsUsingThreads();
+        // 这个好像是ssl相关的 先忽略
         processed += tlsProcessPendingData();
         processed += handleClientsWithPendingWrites();
         processed += freeClientsInAsyncFreeQueue();
