@@ -7376,7 +7376,10 @@ int RM_ExitFromChild(int retcode) {
 
 /* Kill the active module forked child, if there is one active and the
  * pid matches, and returns C_OK. Otherwise if there is no active module
- * child or the pid does not match, return C_ERR without doing anything. */
+ * child or the pid does not match, return C_ERR without doing anything.
+ * 终止子进程
+ * @param child_pid 本次要关闭的子进程
+ * */
 int TerminateModuleForkChild(int child_pid, int wait) {
     /* Module child should be active and pid should match. */
     if (server.module_child_pid == -1 ||
@@ -7386,11 +7389,15 @@ int TerminateModuleForkChild(int child_pid, int wait) {
     int statloc;
     serverLog(LL_VERBOSE, "Killing running module fork child: %ld",
               (long) server.module_child_pid);
+    // 使用SIGUSR1信号去关闭module子进程
     if (kill(server.module_child_pid, SIGUSR1) != -1 && wait) {
+        // 如果 wait为true 循环直到进程被关闭
         while (wait4(server.module_child_pid, &statloc, 0, NULL) !=
                server.module_child_pid);
     }
-    /* Reset the buffer accumulating changes while the child saves. */
+    /* Reset the buffer accumulating changes while the child saves.
+     * 重置相关数据
+     * */
     server.module_child_pid = -1;
     moduleForkInfo.done_handler = NULL;
     moduleForkInfo.done_handler_user_data = NULL;
@@ -7409,14 +7416,19 @@ int RM_KillForkChild(int child_pid) {
         return REDISMODULE_ERR;
 }
 
+/**
+ * 当某个模块子进程被关闭时触发
+ */
 void ModuleForkDoneHandler(int exitcode, int bysignal) {
     serverLog(LL_NOTICE,
               "Module fork exited pid: %d, retcode: %d, bysignal: %d",
               server.module_child_pid, exitcode, bysignal);
+    // 如果为module设置了一个完成的后置函数 触发函数
     if (moduleForkInfo.done_handler) {
         moduleForkInfo.done_handler(exitcode, bysignal,
                                     moduleForkInfo.done_handler_user_data);
     }
+    // 进行一些清理工作
     server.module_child_pid = -1;
     moduleForkInfo.done_handler = NULL;
     moduleForkInfo.done_handler_user_data = NULL;

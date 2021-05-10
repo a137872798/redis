@@ -1312,7 +1312,9 @@ werr: /* Write error. */
     return C_ERR;
 }
 
-/* Save the DB on disk. Return C_ERR on error, C_OK on success. */
+/* Save the DB on disk. Return C_ERR on error, C_OK on success.
+ * 为当前db内的redisObject生成快照 并保存到rdb文件中
+ * */
 int rdbSave(char *filename, rdbSaveInfo *rsi) {
     char tmpfile[256];
     char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
@@ -2569,7 +2571,7 @@ static void backgroundSaveDoneHandlerSocket(int exitcode, int bysignal) {
 }
 
 /* When a background RDB saving/transfer terminates, call the right handler.
- * 当某个后台任务完成了rdb数据流的存储或者传输 前者对应disk 后者对应socket
+ * rdb子进程被完全回收时执行该方法
  * */
 void backgroundSaveDoneHandler(int exitcode, int bysignal) {
     int type = server.rdb_child_type;
@@ -2598,7 +2600,7 @@ void backgroundSaveDoneHandler(int exitcode, int bysignal) {
 /* Kill the RDB saving child using SIGUSR1 (so that the parent will know
  * the child did not exit for an error, but because we wanted), and performs
  * the cleanup needed.
- * 从外部关闭rdb子进程
+ * 从外部关闭rdb子进程  比如redis服务器收到终止指令时
  * */
 void killRDBChild(void) {
     kill(server.rdb_child_pid,SIGUSR1);

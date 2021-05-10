@@ -223,6 +223,7 @@ void killAppendOnlyChild(void) {
     /* Kill AOFRW child, wait for child exit. */
     serverLog(LL_NOTICE,"Killing running AOF rewrite child: %ld",
         (long) server.aof_child_pid);
+    // 使用SIGUSR1 应该就是代表用户自定义的信号
     if (kill(server.aof_child_pid,SIGUSR1) != -1) {
         while(wait3(&statloc,0,NULL) != server.aof_child_pid);
     }
@@ -362,7 +363,7 @@ ssize_t aofWrite(int fd, const char *buf, size_t len) {
 #define AOF_WRITE_LOG_ERROR_RATE 30 /* Seconds between errors logging. */
 
 /**
- * 在关闭aof前会触发该方法
+ * 将aof缓冲区的数据写入到文件中
  * @param force
  */
 void flushAppendOnlyFile(int force) {
@@ -1862,7 +1863,7 @@ void aofUpdateCurrentSize(void) {
 
 /* A background append only file rewriting (BGREWRITEAOF) terminated its work.
  * Handle this.
- * 当子进程完成了aof任务后
+ * 当aof子进程被回收后
  * */
 void backgroundRewriteDoneHandler(int exitcode, int bysignal) {
     // 进程正常退出

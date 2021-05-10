@@ -1483,7 +1483,7 @@ dictType replScriptCacheDictType = {
 };
 
 /**
- * 判断某个字典是否需要扩容
+ * 判断某个字典是否需要重新调整大小
  * @param dict
  * @return
  */
@@ -1492,13 +1492,14 @@ int htNeedsResize(dict *dict) {
 
     size = dictSlots(dict);
     used = dictSize(dict);
+    // 代表此时slot中已使用的部分 不足一个最小比例 就会进行resize (认为存在内存浪费)
     return (size > DICT_HT_INITIAL_SIZE &&
             (used*100/size < HASHTABLE_MIN_FILL));
 }
 
 /* If the percentage of used slots in the HT reaches HASHTABLE_MIN_FILL
  * we resize the hash table to save memory
- * 尝试为某个db扩容  每个db内存在2个dict对象 一个存储所有的redisObject 一个存储redisObject的超时时间
+ * 重新调整某个db的大小 每个db内存在2个dict对象 一个存储所有的redisObject 一个存储redisObject的超时时间
  * */
 void tryResizeHashTables(int dbid) {
     if (htNeedsResize(server.db[dbid].dict))
@@ -1514,7 +1515,7 @@ void tryResizeHashTables(int dbid) {
  *
  * The function returns 1 if some rehashing was performed, otherwise 0
  * is returned.
- * 如果某个db下的2个dict此时设置了 待rehash的标记 对他们进行重hash 这里有一个处理时间
+ * 给与某个db1毫秒的时间进行数据迁移  难怪dict内部需要2个hash桶 它是不希望一次性搬运全部数据 而是在每个serverCron周期内搬运一部分数据
  * */
 int incrementallyRehash(int dbid) {
     /* Keys dictionary */
@@ -1832,34 +1833,40 @@ void databasesCron(void) {
     }
 
     /* Defrag keys gradually.
-     * 进行碎片整理
+     * 如果开启了碎片整理功能 会进行碎片整理 默认情况下碎片整理是关闭的
      * */
     activeDefragCycle();
 
     /* Perform hash tables rehashing if needed, but only if there are no
      * other processes saving the DB on disk. Otherwise rehashing is bad
-     * as will cause a lot of copy-on-write of memory pages. */
+     * as will cause a lot of copy-on-write of memory pages.
+     * 此时没有开启任何子进程
+     * */
     if (!hasActiveChildProcess()) {
         /* We use global counters so if we stop the computation at a given
          * DB we'll be able to start from the successive in the next
          * cron loop iteration. */
         static unsigned int resize_db = 0;
         static unsigned int rehash_db = 0;
+
+        // 每次定时任务会处理多少个db
         int dbs_per_call = CRON_DBS_PER_CALL;
         int j;
 
         /* Don't test more DBs than we have. */
         if (dbs_per_call > server.dbnum) dbs_per_call = server.dbnum;
 
-        /* Resize */
+        /* Resize 对这些db的大小进行调整 因为上面可能会回收一些key 同时为了redis的性能问题 没有采用全局检查,而是抽象检查了部分key是否过期 */
         for (j = 0; j < dbs_per_call; j++) {
             tryResizeHashTables(resize_db % server.dbnum);
             resize_db++;
         }
 
         /* Rehash */
+        // 设置了需要rehash的标识
         if (server.activerehashing) {
             for (j = 0; j < dbs_per_call; j++) {
+                // 每轮只要能影响到一个db就可以了 剩余的数据会在下个时间周期内搬运
                 int work_done = incrementallyRehash(rehash_db);
                 if (work_done) {
                     /* If the function did some work, stop here, we'll do
@@ -1886,6 +1893,7 @@ void databasesCron(void) {
  * such info only when calling this function from serverCron() but not when
  * calling it from call().
  * 更新缓存的时间戳  这里缓存时间是为了避免频繁的调用系统函数
+ * 这个应该也是在主循环中调用
  * */
 void updateCachedTime(int update_daylight_info) {
     server.ustime = ustime();
@@ -1905,6 +1913,9 @@ void updateCachedTime(int update_daylight_info) {
     }
 }
 
+/**
+ * 检查某个子进程是否完成了任务
+ */
 void checkChildrenDone(void) {
     int statloc;
     pid_t pid;
@@ -1913,26 +1924,35 @@ void checkChildrenDone(void) {
      * child), we want to avoid collecting it's exit status and acting on it
      * as long as we didn't finish to drain the pipe, since then we're at risk
      * of starting a new fork and a new pipe before we're done with the previous
-     * one. */
+     * one.
+     * 这是一种特殊情况 此时不需要对rdb子进程进行检测
+     * */
     if (server.rdb_child_pid != -1 && server.rdb_pipe_conns)
         return;
 
+    // 等待子进程被彻底关闭  exit只是将子进程变成僵尸进程 WNOHANG 代表当没有子进程时 立即返回 而不是继续阻塞  返回值是收集到的子进程id 如果没有收集到进程则返回0
+    // 第三个参数就是获取采集到的子进程信息 这里传入null代表不需要采集
     if ((pid = wait3(&statloc,WNOHANG,NULL)) != 0) {
+        // 判断子进程是否是正常返回的
         int exitcode = WEXITSTATUS(statloc);
         int bysignal = 0;
 
+        // 代表是异常终止  WTERMSIG(statloc) 会获取到终止的异常信号
         if (WIFSIGNALED(statloc)) bysignal = WTERMSIG(statloc);
 
         /* sigKillChildHandler catches the signal and calls exit(), but we
          * must make sure not to flag lastbgsave_status, etc incorrectly.
          * We could directly terminate the child process via SIGUSR1
          * without handling it, but in this case Valgrind will log an
-         * annoying error. */
+         * annoying error.
+         * 代表本次子进程是由于信号被终止的
+         * */
         if (exitcode == SERVER_CHILD_NOERROR_RETVAL) {
             bysignal = SIGUSR1;
             exitcode = 1;
         }
 
+        // 代表本次wait3 异常退出了
         if (pid == -1) {
             serverLog(LL_WARNING,"wait3() returned an error: %s. "
                 "rdb_child_pid = %d, aof_child_pid = %d, module_child_pid = %d",
@@ -1940,9 +1960,14 @@ void checkChildrenDone(void) {
                 (int) server.rdb_child_pid,
                 (int) server.aof_child_pid,
                 (int) server.module_child_pid);
+
+            // 当正常回收进程时 父进程会接收子进程发送的一些数据
+
+            // 代表本次关闭的是一个rdb子进程
         } else if (pid == server.rdb_child_pid) {
             backgroundSaveDoneHandler(exitcode,bysignal);
             if (!bysignal && exitcode == 0) receiveChildInfo();
+            // 关闭aof子进程 会做一些资源清理
         } else if (pid == server.aof_child_pid) {
             backgroundRewriteDoneHandler(exitcode,bysignal);
             if (!bysignal && exitcode == 0) receiveChildInfo();
@@ -1950,13 +1975,16 @@ void checkChildrenDone(void) {
             ModuleForkDoneHandler(exitcode,bysignal);
             if (!bysignal && exitcode == 0) receiveChildInfo();
         } else {
+            // 此时回收的子进程pid没有匹配上任何一个子进程 认为本次回收的是一个ldb进程  TODO ldb是解析lua脚本的 先忽略吧
             if (!ldbRemoveChild(pid)) {
                 serverLog(LL_WARNING,
                     "Warning, detected child with unmatched pid: %ld",
                     (long)pid);
             }
         }
+        // 因为子进程被回收 此时dict允许被重新扩容了
         updateDictResizePolicy();
+        // 清理父子进程间的通道
         closeChildInfoPipe();
     }
 }
@@ -1978,8 +2006,8 @@ void checkChildrenDone(void) {
  * Everything directly called here will be called server.hz times per second,
  * so in order to throttle execution of things we want to do less frequently
  * a macro is used: run_with_period(milliseconds) { .... }
+ * 服务器主循环
  */
-
 int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     int j;
     UNUSED(eventLoop);
@@ -1987,16 +2015,22 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     UNUSED(clientData);
 
     /* Software watchdog: deliver the SIGALRM that will reach the signal
-     * handler if we don't return here fast enough. */
+     * handler if we don't return here fast enough.
+     * 设置一个看门狗
+     * */
     if (server.watchdog_period) watchdogScheduleSignal(server.watchdog_period);
 
-    /* Update the time cache. */
+    /* Update the time cache. 每一个服务器周期都会更新一次此时缓存的时间戳 */
     updateCachedTime(1);
 
+    // 频率应该就是每秒 serverCron的执行次数
     server.hz = server.config_hz;
     /* Adapt the server.hz value to the number of configured clients. If we have
-     * many clients, we want to call serverCron() with an higher frequency. */
+     * many clients, we want to call serverCron() with an higher frequency.
+     * 如果执行次数是动态调整的
+     * */
     if (server.dynamic_hz) {
+        // 通过将clients / hz 可以得到每一轮 serverCron预期处理的client数量 如果超过了每个时间周期处理的上限 通过增大频率来减少每次serverCron处理的client数量
         while (listLength(server.clients) / server.hz >
                MAX_CLIENTS_PER_CLOCK_TICK)
         {
@@ -2008,6 +2042,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         }
     }
 
+    // TODO 忽略统计数据
     run_with_period(100) {
         trackInstantaneousMetric(STATS_METRIC_COMMAND,server.stat_numcommands);
         trackInstantaneousMetric(STATS_METRIC_NET_INPUT,
@@ -2026,13 +2061,18 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * not likely.
      *
      * Note that you can change the resolution altering the
-     * LRU_CLOCK_RESOLUTION define. */
+     * LRU_CLOCK_RESOLUTION define.
+     * 每轮serverCron都会更新此时缓存的时间戳 这样也需要重新计算lruclock
+     * */
     server.lruclock = getLRUClock();
 
-    /* Record the max memory used since the server was started. */
+    /* Record the max memory used since the server was started.
+     * 更新使用的内存峰值
+     * */
     if (zmalloc_used_memory() > server.stat_peak_memory)
         server.stat_peak_memory = zmalloc_used_memory();
 
+    // TODO 忽略统计数据
     run_with_period(100) {
         /* Sample the RSS and other metrics here since this is a relatively slow call.
          * We must sample the zmalloc_used at the same time we take the rss, otherwise
@@ -2062,14 +2102,20 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
     /* We received a SIGTERM, shutting down here in a safe way, as it is
-     * not ok doing so inside the signal handler. */
+     * not ok doing so inside the signal handler.
+     * 发现存在尽快终止服务器的标识 此时尝试终止服务器
+     * */
     if (server.shutdown_asap) {
+        // 当准备完毕时 直接退出进程
         if (prepareForShutdown(SHUTDOWN_NOFLAGS) == C_OK) exit(0);
+        // 当发现此时不适合终止服务器时 清除标记 比如此时aof正在进行数据重做
         serverLog(LL_WARNING,"SIGTERM received but errors trying to shut down the server, check the logs for more information");
         server.shutdown_asap = 0;
     }
 
-    /* Show some info about non-empty databases */
+    /* Show some info about non-empty databases
+     * 每隔一段时间打印db相关的日志
+     * */
     run_with_period(5000) {
         for (j = 0; j < server.dbnum; j++) {
             long long size, used, vkeys;
@@ -2084,7 +2130,9 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         }
     }
 
-    /* Show information about connected clients */
+    /* Show information about connected clients
+     * 代表采用的是集群模式 每个一定时间打印所有的slave信息
+     * */
     if (!server.sentinel_mode) {
         run_with_period(5000) {
             serverLog(LL_DEBUG,
@@ -2095,14 +2143,20 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         }
     }
 
-    /* We need to do a few operations on clients asynchronously. */
+    /* We need to do a few operations on clients asynchronously.
+     * 主要是检查某些client连接是否长时间未交互 是否要断开连接 以及统计一些数据
+     * */
     clientsCron();
 
-    /* Handle background operations on Redis databases. */
+    /* Handle background operations on Redis databases.
+     * 抽样检查db中的过期key  抽样的目的是在每次循环中占用的时间比重少 主流程无感知 而由于db是单进程访问,不需要加锁。所以又提高了性能
+     * */
     databasesCron();
 
     /* Start a scheduled AOF rewrite if this was requested by the user while
-     * a BGSAVE was in progress. */
+     * a BGSAVE was in progress.
+     * 当尝试为 aof/rdb开启子进程时 如果发现
+     * */
     if (!hasActiveChildProcess() &&
         server.aof_rewrite_scheduled)
     {
@@ -3954,29 +4008,41 @@ void closeListeningSockets(int unlink_unix_socket) {
     }
 }
 
+/**
+ * 准备关闭redis服务器
+ * @param flags
+ * @return
+ */
 int prepareForShutdown(int flags) {
     /* When SHUTDOWN is called while the server is loading a dataset in
      * memory we need to make sure no attempt is performed to save
      * the dataset on shutdown (otherwise it could overwrite the current DB
      * with half-read data).
      *
-     * Also when in Sentinel mode clear the SAVE flag and force NOSAVE. */
+     * Also when in Sentinel mode clear the SAVE flag and force NOSAVE.
+     * 此时还处于数据恢复阶段 或者本次以哨兵模式启动的服务器   这些标记是用来确定是否要在终止redis时存储一份rdb数据的
+     * */
     if (server.loading || server.sentinel_mode)
+        // 清除save标记 并设置一个nosave的标记
         flags = (flags & ~SHUTDOWN_SAVE) | SHUTDOWN_NOSAVE;
 
     int save = flags & SHUTDOWN_SAVE;
     int nosave = flags & SHUTDOWN_NOSAVE;
 
     serverLog(LL_WARNING,"User requested shutdown...");
+    // 如果开启了指导模式 就是输出一些提示信息
     if (server.supervised_mode == SUPERVISED_SYSTEMD)
         redisCommunicateSystemd("STOPPING=1\n");
 
-    /* Kill all the Lua debugger forked sessions. */
+    /* Kill all the Lua debugger forked sessions.
+     * 先忽略 lua
+     * */
     ldbKillForkedSessions();
 
     /* Kill the saving child if there is a background saving in progress.
        We want to avoid race conditions, for instance our saving child may
        overwrite the synchronous saving did by SHUTDOWN. */
+    // 关闭rdb子进程
     if (server.rdb_child_pid != -1) {
         serverLog(LL_WARNING,"There is a child saving an .rdb. Killing it!");
         /* Note that, in killRDBChild, we call rdbRemoveTempFile that will
@@ -3986,67 +4052,86 @@ int prepareForShutdown(int flags) {
         killRDBChild();
     }
 
-    /* Kill module child if there is one. */
+    /* Kill module child if there is one.
+     * 如果此时存在module子进程  关闭
+     * */
     if (server.module_child_pid != -1) {
         serverLog(LL_WARNING,"There is a module fork child. Killing it!");
+        // 以非等待模式关闭子进程
         TerminateModuleForkChild(server.module_child_pid,0);
     }
 
+    // 如果此时aof处于开启状态检测是否要关闭aof进程
     if (server.aof_state != AOF_OFF) {
         /* Kill the AOF saving child as the AOF we already have may be longer
-         * but contains the full dataset anyway. */
+         * but contains the full dataset anyway.
+         * 如果此时aof子进程处于工作状态 尝试关闭
+         * */
         if (server.aof_child_pid != -1) {
             /* If we have AOF enabled but haven't written the AOF yet, don't
-             * shutdown or else the dataset will be lost. */
+             * shutdown or else the dataset will be lost.
+             * 此时正处于数据恢复 不适合终止aof子进程
+             * */
             if (server.aof_state == AOF_WAIT_REWRITE) {
                 serverLog(LL_WARNING, "Writing initial AOF, can't exit.");
                 return C_ERR;
             }
             serverLog(LL_WARNING,
                 "There is a child rewriting the AOF. Killing it!");
+            // 杀死aof子进程
             killAppendOnlyChild();
         }
         /* Append only file: flush buffers and fsync() the AOF at exit */
         serverLog(LL_NOTICE,"Calling fsync() on the AOF file.");
+        // 将aof缓冲区的数据写入到文件中
         flushAppendOnlyFile(1);
+        // 强制刷盘
         redis_fsync(server.aof_fd);
     }
 
-    /* Create a new RDB file before exiting. */
+    /* Create a new RDB file before exiting.
+     * 如果此时存在一些保存点 nosave的含义是???
+     * 或者此时强制要求save  都会生成一份rdb数据
+     * */
     if ((server.saveparamslen > 0 && !nosave) || save) {
         serverLog(LL_NOTICE,"Saving the final RDB snapshot before exiting.");
+        // TODO
         if (server.supervised_mode == SUPERVISED_SYSTEMD)
             redisCommunicateSystemd("STATUS=Saving the final RDB snapshot\n");
         /* Snapshotting. Perform a SYNC SAVE and exit */
         rdbSaveInfo rsi, *rsiptr;
+        // 从server上获取一些信息 并填充到rdbSaveInfo中
         rsiptr = rdbPopulateSaveInfo(&rsi);
+        // 生成快照数据 并保存到rdb文件中
         if (rdbSave(server.rdb_filename,rsiptr) != C_OK) {
             /* Ooops.. error saving! The best we can do is to continue
              * operating. Note that if there was a background saving process,
              * in the next cron() Redis will be notified that the background
              * saving aborted, handling special stuff like slaves pending for
              * synchronization... */
-            serverLog(LL_WARNING,"Error trying to save the DB, can't exit.");
-            if (server.supervised_mode == SUPERVISED_SYSTEMD)
-                redisCommunicateSystemd("STATUS=Error trying to save the DB, can't exit.\n");
-            return C_ERR;
-        }
-    }
 
-    /* Fire the shutdown modules event. */
+    /* Fire the shutdown modules event.
+     * 触发一个终止事件
+     * */
     moduleFireServerEvent(REDISMODULE_EVENT_SHUTDOWN,0,NULL);
 
-    /* Remove the pid file if possible and needed. */
+    /* Remove the pid file if possible and needed.
+     * 当运行在守护进程 或者保存了进程文件时 尝试清理进程文件
+     * */
     if (server.daemonize || server.pidfile) {
         serverLog(LL_NOTICE,"Removing the pid file.");
         unlink(server.pidfile);
     }
 
     /* Best effort flush of slave output buffers, so that we hopefully
-     * send them pending writes. */
+     * send them pending writes.
+     * 将此时还留存在缓冲区中的数据尽可能写出
+     * */
     flushSlavesOutputBuffers();
 
-    /* Close the listening sockets. Apparently this allows faster restarts. */
+    /* Close the listening sockets. Apparently this allows faster restarts.
+     * 此时已经写完全部数据  不再监听sockt
+     * */
     closeListeningSockets(1);
     serverLog(LL_WARNING,"%s is now ready to exit, bye bye...",
         server.sentinel_mode ? "Sentinel" : "Redis");

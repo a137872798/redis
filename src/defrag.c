@@ -1057,11 +1057,12 @@ void computeDefragCycles() {
     }
 }
 
-/* Perform incremental defragmentation work from the serverCron.
+/**
+ * Perform incremental defragmentation work from the serverCron.
  * This works in a similar way to activeExpireCycle, in the sense that
  * we do incremental work across calls.
  * 针对此时存在的每个db 进行碎片整理
- * */
+ * /
 void activeDefragCycle(void) {
     static int current_db = -1;
     static unsigned long cursor = 0;

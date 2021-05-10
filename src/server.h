@@ -352,7 +352,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define SUPERVISED_SYSTEMD 2
 #define SUPERVISED_UPSTART 3
 
-/* Anti-warning macro... */
+/* Anti-warning macro... 仅仅是为了消除警告信息 */
 #define UNUSED(V) ((void) V)
 
 #define ZSKIPLIST_MAXLEVEL 32 /* Should be enough for 2^64 elements */
@@ -830,6 +830,8 @@ typedef struct client {
     time_t obuf_soft_limit_reached_time;
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
     int authenticated;      /* Needed when the default user requires auth. */
+
+    // 该client作为slave节点在集群中的状态 比如是否在线
     int replstate;          /* Replication state if this is a slave. */
     int repl_put_online_on_ack; /* Install slave write handler on first ACK. */
     int repldbfd;           /* Replication DB file descriptor. */
@@ -1085,7 +1087,9 @@ struct redisServer {
     dict *orig_commands;        /* Command table before command renaming. */
     aeEventLoop *el;
     _Atomic unsigned int lruclock; /* Clock for LRU eviction */
+    // 代表需要尽可能快的终止应用
     volatile sig_atomic_t shutdown_asap; /* SHUTDOWN needed ASAP */
+    // 如果设置了该标识 就代表需要在 serverCron中进行rehash
     int activerehashing;        /* Incremental rehash in serverCron() */
     int active_defrag_running;  /* Active defragmentation running (holds current scan aggressiveness) */
     char *pidfile;              /* PID file path */
@@ -1224,6 +1228,7 @@ struct redisServer {
     int dbnum;                      /* Total number of configured DBs */
     int supervised;                 /* 1 if supervised, 0 otherwise. */
     int supervised_mode;            /* See SUPERVISED_* */
+    // 是否允许在守护进程中
     int daemonize;                  /* True if running as a daemon */
     clientBufferLimitsConfig client_obuf_limits[CLIENT_TYPE_OBUF_COUNT];
     /* AOF persistence */
@@ -1276,7 +1281,7 @@ struct redisServer {
     // 此时执行rdb的子进程id
     pid_t rdb_child_pid;            /* PID of RDB saving child */
     struct saveparam *saveparams;   /* Save points array for RDB */
-    // 如果该值为0 且aof_state为off 代表此时关闭了aof/rdb
+    // 如果该值为0 且aof_state为off 代表此时关闭了aof/rdb     保存点数量???
     int saveparamslen;              /* Number of saving points */
     char *rdb_filename;             /* Name of RDB file */
     int rdb_compression;            /* Use compression in RDB? */
@@ -1297,6 +1302,8 @@ struct redisServer {
     int stop_writes_on_bgsave_err;  /* Don't allow writes if can't BGSAVE */
     int rdb_pipe_write;             /* RDB pipes used to transfer the rdb */
     int rdb_pipe_read;              /* data to the parent process in diskless repl. */
+
+    // rdb数据流会通过这里连接传播到slave节点上
     connection **rdb_pipe_conns;    /* Connections which are currently the */
     int rdb_pipe_numconns;          /* target of diskless rdb fork child. */
     int rdb_pipe_numconns_writing;  /* Number of rdb conns with pending writes. */
@@ -2084,6 +2091,7 @@ struct redisMemOverhead *getMemoryOverheadData(void);
 void freeMemoryOverheadData(struct redisMemOverhead *mh);
 void checkChildrenDone(void);
 int setOOMScoreAdj(int process_class);
+
 
 #define RESTART_SERVER_NONE 0
 #define RESTART_SERVER_GRACEFULLY (1<<0)     /* Do proper shutdown. */

@@ -897,7 +897,9 @@ void copyClientOutputBuffer(client *dst, client *src) {
 }
 
 /* Return true if the specified client has pending reply buffers to write to
- * the socket. */
+ * the socket.
+ * 代表该client对应的缓冲区中有数据未发出
+ * */
 int clientHasPendingReplies(client *c) {
     return c->bufpos || listLength(c->reply);
 }
@@ -1373,7 +1375,9 @@ client *lookupClientByID(uint64_t id) {
  *
  * This function is called by threads, but always with handler_installed
  * set to 0. So when handler_installed is set to 0 the function must be
- * thread safe. */
+ * thread safe.
+ * 将针对该client的写缓冲区中剩余的数据写入到client
+ * */
 int writeToClient(client *c, int handler_installed) {
     /* Update total number of writes on server */
     server.stat_total_writes_processed++;
@@ -1383,6 +1387,7 @@ int writeToClient(client *c, int handler_installed) {
     clientReplyBlock *o;
 
     while(clientHasPendingReplies(c)) {
+        // 此时buf中有数据 将buf中的数据通过conn发送
         if (c->bufpos > 0) {
             nwritten = connWrite(c->conn,c->buf+c->sentlen,c->bufpos-c->sentlen);
             if (nwritten <= 0) break;
@@ -1396,6 +1401,7 @@ int writeToClient(client *c, int handler_installed) {
                 c->sentlen = 0;
             }
         } else {
+            // 查看reply中是否有待发送数据
             o = listNodeValue(listFirst(c->reply));
             objlen = o->used;
 
@@ -1410,7 +1416,9 @@ int writeToClient(client *c, int handler_installed) {
             c->sentlen += nwritten;
             totwritten += nwritten;
 
-            /* If we fully sent the object on head go to the next one */
+            /* If we fully sent the object on head go to the next one
+             * 代表当前reply节点的数据都已经发送完毕 切换到下一个节点
+             * */
             if (c->sentlen == objlen) {
                 c->reply_bytes -= o->size;
                 listDelNode(c->reply,listFirst(c->reply));
@@ -1432,7 +1440,9 @@ int writeToClient(client *c, int handler_installed) {
          *
          * Moreover, we also send as much as possible if the client is
          * a slave or a monitor (otherwise, on high-speed traffic, the
-         * replication/output buffer will grow indefinitely) */
+         * replication/output buffer will grow indefinitely)
+         * 如果本次发送目标是slave是没有限流的 其他类型的client 每次返回的数据有限 应该是为了节省网络带宽
+         * */
         if (totwritten > NET_MAX_WRITES_PER_EVENT &&
             (server.maxmemory == 0 ||
              zmalloc_used_memory() < server.maxmemory) &&
@@ -1442,6 +1452,7 @@ int writeToClient(client *c, int handler_installed) {
     if (nwritten == -1) {
         if (connGetState(c->conn) == CONN_STATE_CONNECTED) {
             nwritten = 0;
+            // 检查是否是由于连接已经断开
         } else {
             serverLog(LL_VERBOSE,
                 "Error writing to client: %s", connGetLastError(c->conn));
@@ -1449,6 +1460,7 @@ int writeToClient(client *c, int handler_installed) {
             return C_ERR;
         }
     }
+    // 更新最后一次与该client交互的时间戳
     if (totwritten > 0) {
         /* For clients representing masters we don't count sending data
          * as an interaction, since we always send REPLCONF ACK commands
@@ -2920,7 +2932,9 @@ void asyncCloseClientOnOutputBufferLimitReached(client *c) {
 /* Helper function used by freeMemoryIfNeeded() in order to flush slaves
  * output buffers without returning control to the event loop.
  * This is also called by SHUTDOWN for a best-effort attempt to send
- * slaves the latest writes. */
+ * slaves the latest writes.
+ * 将slave节点写缓冲区的数据尽可能的发出
+ * */
 void flushSlavesOutputBuffers(void) {
     listIter li;
     listNode *ln;
@@ -2928,6 +2942,7 @@ void flushSlavesOutputBuffers(void) {
     listRewind(server.slaves,&li);
     while((ln = listNext(&li))) {
         client *slave = listNodeValue(ln);
+        // 如果conn上绑定了writeHandler 或者打上了pendingWrite标记
         int can_receive_writes = connHasWriteHandler(slave->conn) ||
                                  (slave->flags & CLIENT_PENDING_WRITE);
 
@@ -2944,12 +2959,15 @@ void flushSlavesOutputBuffers(void) {
          *    flag for this flag.
          *
          * 3. Obviously if the slave is not ONLINE.
+         * 此时该slave处于在线状态并且还有未发出的数据 并且此时不在等待ack
          */
         if (slave->replstate == SLAVE_STATE_ONLINE &&
             can_receive_writes &&
             !slave->repl_put_online_on_ack &&
+            // 针对该client还有囤积的数据未发出
             clientHasPendingReplies(slave))
         {
+            // 将剩余数据发送到slave
             writeToClient(slave,0);
         }
     }
