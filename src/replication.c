@@ -209,7 +209,8 @@ void feedReplicationBacklogWithObject(robj *o) {
  * the commands received by our clients in order to create the replication
  * stream. Instead if the instance is a slave and has sub-slaves attached,
  * we use replicationFeedSlavesFromMasterStream()
- * 为某个db生成一个command 并会传播到slaves上
+ * 将某个命令发往slaves中的所有节点
+ * @param dictid 因为每个command都是以db为单位进行同步的 这里是当前要同步的db
  * */
 void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
     listNode *ln;
@@ -221,17 +222,24 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
      * the stream of data we receive from our master instead, in order to
      * propagate *identical* replication stream. In this way this slave can
      * advertise the same replication ID as the master (since it shares the
-     * master replication history and has the same backlog and offsets). */
+     * master replication history and has the same backlog and offsets).
+     * 非master节点 无法发送同步请求
+     * */
     if (server.masterhost != NULL) return;
 
     /* If there aren't slaves, and there is no backlog buffer to populate,
-     * we can return ASAP. */
+     * we can return ASAP.
+     * 如果本次slaves 列表为空 不需要发送数据
+     * TODO 前半句是什么意思???
+     * */
     if (server.repl_backlog == NULL && listLength(slaves) == 0) return;
 
     /* We can't have slaves attached and no backlog. */
     serverAssert(!(listLength(slaves) != 0 && server.repl_backlog == NULL));
 
-    /* Send SELECT command to every slave if needed. */
+    /* Send SELECT command to every slave if needed.
+     * TODO 先假设两者是一致的
+     * */
     if (server.slaveseldb != dictid) {
         robj *selectcmd;
 
