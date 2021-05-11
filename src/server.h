@@ -219,6 +219,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_MULTI (1<<3)   /* This client is in a MULTI context */
 #define CLIENT_BLOCKED (1<<4) /* The client is waiting in a blocking operation */
 #define CLIENT_DIRTY_CAS (1<<5) /* Watched keys modified. EXEC will fail. */
+// 当本次写缓冲区内的数据发送完毕后即可关闭client
 #define CLIENT_CLOSE_AFTER_REPLY (1<<6) /* Close after writing entire reply. */
 #define CLIENT_UNBLOCKED (1<<7) /* This client was unblocked and is stored in
                                   server.unblocked_clients */
@@ -655,7 +656,9 @@ char *getObjectTypeName(robj*);
 struct evictionPoolEntry; /* Defined in evict.c */
 
 /* This structure is used in order to represent the output buffer of a client,
- * which is actually a linked list of blocks like that, that is: client->reply. */
+ * which is actually a linked list of blocks like that, that is: client->reply.
+ * reply链表由一个个内存块组成
+ * */
 typedef struct clientReplyBlock {
     size_t size, used;
     char buf[];
@@ -812,13 +815,17 @@ typedef struct client {
     size_t querybuf_peak;   /* Recent (100ms or more) peak of querybuf size. */
     int argc;               /* Num of arguments of current command. */
     robj **argv;            /* Arguments of current command. */
+    // 此时argv参数总长度 (非数量)
     size_t argv_len_sum;    /* Sum of lengths of objects in argv list. */
     struct redisCommand *cmd, *lastcmd;  /* Last command executed. */
     user *user;             /* User associated with this connection. If the
                                user is set to NULL the connection can do
                                anything (admin). */
     int reqtype;            /* Request protocol type: PROTO_REQ_* */
+
+    // 本次解析bulk协议后发现有多少个待处理command
     int multibulklen;       /* Number of multi bulk arguments left to read. */
+    // 每当解析一个bulk协议时，内部会包含多个bulk请求，该length对应单个请求的长度
     long bulklen;           /* Length of bulk argument in multi bulk request. */
     list *reply;            /* List of reply objects to send to the client. */
     unsigned long long reply_bytes; /* Tot bytes of objects in reply list. */
@@ -827,6 +834,8 @@ typedef struct client {
     time_t ctime;           /* Client creation time. */
     // 与该client的最后一次交互 主要是判断某个client是否长时间未交互 并决定是否要断开连接
     time_t lastinteraction; /* Time of the last interaction, used for timeout */
+
+    // 为某个client分配的内存大小 达到了软限制
     time_t obuf_soft_limit_reached_time;
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
     int authenticated;      /* Needed when the default user requires auth. */
@@ -1127,11 +1136,15 @@ struct redisServer {
     int cfd[CONFIG_BINDADDR_MAX];/* Cluster bus listening socket */
     int cfd_count;              /* Used slots in cfd[] */
     list *clients;              /* List of active clients */
+
+    // 即将被关闭的client会存入到该链表 (这些client会被打上close_asap标记)
     list *clients_to_close;     /* Clients to close asynchronously */
     // 代表此时有多少待写任务
     list *clients_pending_write; /* There is to write or install handler. */
     list *clients_pending_read;  /* Client has pending read socket buffers. */
     list *slaves, *monitors;    /* List of slaves and MONITORs */
+
+    // 此时server正在执行哪个client的command
     client *current_client;     /* Current client executing the command. */
     rax *clients_timeout_table; /* Radix tree for blocked clients timeouts. */
     long fixed_time_expire;     /* If > 0, expire keys against server.mstime. */

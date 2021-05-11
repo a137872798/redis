@@ -47,8 +47,12 @@ void addReplyGopherItem(client *c, const char *type, const char *descr,
 /* This is called by processInputBuffer() when an inline request is processed
  * with Gopher mode enabled, and the request happens to have zero or just one
  * argument. In such case we get the relevant key and reply using the Gopher
- * protocol. */
+ * protocol.
+ * 在处理从client读取的数据时 如果发现本次是一个内联协议 并且本次参数是0～1个 就会开启小田鼠模式
+ * */
 void processGopherRequest(client *c) {
+    // 一般情况下 每次数据流中第一个参数就是db.key 代表本次要操作哪个redisObject
+    // 参数为0时 认为key是 "/"
     robj *keyname = c->argc == 0 ? createStringObject("/",1) : c->argv[0];
     robj *o = lookupKeyRead(c->db,keyname);
 

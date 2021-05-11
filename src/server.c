@@ -2351,7 +2351,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * */
     if (ProcessingEventsWhileBlocked) {
         uint64_t processed = 0;
-        // 使用io线程组 尽可能多的处理此时client囤积的任务
+        // 使用io线程组 尽可能多的 处理此时client囤积的任务
         processed += handleClientsWithPendingReadsUsingThreads();
         // 这个好像是ssl相关的 先忽略
         processed += tlsProcessPendingData();
@@ -3779,7 +3779,9 @@ void rejectCommandFormat(client *c, const char *fmt, ...) {
  *
  * If C_OK is returned the client is still alive and valid and
  * other operations can be performed by the caller. Otherwise
- * if C_ERR is returned the client was destroyed (i.e. after QUIT). */
+ * if C_ERR is returned the client was destroyed (i.e. after QUIT).
+ * 执行command
+ * */
 int processCommand(client *c) {
     moduleCallCommandFilters(c);
 
