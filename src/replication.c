@@ -3011,7 +3011,9 @@ void replicationRequestAckFromSlaves(void) {
 }
 
 /* Return the number of slaves that already acknowledged the specified
- * replication offset. */
+ * replication offset.
+ * 判断有多少slave节点的同步offset(以ack的形式进行上报) 达到了要求值
+ * */
 int replicationCountAcksByOffset(long long offset) {
     listIter li;
     listNode *ln;
@@ -3021,6 +3023,7 @@ int replicationCountAcksByOffset(long long offset) {
     while((ln = listNext(&li))) {
         client *slave = ln->value;
 
+        // 代表当前slave节点与server断开连接
         if (slave->replstate != SLAVE_STATE_ONLINE) continue;
         if (slave->repl_ack_off >= offset) count++;
     }
@@ -3077,7 +3080,7 @@ void unblockClientWaitingReplicas(client *c) {
 
 /* Check if there are clients blocked in WAIT that can be unblocked since
  * we received enough ACKs from slaves.
- * 处理所有等待数据复写的client
+ * TODO 主要用于检测主副本间数据同步是否完成
  * */
 void processClientsWaitingReplicas(void) {
     long long last_offset = 0;
@@ -3100,6 +3103,7 @@ void processClientsWaitingReplicas(void) {
             unblockClient(c);
             addReplyLongLong(c,last_numreplicas);
         } else {
+            // 推测是本节点同步数据时收到了多少slave的ack信息 每当同步一次后就会推进offset 当offset追赶上后 就可以继续同步数据了
             int numreplicas = replicationCountAcksByOffset(c->bpop.reploffset);
 
             if (numreplicas >= c->bpop.numreplicas) {

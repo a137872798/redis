@@ -96,16 +96,17 @@ void blockClient(client *c, int btype) {
 /* This function is called in the beforeSleep() function of the event loop
  * in order to process the pending input buffer of clients that were
  * unblocked after a blocking operation.
- * 处理未阻塞的client
+ * 处理未阻塞的client command
  * */
 void processUnblockedClients(void) {
     listNode *ln;
     client *c;
 
-    // 这里遍历每个client 取消未阻塞的标记
     while (listLength(server.unblocked_clients)) {
         /* If clients are paused we yield for now, since
-         * we don't want to process any commands later. */
+         * we don't want to process any commands later.
+         * 如果此时server暂停了所有client  忽略本次处理
+         * */
         if (clientsArePaused()) return;
         ln = listFirst(server.unblocked_clients);
         serverAssert(ln != NULL);
@@ -116,15 +117,19 @@ void processUnblockedClients(void) {
         /* Process remaining data in the input buffer, unless the client
          * is blocked again. Actually processInputBuffer() checks that the
          * client is not blocked before to proceed, but things may change and
-         * the code is conceptually more correct this way. */
+         * the code is conceptually more correct this way.
+         * 只处理未被标记成 blocked的client
+         * */
         if (!(c->flags & CLIENT_BLOCKED)) {
-            /* If we have a queued command, execute it now. */
+            /* If we have a queued command, execute it now.
+             * 检查该client是否设置了pending_command标记 并执行command
+             * */
             if (processPendingCommandsAndResetClient(c) == C_ERR) {
                 continue;
             }
             /* Then process client if it has more data in it's buffer. */
             if (c->querybuf && sdslen(c->querybuf) > 0) {
-                // 将querybuf中的数据 转换成command 以及相关参数
+                // 将querybuf中的数据 转换成command 以及相关参数 并执行command
                 processInputBuffer(c);
             }
         }

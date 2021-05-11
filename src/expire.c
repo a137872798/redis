@@ -133,6 +133,7 @@ int activeExpireCycleTryExpire(redisDb *db, dictEntry *de, long long now) {
 /**
  * 如果本节点是master节点 在dbCron中会定期触发该方法
  * @param type 检测模式  在dbCron中触发采用的是slow检测模式
+ *                      在beforeSleep中触发采用的是fast检测模式
  */
 void activeExpireCycle(int type) {
     /* Adjust the running parameters according to the configured expire
@@ -171,7 +172,7 @@ void activeExpireCycle(int type) {
      * */
     if (clientsArePaused()) return;
 
-    // TODO
+    // 如果本次在快速模式下执行
     if (type == ACTIVE_EXPIRE_CYCLE_FAST) {
         /* Don't start a fast cycle if the previous cycle did not exit
          * for time limit, unless the percentage of estimated stale keys is

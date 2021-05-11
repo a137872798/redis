@@ -2351,49 +2351,65 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * */
     if (ProcessingEventsWhileBlocked) {
         uint64_t processed = 0;
-        // 使用io线程组 尽可能多的 处理此时client囤积的任务
+        // 使用io线程组 尽可能多的 处理此时client囤积的任务 (主要指querybuf的数据读取,解析,执行command)
         processed += handleClientsWithPendingReadsUsingThreads();
         // 这个好像是ssl相关的 先忽略
         processed += tlsProcessPendingData();
+        // 这里是处理囤积的write任务
         processed += handleClientsWithPendingWrites();
+        // 在这里统一关闭所有待关闭client
         processed += freeClientsInAsyncFreeQueue();
         server.events_processed_while_blocked += processed;
         return;
     }
 
-    /* Handle precise timeouts of blocked clients. */
+    /* Handle precise timeouts of blocked clients.
+     * 检测哪些之前处于blocked状态的client可以恢复
+     * */
     handleBlockedClientsTimeout();
 
-    /* We should handle pending reads clients ASAP after event loop. */
+    /* We should handle pending reads clients ASAP after event loop.
+     * 使用io线程处理所有待读取的数据
+     * */
     handleClientsWithPendingReadsUsingThreads();
 
     /* Handle TLS pending data. (must be done before flushAppendOnlyFile) */
     tlsProcessPendingData();
 
-    /* If tls still has pending unread data don't sleep at all. */
+    /* If tls still has pending unread data don't sleep at all.
+     * TODO tls
+     * */
     aeSetDontWait(server.el, tlsHasPendingData());
 
     /* Call the Redis Cluster before sleep function. Note that this function
      * may change the state of Redis Cluster (from ok to fail or vice versa),
      * so it's a good idea to call it before serving the unblocked clients
-     * later in this function. */
+     * later in this function.
+     * TODO 如果当前处于集群模式 还会执行一些集群相关的前置操作
+     * */
     if (server.cluster_enabled) clusterBeforeSleep();
 
     /* Run a fast expire cycle (the called function will return
-     * ASAP if a fast cycle is not needed). */
+     * ASAP if a fast cycle is not needed).
+     * 如果非集群模式下 会执行一个db过期key的快速检索 TODO
+     * */
     if (server.active_expire_enabled && server.masterhost == NULL)
         activeExpireCycle(ACTIVE_EXPIRE_CYCLE_FAST);
 
     /* Unblock all the clients blocked for synchronous replication
-     * in WAIT. */
+     * in WAIT.
+     * 处理所有等待ack信息的client  只有开启集群模式 在replication中才会将client加入到waiting_ack队列中
+     * */
     if (listLength(server.clients_waiting_acks))
         processClientsWaitingReplicas();
 
     /* Check if there are clients unblocked by modules that implement
-     * blocking commands. */
+     * blocking commands. TODO */
     if (moduleCount()) moduleHandleBlockedClients();
 
-    /* Try to process pending commands for clients that were just unblocked. */
+    /* Try to process pending commands for clients that were just unblocked.
+     * 针对所有未阻塞的client 尝试执行他们存储的command
+     * */
     if (listLength(server.unblocked_clients))
         processUnblockedClients();
 
@@ -2401,7 +2417,9 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * during the previous event loop iteration. Note that we do this after
      * processUnblockedClients(), so if there are multiple pipelined WAITs
      * and the just unblocked WAIT gets blocked again, we don't have to wait
-     * a server cron cycle in absence of other event loop events. See #6623. */
+     * a server cron cycle in absence of other event loop events. See #6623.
+     * 在其他时机点可能会设置一个需要往所有slave节点发送ack请求的标记 这里发现该标记后 将请求发往各个slave
+     * */
     if (server.get_ack_from_slaves) {
         robj *argv[3];
 

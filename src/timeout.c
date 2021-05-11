@@ -158,7 +158,7 @@ void removeClientFromTimeoutTable(client *c) {
 
 /* This function is called in beforeSleep() in order to unblock clients
  * that are waiting in blocking operations with a timeout set.
- * 处理那些阻塞超时的client
+ * 检查某些client是否已经可以从阻塞状态中解除
  * */
 void handleBlockedClientsTimeout(void) {
     // 看来 timeout_table 中记录了所有超时client

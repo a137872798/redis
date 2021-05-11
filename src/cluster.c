@@ -3722,10 +3722,14 @@ void clusterCron(void) {
  * events. It is useful to perform operations that must be done ASAP in
  * reaction to events fired but that are not safe to perform inside event
  * handlers, or to perform potentially expansive tasks that we need to do
- * a single time before replying to clients. */
+ * a single time before replying to clients.
+ * 在server的主循环中 当发现server以集群模式打开时 就会触发该方法
+ * */
 void clusterBeforeSleep(void) {
     /* Handle failover, this is needed when it is likely that there is already
-     * the quorum from masters in order to react fast. */
+     * the quorum from masters in order to react fast.
+     * 开启了某些前置钩子 且发现设置了要处理failover
+     * */
     if (server.cluster->todo_before_sleep & CLUSTER_TODO_HANDLE_FAILOVER)
         clusterHandleSlaveFailover();
 
