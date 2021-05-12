@@ -3134,7 +3134,8 @@ void initServer(void) {
             server.syslog_facility);
     }
 
-    /* Initialization after setting defaults from the config system. */
+    /* Initialization after setting defaults from the config system.
+     */
     server.aof_state = server.aof_enabled ? AOF_ON : AOF_OFF;
     server.hz = server.config_hz;
     server.pid = getpid();
@@ -3167,6 +3168,8 @@ void initServer(void) {
 
     createSharedObjects();
     adjustOpenFilesLimit();
+
+    // 根据句柄数量创建事件循环组
     server.el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
     if (server.el == NULL) {
         serverLog(LL_WARNING,
@@ -3174,9 +3177,13 @@ void initServer(void) {
             strerror(errno));
         exit(1);
     }
+
+    // 根据从配置项中获取的db数量 分配内存
     server.db = zmalloc(sizeof(redisDb)*server.dbnum);
 
-    /* Open the TCP listening socket for the user commands. */
+    /* Open the TCP listening socket for the user commands.
+     * redis服务器允许同时监听多个端口 这里涉及到C的套接字编程 不细看 主要就是绑定端口
+     * */
     if (server.port != 0 &&
         listenToPort(server.port,server.ipfd,&server.ipfd_count) == C_ERR)
         exit(1);
@@ -3196,7 +3203,9 @@ void initServer(void) {
         anetNonBlock(NULL,server.sofd);
     }
 
-    /* Abort if there are no listening sockets at all. */
+    /* Abort if there are no listening sockets at all.
+     * 代表该服务器没有绑定任何端口 直接返回
+     * */
     if (server.ipfd_count == 0 && server.tlsfd_count == 0 && server.sofd < 0) {
         serverLog(LL_WARNING, "Configured to not listen anywhere, exiting.");
         exit(1);
@@ -3215,6 +3224,7 @@ void initServer(void) {
         server.db[j].defrag_later = listCreate();
         listSetFreeMethod(server.db[j].defrag_later,(void (*)(void*))sdsfree);
     }
+    // 这里只是做初始化工作
     evictionPoolAlloc(); /* Initialize the LRU keys pool. */
     server.pubsub_channels = dictCreate(&keylistDictType,NULL);
     server.pubsub_patterns = listCreate();
@@ -3263,22 +3273,28 @@ void initServer(void) {
 
     /* Create the timer callback, this is our way to process many background
      * operations incrementally, like clients timeout, eviction of unaccessed
-     * expired keys and so forth. */
+     * expired keys and so forth.
+     * 每间隔1毫秒执行一次服务器主循环 内部还包含了db过期key的检查 idle时间过长的client的清理工作等
+     * */
     if (aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL) == AE_ERR) {
         serverPanic("Can't create event loop timers.");
         exit(1);
     }
 
     /* Create an event handler for accepting new connections in TCP and Unix
-     * domain sockets. */
+     * domain sockets.
+     * 为每个socket设置读事件处理器  这样当接收到新的连接时 就会触发acceptTcpHandler 函数
+     * */
     for (j = 0; j < server.ipfd_count; j++) {
         if (aeCreateFileEvent(server.el, server.ipfd[j], AE_READABLE,
+            // 当接收到client后 会自动创建conn 并基于conn创建client 然后在client相关的socket句柄上创建读写事件处理器
             acceptTcpHandler,NULL) == AE_ERR)
             {
                 serverPanic(
                     "Unrecoverable error creating server.ipfd file event.");
             }
     }
+    // ssl的先忽略
     for (j = 0; j < server.tlsfd_count; j++) {
         if (aeCreateFileEvent(server.el, server.tlsfd[j], AE_READABLE,
             acceptTLSHandler,NULL) == AE_ERR)
@@ -3292,7 +3308,10 @@ void initServer(void) {
 
 
     /* Register a readable event for the pipe used to awake the event loop
-     * when a blocked client in a module needs attention. */
+     * when a blocked client in a module needs attention.
+     * 某个client原本因为module而被阻塞
+     * 目前 moduleBlockedClientPipeReadable 内没有任何逻辑
+     * */
     if (aeCreateFileEvent(server.el, server.module_blocked_pipe[0], AE_READABLE,
         moduleBlockedClientPipeReadable,NULL) == AE_ERR) {
             serverPanic(
@@ -3301,11 +3320,15 @@ void initServer(void) {
     }
 
     /* Register before and after sleep handlers (note this needs to be done
-     * before loading persistence since it is used by processEventsWhileBlocked. */
+     * before loading persistence since it is used by processEventsWhileBlocked.
+     * 将前后置函数设置到事件循环中
+     * */
     aeSetBeforeSleepProc(server.el,beforeSleep);
     aeSetAfterSleepProc(server.el,afterSleep);
 
-    /* Open the AOF file if needed. */
+    /* Open the AOF file if needed.
+     * 如果本次redis支持aof 打开aof文件
+     * */
     if (server.aof_state == AOF_ON) {
         server.aof_fd = open(server.aof_filename,
                                O_WRONLY|O_APPEND|O_CREAT,0644);
@@ -3319,7 +3342,9 @@ void initServer(void) {
     /* 32 bit instances are limited to 4GB of address space, so if there is
      * no explicit limit in the user provided configuration we set a limit
      * at 3 GB using maxmemory with 'noeviction' policy'. This avoids
-     * useless crashes of the Redis instance for out of memory. */
+     * useless crashes of the Redis instance for out of memory.
+     * TODO
+     * */
     if (server.arch_bits == 32 && server.maxmemory == 0) {
         serverLog(LL_WARNING,"Warning: 32 bit instance detected but no memory limit set. Setting 3 GB maxmemory limit with 'noeviction' policy now.");
         server.maxmemory = 3072LL*(1024*1024); /* 3 GB */
@@ -3337,17 +3362,24 @@ void initServer(void) {
  * are loaded).
  * Specifically, creation of threads due to a race bug in ld.so, in which
  * Thread Local Storage initialization collides with dlopen call.
- * see: https://sourceware.org/bugzilla/show_bug.cgi?id=19329 */
+ * see: https://sourceware.org/bugzilla/show_bug.cgi?id=19329
+ * 启动server时 还有一些工作需要放在后面执行
+ * */
 void InitServerLast() {
+    // 启动redis后台线程
     bioInit();
+    // 初始化io线程 这些线程就是网络模块中用于处理读写事件的
     initThreadedIO();
     set_jemalloc_bg_thread(server.jemalloc_bg_thread);
+    // 记录server启动时的内存开销
     server.initial_memory_usage = zmalloc_used_memory();
 }
 
 /* Parse the flags string description 'strflags' and set them to the
  * command 'c'. If the flags are all valid C_OK is returned, otherwise
- * C_ERR is returned (yet the recognized flags are set in the command). */
+ * C_ERR is returned (yet the recognized flags are set in the command).
+ * 解析flags信息 并设置到command上
+ * */
 int populateCommandTableParseFlags(struct redisCommand *c, char *strflags) {
     int argc;
     sds *argv;
@@ -3409,7 +3441,9 @@ int populateCommandTableParseFlags(struct redisCommand *c, char *strflags) {
 }
 
 /* Populates the Redis Command Table starting from the hard coded list
- * we have on top of server.c file. */
+ * we have on top of server.c file.
+ * 将redis内置的command (commandTable填充到dict中)
+ * */
 void populateCommandTable(void) {
     int j;
     int numcommands = sizeof(redisCommandTable)/sizeof(struct redisCommand);
@@ -3419,7 +3453,9 @@ void populateCommandTable(void) {
         int retval1, retval2;
 
         /* Translate the command string flags description into an actual
-         * set of flags. */
+         * set of flags.
+         * 通过解析command携带的 sflags 转换成flag后设置到command上
+         * */
         if (populateCommandTableParseFlags(c,c->sflags) == C_ERR)
             serverPanic("Unsupported command flag");
 
@@ -3449,17 +3485,33 @@ void resetCommandTableStats(void) {
 
 /* ========================== Redis OP Array API ============================ */
 
+/**
+ * 每次收到的client的 command,argv被包装成一个operate对象
+ * redisOpArray 代表了一组operate
+ * @param oa
+ */
 void redisOpArrayInit(redisOpArray *oa) {
     oa->ops = NULL;
     oa->numops = 0;
 }
 
+/**
+ * 将某个command包装成op后添加到oa中
+ * @param oa
+ * @param cmd
+ * @param dbid
+ * @param argv
+ * @param argc
+ * @param target
+ * @return
+ */
 int redisOpArrayAppend(redisOpArray *oa, struct redisCommand *cmd, int dbid,
                        robj **argv, int argc, int target)
 {
     redisOp *op;
 
     oa->ops = zrealloc(oa->ops,sizeof(redisOp)*(oa->numops+1));
+    // 通过操作数组 得到本次分配的op的内存指针
     op = oa->ops+oa->numops;
     op->cmd = cmd;
     op->dbid = dbid;
@@ -3470,6 +3522,10 @@ int redisOpArrayAppend(redisOpArray *oa, struct redisCommand *cmd, int dbid,
     return oa->numops;
 }
 
+/**
+ * 从后往前释放所有的op
+ * @param oa
+ */
 void redisOpArrayFree(redisOpArray *oa) {
     while(oa->numops) {
         int j;
@@ -3505,7 +3561,9 @@ struct redisCommand *lookupCommandByCString(const char *s) {
  *
  * This is used by functions rewriting the argument vector such as
  * rewriteClientCommandVector() in order to set client->cmd pointer
- * correctly even if the command was renamed. */
+ * correctly even if the command was renamed.
+ * 通过name查找某个command 先从commands中查找 没有的话再从orig_commands中查找
+ * */
 struct redisCommand *lookupCommandOrOriginal(sds name) {
     struct redisCommand *cmd = dictFetchValue(server.commands, name);
 
@@ -3551,8 +3609,7 @@ void propagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
  * so it is up to the caller to release the passed argv (but it is usually
  * stack allocated).  The function automatically increments ref count of
  * passed objects, so the caller does not need to.
- * 将某个指令传播到其他副本或者aof
- * @param 本次命令是针对哪个db上的数据
+ * 这里并没有直接将command写入到aof或者传播到slave上 而是先将command包装后设置到 opArray中
  * */
 void alsoPropagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
                    int target)
@@ -3572,7 +3629,9 @@ void alsoPropagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
 
 /* It is possible to call the function forceCommandPropagation() inside a
  * Redis command implementation in order to to force the propagation of a
- * specific command execution into AOF / Replication. */
+ * specific command execution into AOF / Replication.
+ * 如果设置了传播标记 追加2个force标记
+ * */
 void forceCommandPropagation(client *c, int flags) {
     if (flags & PROPAGATE_REPL) c->flags |= CLIENT_FORCE_REPL;
     if (flags & PROPAGATE_AOF) c->flags |= CLIENT_FORCE_AOF;
@@ -3580,12 +3639,16 @@ void forceCommandPropagation(client *c, int flags) {
 
 /* Avoid that the executed command is propagated at all. This way we
  * are free to just propagate what we want using the alsoPropagate()
- * API. */
+ * API.
+ * 添加一个保护模式
+ * */
 void preventCommandPropagation(client *c) {
     c->flags |= CLIENT_PREVENT_PROP;
 }
 
-/* AOF specific version of preventCommandPropagation(). */
+/* AOF specific version of preventCommandPropagation().
+ * 添加一个aof保护模式
+ * */
 void preventCommandAOF(client *c) {
     c->flags |= CLIENT_PREVENT_AOF_PROP;
 }
@@ -3630,7 +3693,7 @@ void preventCommandReplication(client *c) {
  * preventCommandPropagation(client *c);
  * preventCommandAOF(client *c);
  * preventCommandReplication(client *c);
- *
+ * 通过client此时存储的参数信息 调用command
  */
 void call(client *c, int flags) {
     long long dirty;
@@ -3641,7 +3704,9 @@ void call(client *c, int flags) {
     server.fixed_time_expire++;
 
     /* Send the command to clients in MONITOR mode if applicable.
-     * Administrative commands are considered too dangerous to be shown. */
+     * Administrative commands are considered too dangerous to be shown.
+     * TODO 先忽略监控器
+     * */
     if (listLength(server.monitors) &&
         !server.loading &&
         !(c->cmd->flags & (CMD_SKIP_MONITOR|CMD_ADMIN)))
@@ -3650,35 +3715,50 @@ void call(client *c, int flags) {
     }
 
     /* Initialization: clear the flags that must be set by the command on
-     * demand, and initialize the array for additional commands propagation. */
+     * demand, and initialize the array for additional commands propagation.
+     * 移除掉force标记和prevent标记
+     * */
     c->flags &= ~(CLIENT_FORCE_AOF|CLIENT_FORCE_REPL|CLIENT_PREVENT_PROP);
+
+    // 获取之前存储的所有需要传播的任务
     redisOpArray prev_also_propagate = server.also_propagate;
+    // 重置also_propagate
     redisOpArrayInit(&server.also_propagate);
 
-    /* Call the command. */
+    /* Call the command.
+     * 先记录此时脏数据数量
+     * */
     dirty = server.dirty;
     updateCachedTime(0);
     start = server.ustime;
+    // 执行command 此时可能会发起对某些redisObject的操作 同时可能会将某些信息返回给client
     c->cmd->proc(c);
     duration = ustime()-start;
+    // 计算执行函数后 有多少key受到影响
     dirty = server.dirty-dirty;
     if (dirty < 0) dirty = 0;
 
     /* After executing command, we will close the client after writing entire
-     * reply if it is set 'CLIENT_CLOSE_AFTER_COMMAND' flag. */
+     * reply if it is set 'CLIENT_CLOSE_AFTER_COMMAND' flag.
+     * 如果此时发现了CLIENT_CLOSE_AFTER_COMMAND 标记 需要更新成CLIENT_CLOSE_AFTER_REPLY
+     * */
     if (c->flags & CLIENT_CLOSE_AFTER_COMMAND) {
         c->flags &= ~CLIENT_CLOSE_AFTER_COMMAND;
         c->flags |= CLIENT_CLOSE_AFTER_REPLY;
     }
 
     /* When EVAL is called loading the AOF we don't want commands called
-     * from Lua to go into the slowlog or to populate statistics. */
+     * from Lua to go into the slowlog or to populate statistics.
+     * TODO 忽略 lua脚本
+     * */
     if (server.loading && c->flags & CLIENT_LUA)
         flags &= ~(CMD_CALL_SLOWLOG | CMD_CALL_STATS);
 
     /* If the caller is Lua, we want to force the EVAL caller to propagate
      * the script if the command flag or client flag are forcing the
-     * propagation. */
+     * propagation.
+     * TODO 忽略 lua脚本
+     * */
     if (c->flags & CLIENT_LUA && server.lua_caller) {
         if (c->flags & CLIENT_FORCE_REPL)
             server.lua_caller->flags |= CLIENT_FORCE_REPL;
@@ -3687,7 +3767,9 @@ void call(client *c, int flags) {
     }
 
     /* Log the command into the Slow log if needed, and populate the
-     * per-command statistics that we show in INFO commandstats. */
+     * per-command statistics that we show in INFO commandstats.
+     * TODO 忽略日志相关的
+     * */
     if (flags & CMD_CALL_SLOWLOG && !(c->cmd->flags & CMD_SKIP_SLOWLOG)) {
         char *latency_event = (c->cmd->flags & CMD_FAST) ?
                               "fast-command" : "command";
@@ -3695,6 +3777,7 @@ void call(client *c, int flags) {
         slowlogPushEntryIfNeeded(c,c->argv,c->argc,duration);
     }
 
+    // TODO 忽略统计项
     if (flags & CMD_CALL_STATS) {
         /* use the real command that was executed (cmd and lastamc) may be
          * different, in case of MULTI-EXEC or re-written commands such as
@@ -3703,14 +3786,19 @@ void call(client *c, int flags) {
         real_cmd->calls++;
     }
 
-    /* Propagate the command into the AOF and replication link */
+    /* Propagate the command into the AOF and replication link
+     * 被打上 CMD_CALL_PROPAGATE_AOF/CMD_CALL_PROPAGATE_REPL  并且此时没有处于保护状态
+     * TODO 目前没看到打上标记的逻辑   应该是在执行command时设置的
+     * */
     if (flags & CMD_CALL_PROPAGATE &&
         (c->flags & CLIENT_PREVENT_PROP) != CLIENT_PREVENT_PROP)
     {
         int propagate_flags = PROPAGATE_NONE;
 
         /* Check if the command operated changes in the data set. If so
-         * set for replication / AOF propagation. */
+         * set for replication / AOF propagation.
+         * 代表至少有某个数据发生了变化  这时就要将command同步到aof/副本上
+         * */
         if (dirty) propagate_flags |= (PROPAGATE_AOF|PROPAGATE_REPL);
 
         /* If the client forced AOF / replication of the command, set
@@ -3730,7 +3818,9 @@ void call(client *c, int flags) {
 
         /* Call propagate() only if at least one of AOF / replication
          * propagation is needed. Note that modules commands handle replication
-         * in an explicit way, so we never replicate them automatically. */
+         * in an explicit way, so we never replicate them automatically.
+         * TODO
+         * */
         if (propagate_flags != PROPAGATE_NONE && !(c->cmd->flags & CMD_MODULE))
             propagate(c->cmd,c->db->id,c->argv,c->argc,propagate_flags);
     }
@@ -3738,16 +3828,21 @@ void call(client *c, int flags) {
     /* Restore the old replication flags, since call() can be executed
      * recursively. */
     c->flags &= ~(CLIENT_FORCE_AOF|CLIENT_FORCE_REPL|CLIENT_PREVENT_PROP);
+
+    // 恢复之前的flags
     c->flags |= client_old_flags &
         (CLIENT_FORCE_AOF|CLIENT_FORCE_REPL|CLIENT_PREVENT_PROP);
 
     /* Handle the alsoPropagate() API to handle commands that want to propagate
      * multiple separated commands. Note that alsoPropagate() is not affected
-     * by CLIENT_PREVENT_PROP flag. */
+     * by CLIENT_PREVENT_PROP flag.
+     * 现在开始将之前囤积的所有任务 同步到aof和副本上  为什么不直接同步呢 是因为某些command在一个事务中么???
+     * */
     if (server.also_propagate.numops) {
         int j;
         redisOp *rop;
 
+        // TODO
         if (flags & CMD_CALL_PROPAGATE) {
             int multi_emitted = 0;
             /* Wrap the commands in server.also_propagate array,
@@ -3761,6 +3856,7 @@ void call(client *c, int flags) {
                 !(c->flags & CLIENT_MULTI) &&
                 !(flags & CMD_CALL_NOWRAP))
             {
+                // 先传播一条multi命令到各个client上
                 execCommandPropagateMulti(c);
                 multi_emitted = 1;
             }
@@ -3779,8 +3875,11 @@ void call(client *c, int flags) {
                 execCommandPropagateExec(c);
             }
         }
+        // 此时
         redisOpArrayFree(&server.also_propagate);
     }
+
+    // 还原之前所有待执行的传播任务
     server.also_propagate = prev_also_propagate;
 
     /* If the client has keys tracking enabled for client side caching,

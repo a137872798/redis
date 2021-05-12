@@ -715,7 +715,9 @@ void clusterAcceptHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
 }
 
 /* Return the approximated number of sockets we are using in order to
- * take the cluster bus connections. */
+ * take the cluster bus connections.
+ * 集群内总计有多少client
+ * */
 unsigned long getClusterConnectionsCount(void) {
     /* We decrement the number of nodes by one, since there is the
      * "myself" node too in the list. Each node uses two file descriptors,

@@ -60,6 +60,11 @@
     #endif
 #endif
 
+/**
+ * 创建事件循环组
+ * @param setsize  最大文件句柄数量
+ * @return
+ */
 aeEventLoop *aeCreateEventLoop(int setsize) {
     aeEventLoop *eventLoop;
     int i;
@@ -150,18 +155,33 @@ void aeStop(aeEventLoop *eventLoop) {
     eventLoop->stop = 1;
 }
 
+/**
+ * 设置一个socket事件处理器
+ * @param eventLoop 服务器绑定的事件循环
+ * @param fd socket句柄
+ * @param mask 针对该socket的哪些事件
+ * @param proc 执行的函数
+ * @param clientData
+ * @return
+ */
 int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
         aeFileProc *proc, void *clientData)
 {
+    // 此时绑定的连接数过多 无法继续创建client连接
     if (fd >= eventLoop->setsize) {
         errno = ERANGE;
         return AE_ERR;
     }
+
+    // 之前初始化事件循环组时 为fileEvent分配了足够的内存 这里直接使用这块内存就可以
     aeFileEvent *fe = &eventLoop->events[fd];
 
+    // c网络编程
     if (aeApiAddEvent(eventLoop, fd, mask) == -1)
         return AE_ERR;
     fe->mask |= mask;
+
+    // 根据接收的类型 设置对应的处理器
     if (mask & AE_READABLE) fe->rfileProc = proc;
     if (mask & AE_WRITABLE) fe->wfileProc = proc;
     fe->clientData = clientData;
@@ -208,6 +228,12 @@ static void aeGetTime(long *seconds, long *milliseconds)
     *milliseconds = tv.tv_usec/1000;
 }
 
+/**
+ *
+ * @param milliseconds 基于定时任务的触发时间间隔 设置下一次启动时间
+ * @param sec
+ * @param ms
+ */
 static void aeAddMillisecondsToNow(long long milliseconds, long *sec, long *ms) {
     long cur_sec, cur_ms, when_sec, when_ms;
 
@@ -222,6 +248,15 @@ static void aeAddMillisecondsToNow(long long milliseconds, long *sec, long *ms) 
     *ms = when_ms;
 }
 
+/**
+ * 在事件循环组上绑定一个定时事件
+ * @param eventLoop
+ * @param milliseconds 触发时间间隔
+ * @param proc 触发时执行的函数
+ * @param clientData
+ * @param finalizerProc
+ * @return
+ */
 long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,
         aeTimeProc *proc, void *clientData,
         aeEventFinalizerProc *finalizerProc)
@@ -232,7 +267,9 @@ long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,
     te = zmalloc(sizeof(*te));
     if (te == NULL) return AE_ERR;
     te->id = id;
+    // 通过时间间隔 计算下一次触发时间
     aeAddMillisecondsToNow(milliseconds,&te->when_sec,&te->when_ms);
+
     te->timeProc = proc;
     te->finalizerProc = finalizerProc;
     te->clientData = clientData;
@@ -241,6 +278,7 @@ long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,
     te->refcount = 0;
     if (te->next)
         te->next->prev = te;
+    // 将该事件设置到事件循环组 定时任务事件队列的头部
     eventLoop->timeEventHead = te;
     return id;
 }

@@ -91,6 +91,7 @@ connection *connCreateSocket() {
  * Callers should use connGetState() and verify the created connection
  * is not in an error state (which is not possible for a socket connection,
  * but could but possible with other protocols).
+ * @param fd 对应某个client的socket句柄
  */
 connection *connCreateAcceptedSocket(int fd) {
     connection *conn = connCreateSocket();
@@ -252,12 +253,20 @@ static const char *connSocketGetLastError(connection *conn) {
     return strerror(conn->last_errno);
 }
 
+/**
+ * 当socket准备好事件后 通过mask判断要触发哪些handler
+ * @param el
+ * @param fd
+ * @param clientData
+ * @param mask
+ */
 static void connSocketEventHandler(struct aeEventLoop *el, int fd, void *clientData, int mask)
 {
     UNUSED(el);
     UNUSED(fd);
     connection *conn = clientData;
 
+    // 这个是redis作为client而言的
     if (conn->state == CONN_STATE_CONNECTING &&
             (mask & AE_WRITABLE) && conn->conn_handler) {
 
@@ -347,6 +356,7 @@ static int connSocketGetType(connection *conn) {
 }
 
 ConnectionType CT_Socket = {
+        // 这是一个总处理器 通过该socket无论是读/写事件都通过该handler进行转发处理 (在一系列判断后再决定由哪个handler来处理)
     .ae_handler = connSocketEventHandler,
     .close = connSocketClose,
     .write = connSocketWrite,

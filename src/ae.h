@@ -73,7 +73,10 @@ typedef void aeBeforeSleepProc(struct aeEventLoop *eventLoop);
  * 事件循环监听文件事件
  * */
 typedef struct aeFileEvent {
+    // 代表该socket 接收什么样的事件
     int mask; /* one of AE_(READABLE|WRITABLE|BARRIER) */
+
+    // 分别当接收到读写事件后执行的函数
     aeFileProc *rfileProc;
     aeFileProc *wfileProc;
     void *clientData;
@@ -106,6 +109,7 @@ typedef struct aeFiredEvent {
  * 事件循环
  * */
 typedef struct aeEventLoop {
+    // 记录此时最大的socket下标
     int maxfd;   /* highest file descriptor currently registered */
     // 槽的长度 (events/fired)
     int setsize; /* max number of file descriptors tracked */
@@ -118,6 +122,8 @@ typedef struct aeEventLoop {
     int stop;
     // 基于不同的实现机制 指向不同的数据 比如epoll 指向 linux_epoll
     void *apidata; /* This is used for polling API specific data */
+
+    // 在sleep前后执行的钩子
     aeBeforeSleepProc *beforesleep;
     aeBeforeSleepProc *aftersleep;
     int flags;

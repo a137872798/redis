@@ -92,7 +92,9 @@ void lazyfreeFreeSlotsMapFromBioThread(zskiplist *sl);
  * main thread. */
 #define REDIS_THREAD_STACK_SIZE (1024*1024*4)
 
-/* Initialize the background system, spawning the thread. */
+/* Initialize the background system, spawning the thread.
+ * bio指的是后台系统 用于执行一些后台任务 它会产生大量的线程
+ * */
 void bioInit(void) {
     pthread_attr_t attr;
     pthread_t thread;
@@ -101,14 +103,18 @@ void bioInit(void) {
 
     /* Initialization of state vars and objects */
     for (j = 0; j < BIO_NUM_OPS; j++) {
+        // 为每个线程创建他们的锁/条件对象
         pthread_mutex_init(&bio_mutex[j],NULL);
         pthread_cond_init(&bio_newjob_cond[j],NULL);
         pthread_cond_init(&bio_step_cond[j],NULL);
         bio_jobs[j] = listCreate();
+        // 代表每个bio线程此时待处理的任务数为0
         bio_pending[j] = 0;
     }
 
-    /* Set the stack size as by default it may be small in some system */
+    /* Set the stack size as by default it may be small in some system
+     * 每个线程有自己的栈空间 这里对这些线程栈进行扩充
+     * */
     pthread_attr_init(&attr);
     pthread_attr_getstacksize(&attr,&stacksize);
     if (!stacksize) stacksize = 1; /* The world is full of Solaris Fixes */
@@ -142,8 +148,14 @@ void bioCreateBackgroundJob(int type, void *arg1, void *arg2, void *arg3) {
     pthread_mutex_unlock(&bio_mutex[type]);
 }
 
+/**
+ * 每个bio线程的运行逻辑
+ * @param arg
+ * @return
+ */
 void *bioProcessBackgroundJobs(void *arg) {
     struct bio_job *job;
+    // type对应要处理的任务类型 每个bio线程仅处理一种任务
     unsigned long type = (unsigned long) arg;
     sigset_t sigset;
 
@@ -166,10 +178,13 @@ void *bioProcessBackgroundJobs(void *arg) {
         break;
     }
 
+    // TODO 有关cpu亲和性的先忽略 总之就是用于提高线程性能的一种方式
     redisSetCpuAffinity(server.bio_cpulist);
 
+    // 将线程设置成可以从外部直接关闭的情况
     makeThreadKillable();
 
+    // 每个线程运行时会获取自己的锁
     pthread_mutex_lock(&bio_mutex[type]);
     /* Block SIGALRM so we are sure that only the main thread will
      * receive the watchdog signal. */

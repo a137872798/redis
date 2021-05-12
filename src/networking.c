@@ -97,6 +97,11 @@ void linkClient(client *c) {
     raxInsert(server.clients_index,(unsigned char*)&id,sizeof(id),c,NULL);
 }
 
+/**
+ * 基于某条连接创建client
+ * @param conn
+ * @return
+ */
 client *createClient(connection *conn) {
     client *c = zmalloc(sizeof(client));
 
@@ -105,14 +110,18 @@ client *createClient(connection *conn) {
      * in the context of a client. When commands are executed in other
      * contexts (for instance a Lua script) we need a non connected client. */
     if (conn) {
+        // 配置一些tcp参数
         connNonBlock(conn);
         connEnableTcpNoDelay(conn);
         if (server.tcpkeepalive)
             connKeepAlive(conn,server.tcpkeepalive);
+        // 可以看到默认都会设置readHandler 而writeHandler只有当写缓冲区满了后 需要监听写事件时才需要注册
+        // readQueryFromClient就是读取数据到querybuf 并开始执行command
         connSetReadHandler(conn, readQueryFromClient);
         connSetPrivateData(conn, c);
     }
 
+    // 默认情况下每个client都会先连接到0号db
     selectDb(c,0);
     uint64_t client_id = ++server.next_client_id;
     c->id = client_id;
@@ -997,6 +1006,12 @@ void clientAcceptHandler(connection *conn) {
 }
 
 #define MAX_ACCEPTS_PER_CALL 1000
+/**
+ * 当接收到一个新的连接后触发该方法
+ * @param conn 内部的fd对应对端client的socket句柄
+ * @param flags
+ * @param ip
+ */
 static void acceptCommonHandler(connection *conn, int flags, char *ip) {
     client *c;
     char conninfo[100];
@@ -1015,7 +1030,9 @@ static void acceptCommonHandler(connection *conn, int flags, char *ip) {
      *
      * Admission control will happen before a client is created and connAccept()
      * called, because we don't want to even start transport-level negotiation
-     * if rejected. */
+     * if rejected.
+     * 当此时接收的client总数已经超过了server负载 需要断开连接
+     * */
     if (listLength(server.clients) + getClusterConnectionsCount()
         >= server.maxclients)
     {
@@ -1028,16 +1045,21 @@ static void acceptCommonHandler(connection *conn, int flags, char *ip) {
 
         /* That's a best effort error message, don't check write errors.
          * Note that for TLS connections, no handshake was done yet so nothing
-         * is written and the connection will just drop. */
+         * is written and the connection will just drop.
+         * 将异常信息返回给client 如果写入失败 忽略 因为处理也没有意义
+         * */
         if (connWrite(conn,err,strlen(err)) == -1) {
             /* Nothing to do, Just to avoid the warning... */
         }
         server.stat_rejected_conn++;
+        // 调用底层api关闭连接
         connClose(conn);
         return;
     }
 
-    /* Create connection and client */
+    /* Create connection and client
+     * 基于这条生成的conn 包装client
+     * */
     if ((c = createClient(conn)) == NULL) {
         serverLog(LL_WARNING,
             "Error registering fd event for the new client: %s (conn: %s)",
@@ -1069,7 +1091,15 @@ static void acceptCommonHandler(connection *conn, int flags, char *ip) {
     }
 }
 
+/**
+ * 当server接收新的连接时触发
+ * @param el
+ * @param fd
+ * @param privdata
+ * @param mask
+ */
 void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
+    // MAX_ACCEPTS_PER_CALL 代表同一次执行该方法最多建立1000个连接
     int cport, cfd, max = MAX_ACCEPTS_PER_CALL;
     char cip[NET_IP_STR_LEN];
     UNUSED(el);
@@ -1077,6 +1107,7 @@ void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
     UNUSED(privdata);
 
     while(max--) {
+        // 与对应的client建立连接 并获取对端的port  cfd记录的是代表对端socket的句柄
         cfd = anetTcpAccept(server.neterr, fd, cip, sizeof(cip), &cport);
         if (cfd == ANET_ERR) {
             if (errno != EWOULDBLOCK)
@@ -3245,6 +3276,12 @@ int io_threads_op;      /* IO_THREADS_OP_WRITE or IO_THREADS_OP_READ. */
  * itself. */
 list *io_threads_list[IO_THREADS_MAX_NUM];
 
+/**
+ * io线程会扫描数组中的任务 并进行处理
+ * 一般是主线程分发pending_read/pending_write任务到不同的线程 并唤醒线程 然后线程处理数组中的任务
+ * @param myid
+ * @return
+ */
 void *IOThreadMain(void *myid) {
     /* The ID is the thread number (from 0 to server.iothreads_num-1), and is
      * used by the thread to just manipulate a single sub-array of clients. */
@@ -3257,12 +3294,16 @@ void *IOThreadMain(void *myid) {
     makeThreadKillable();
 
     while(1) {
-        /* Wait for start */
+        /* Wait for start
+         * 自选检测是否准备好任务  应该是这样 当线程能够获取到锁时 就代表即将要插入任务了 这时不适合采用锁的方式 通过自旋刷新任务数并开始执行任务
+         * */
         for (int j = 0; j < 1000000; j++) {
             if (io_threads_pending[id] != 0) break;
         }
 
-        /* Give the main thread a chance to stop this thread. */
+        /* Give the main thread a chance to stop this thread.
+         * pthread_mutex_lock/pthread_mutex_unlock 应该可以刷新内存屏障
+         * */
         if (io_threads_pending[id] == 0) {
             pthread_mutex_lock(&io_threads_mutex[id]);
             pthread_mutex_unlock(&io_threads_mutex[id]);
@@ -3281,8 +3322,10 @@ void *IOThreadMain(void *myid) {
         while((ln = listNext(&li))) {
             client *c = listNodeValue(ln);
             if (io_threads_op == IO_THREADS_OP_WRITE) {
+                // 将buf/reply中的数据写入到socket缓冲区
                 writeToClient(c,0);
             } else if (io_threads_op == IO_THREADS_OP_READ) {
+                // 从socket缓冲区中读取数据到querybuf 并解析成command和相关参数后执行命令
                 readQueryFromClient(c->conn);
             } else {
                 serverPanic("io_threads_op value is unknown");
@@ -3295,21 +3338,28 @@ void *IOThreadMain(void *myid) {
     }
 }
 
-/* Initialize the data structures needed for threaded I/O. */
+/* Initialize the data structures needed for threaded I/O.
+ * 初始化io线程
+ * */
 void initThreadedIO(void) {
     server.io_threads_active = 0; /* We start with threads not active. */
 
     /* Don't spawn any thread if the user selected a single thread:
-     * we'll handle I/O directly from the main thread. */
+     * we'll handle I/O directly from the main thread.
+     * 如果没有指定额外的io线程 就不需要创建
+     * */
     if (server.io_threads_num == 1) return;
 
+    // 禁止指定超量的io线程
     if (server.io_threads_num > IO_THREADS_MAX_NUM) {
         serverLog(LL_WARNING,"Fatal: too many I/O threads configured. "
                              "The maximum number is %d.", IO_THREADS_MAX_NUM);
         exit(1);
     }
 
-    /* Spawn and initialize the I/O threads. */
+    /* Spawn and initialize the I/O threads.
+     * 初始化io线程
+     * */
     for (int i = 0; i < server.io_threads_num; i++) {
         /* Things we do for all the threads including the main thread. */
         io_threads_list[i] = listCreate();
@@ -3318,7 +3368,9 @@ void initThreadedIO(void) {
         /* Things we do only for the additional threads. */
         pthread_t tid;
         pthread_mutex_init(&io_threads_mutex[i],NULL);
+        // 代表每个线程此时待处理任务为0
         io_threads_pending[i] = 0;
+        // 锁定线程 然后在IOThreadMain中也有个lock方法 也就是在这里提前上锁后 thread的主流程就会被锁定 只有从外部unlock后主流程才会正常执行
         pthread_mutex_lock(&io_threads_mutex[i]); /* Thread will be stopped. */
         if (pthread_create(&tid,NULL,IOThreadMain,(void*)(long)i) != 0) {
             serverLog(LL_WARNING,"Fatal: Can't initialize IO thread.");
@@ -3346,7 +3398,7 @@ void killIOThreads(void) {
 }
 
 /**
- * 对io线程锁的释放 就认为是开启线程
+ * 将io线程的锁释放后 io线程的主流程就可以继续执行了
  */
 void startThreadedIO(void) {
     if (tio_debug) { printf("S"); fflush(stdout); }
@@ -3371,7 +3423,7 @@ void stopThreadedIO(void) {
         (int) listLength(server.clients_pending_read),
         (int) listLength(server.clients_pending_write));
     serverAssert(server.io_threads_active == 1);
-    // 将线程上锁 就任务是暂停这些io线程  对应的应该有个解锁的地方
+    // 将线程上锁 就任务是暂停这些io线程
     for (int j = 1; j < server.io_threads_num; j++)
         pthread_mutex_lock(&io_threads_mutex[j]);
     // 更新active标识
