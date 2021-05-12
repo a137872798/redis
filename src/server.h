@@ -672,6 +672,8 @@ typedef struct redisDb {
     dict *dict;                 /* The keyspace for this DB */
     dict *expires;              /* Timeout of keys with a timeout set */
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP)*/
+
+    // 代表这些key已经准备完成  对应blocking_keys
     dict *ready_keys;           /* Blocked keys that received a PUSH */
     dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
     int id;                     /* Database ID */
@@ -716,6 +718,8 @@ typedef struct blockingState {
     /* BLOCKED_LIST, BLOCKED_ZSET and BLOCKED_STREAM */
     dict *keys;             /* The keys we are waiting to terminate a blocking
                              * operation such as BLPOP or XREAD. Or NULL. */
+
+    // 当阻塞结束后 收到的element应当转移到另一个redisObject中 这是它对应的key
     robj *target;           /* The key that should receive the element,
                              * for BRPOPLPUSH. */
 
@@ -746,7 +750,9 @@ typedef struct blockingState {
  * Note that server.ready_keys will not have duplicates as there dictionary
  * also called ready_keys in every structure representing a Redis database,
  * where we make sure to remember if a given key was already added in the
- * server.ready_keys list. */
+ * server.ready_keys list.
+ * 代表某个db下的某个key 已经准备完成了 该结构体存在于 ready_keys中
+ * */
 typedef struct readyList {
     redisDb *db;
     robj *key;
@@ -841,7 +847,7 @@ typedef struct client {
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
     int authenticated;      /* Needed when the default user requires auth. */
 
-    // 该client作为slave节点在集群中的状态 比如是否在线
+    // 记录了针对master而言 该slave此时的状态 比如是否在线
     int replstate;          /* Replication state if this is a slave. */
     int repl_put_online_on_ack; /* Install slave write handler on first ACK. */
     int repldbfd;           /* Replication DB file descriptor. */
@@ -1427,6 +1433,8 @@ struct redisServer {
     unsigned int blocked_clients;   /* # of clients executing a blocking cmd.*/
     unsigned int blocked_clients_by_type[BLOCKED_NUM];
     list *unblocked_clients; /* list of clients to unblock before next loop */
+
+    //
     list *ready_keys;        /* List of readyList structures for BLPOP & co */
     /* Client side caching. */
     unsigned int tracking_clients;  /* # of clients with tracking enabled.*/

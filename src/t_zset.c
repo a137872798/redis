@@ -3418,7 +3418,9 @@ void zscanCommand(client *c) {
  * behavior of BZPOP[MIN|MAX], since we can block into multiple keys.
  *
  * The synchronous version instead does not need to emit the key, but may
- * use the 'count' argument to return multiple items if available. */
+ * use the 'count' argument to return multiple items if available.
+ * 根据where从redisZset中取出一个元素 并返回给client
+ * */
 void genericZpopCommand(client *c, robj **keyv, int keyc, int where, int emitkey, robj *countarg) {
     int idx;
     robj *key = NULL;
@@ -3427,7 +3429,9 @@ void genericZpopCommand(client *c, robj **keyv, int keyc, int where, int emitkey
     double score;
     long count = 1;
 
-    /* If a count argument as passed, parse it or return an error. */
+    /* If a count argument as passed, parse it or return an error.
+     * TODO
+     * */
     if (countarg) {
         if (getLongFromObjectOrReply(c, countarg, &count, NULL) != C_OK)
             return;
@@ -3437,7 +3441,9 @@ void genericZpopCommand(client *c, robj **keyv, int keyc, int where, int emitkey
         }
     }
 
-    /* Check type and break on the first error, otherwise identify candidate. */
+    /* Check type and break on the first error, otherwise identify candidate.
+     * 该方法允许传入一组key 这里找到第一个有效的key
+     * */
     idx = 0;
     while (idx < keyc) {
         key = keyv[idx++];
@@ -3447,7 +3453,9 @@ void genericZpopCommand(client *c, robj **keyv, int keyc, int where, int emitkey
         break;
     }
 
-    /* No candidate for zpopping, return empty. */
+    /* No candidate for zpopping, return empty.
+     * 代表所有的key都没有找到匹配的zset
+     * */
     if (!zobj) {
         addReply(c, shared.emptyarray);
         return;
@@ -3456,7 +3464,9 @@ void genericZpopCommand(client *c, robj **keyv, int keyc, int where, int emitkey
     void *arraylen_ptr = addReplyDeferredLen(c);
     long arraylen = 0;
 
-    /* We emit the key only for the blocking variant. */
+    /* We emit the key only for the blocking variant.
+     * 代表需要将key信息一并返回
+     * */
     if (emitkey) addReplyBulk(c, key);
 
     /* Remove the element. */
@@ -3499,14 +3509,17 @@ void genericZpopCommand(client *c, robj **keyv, int keyc, int where, int emitkey
         }
 
         serverAssertWithInfo(c, zobj, zsetDel(zobj, ele));
+        // 因为对象发生了变化 增加dirty计数器
         server.dirty++;
 
+        // 如果本次会获取多个元素 只产生一次事件
         if (arraylen == 0) { /* Do this only for the first iteration. */
             char *events[2] = {"zpopmin", "zpopmax"};
             notifyKeyspaceEvent(NOTIFY_ZSET, events[where], key, c->db->id);
             signalModifiedKey(c, c->db, key);
         }
 
+        // 依次将zset的字面量以及score返回
         addReplyBulkCBuffer(c, ele, sdslen(ele));
         addReplyDouble(c, score);
         sdsfree(ele);

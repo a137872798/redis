@@ -245,24 +245,27 @@ void disconnectAllBlockedClients(void) {
 /* Helper function for handleClientsBlockedOnKeys(). This function is called
  * when there may be clients blocked on a list key, and there may be new
  * data to fetch (the key is ready).
- * @param readyList  内部包含一个db 以及一个key
+ * @param readyList 这里存储的是server下所有已经准备好的key  本次调用就是检查在blocking_keys中是否有匹配的key 并解除阻塞(之前阻塞的这个key此时已经准备好了)
  * */
 void serveClientsBlockedOnListKey(robj *o, readyList *rl) {
     /* We serve clients in the same order they blocked for
      * this key, from the first blocked to the last.
-     * blocking_keys 代表某个db 下某个key阻塞了一组client  为什么会出现这样一个模型呢???
+     *
      * */
     dictEntry *de = dictFind(rl->db->blocking_keys,rl->key);
+
+    // 代表在对应的db下 该key也存在于blocking_keys
     if (de) {
         list *clients = dictGetVal(de);
+
+        // 代表有多少client被阻塞在该key下
         int numclients = listLength(clients);
 
-        // 挨个处理每个client
         while(numclients--) {
             listNode *clientnode = listFirst(clients);
             client *receiver = clientnode->value;
 
-            // 不是因为list而阻塞的 将节点移动到尾部
+            // 本次client的阻塞类型不是list类型 将该节点移动到链表尾部
             if (receiver->btype != BLOCKED_LIST) {
                 /* Put at the tail, so that at the next call
                  * we'll not run into it again. */
@@ -270,9 +273,10 @@ void serveClientsBlockedOnListKey(robj *o, readyList *rl) {
                 continue;
             }
 
-            // 这个目标key是什么意思
+
+            // 本次阻塞的对象是一个list 此时该对象已经准备完成后 查看之前被阻塞的client想要执行的command是什么 并在此时重新执行
+            // 如果dstKey不为空
             robj *dstkey = receiver->bpop.target;
-            // 根据client的lastcmd 信息   将obj 放到合适的位置
             int where = (receiver->lastcmd &&
                          receiver->lastcmd->proc == blpopCommand) ?
                          LIST_HEAD : LIST_TAIL;
@@ -281,27 +285,33 @@ void serveClientsBlockedOnListKey(robj *o, readyList *rl) {
             if (value) {
                 /* Protect receiver->bpop.target, that will be
                  * freed by the next unblockClient()
-                 * call. */
+                 * call. TODO */
                 if (dstkey) incrRefCount(dstkey);
+                // 此时client 已经等到了数据 可以从阻塞状态解除了  在这里会将client从blocking_keys对应的robjList移除
                 unblockClient(receiver);
 
+                // 将准备好的信息发送到client上 如果本次设置了 dstkey 就是将value从原robj转移到另一个robj上
                 if (serveClientBlockedOnList(receiver,
                     rl->key,dstkey,rl->db,value,
                     where) == C_ERR)
                 {
                     /* If we failed serving the client we need
-                     * to also undo the POP operation. */
+                     * to also undo the POP operation.
+                     * 本次操作失败 将元素归还到robj中 期望之后的client可以正常处理
+                     * */
                     listTypePush(o,value,where);
                 }
 
                 if (dstkey) decrRefCount(dstkey);
                 decrRefCount(value);
             } else {
+                // 如果此时redisObject中的元素被取完了 相当于还未准备好数据
                 break;
             }
         }
     }
 
+    // 代表此时该redisObject的元素被使用完了 如果某些client没有消费到这些对象 他们将继续保持block状态
     if (listTypeLength(o) == 0) {
         dbDelete(rl->db,rl->key);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",rl->key,rl->db->id);
@@ -312,7 +322,9 @@ void serveClientsBlockedOnListKey(robj *o, readyList *rl) {
 
 /* Helper function for handleClientsBlockedOnKeys(). This function is called
  * when there may be clients blocked on a sorted set key, and there may be new
- * data to fetch (the key is ready). */
+ * data to fetch (the key is ready).
+ * 某个zset robj准备完毕 并准备唤醒阻塞等待该key的client
+ * */
 void serveClientsBlockedOnSortedSetKey(robj *o, readyList *rl) {
     /* We serve clients in the same order they blocked for
      * this key, from the first blocked to the last. */
@@ -326,6 +338,7 @@ void serveClientsBlockedOnSortedSetKey(robj *o, readyList *rl) {
             listNode *clientnode = listFirst(clients);
             client *receiver = clientnode->value;
 
+            // key相同但是类型不同 将client移动到list尾部
             if (receiver->btype != BLOCKED_ZSET) {
                 /* Put at the tail, so that at the next call
                  * we'll not run into it again. */
@@ -333,14 +346,20 @@ void serveClientsBlockedOnSortedSetKey(robj *o, readyList *rl) {
                 continue;
             }
 
+            // 检查上次执行的指令是从哪里获取元素 并重新执行command
             int where = (receiver->lastcmd &&
                          receiver->lastcmd->proc == bzpopminCommand)
                          ? ZSET_MIN : ZSET_MAX;
+            // 在这里会将client从blocking_keys中移除
             unblockClient(receiver);
+
+            // 将结果返回给client 处理zset类型的对象时 不像list存在一个dstKey参数
             genericZpopCommand(receiver,&rl->key,1,where,1,NULL);
             zcard--;
 
-            /* Replicate the command. */
+            /* Replicate the command.
+             * 重新生成该command 主要是为了传播给aof/副本
+             * */
             robj *argv[2];
             struct redisCommand *cmd = where == ZSET_MIN ?
                                        server.zpopminCommand :
@@ -455,7 +474,10 @@ void serveClientsBlockedOnStreamKey(robj *o, readyList *rl) {
  * RM_BlockClientOnKeys(), when the corresponding key was signaled as ready:
  * our goal here is to call the RedisModuleBlockedClient reply() callback to
  * see if the key is really able to serve the client, and in that case,
- * unblock it. */
+ * unblock it.
+ * TODO
+ * 某些client可能是因为module而阻塞的 在这里进行处理
+ * */
 void serveClientsBlockedOnKeyByModule(readyList *rl) {
     dictEntry *de;
 
@@ -477,6 +499,7 @@ void serveClientsBlockedOnKeyByModule(readyList *rl) {
              * not blocked for the MODULE type safely. */
             listRotateHeadToTail(clients);
 
+            // 忽略不是因为module而阻塞的client
             if (receiver->btype != BLOCKED_MODULE) continue;
 
             /* Note that if *this* client cannot be served by this key,
@@ -512,7 +535,9 @@ void serveClientsBlockedOnKeyByModule(readyList *rl) {
  * a different type compared to the current key type) are moved in the
  * other side of the linked list. However as long as the key starts to
  * be used only for a single type, like virtually any Redis application will
- * do, the function is already fair. */
+ * do, the function is already fair.
+ * 此时某些key可能已经准备好了 将由于等待这些key而阻塞的client唤醒
+ * */
 void handleClientsBlockedOnKeys(void) {
     while(listLength(server.ready_keys) != 0) {
         list *l;
@@ -529,7 +554,9 @@ void handleClientsBlockedOnKeys(void) {
             readyList *rl = ln->value;
 
             /* First of all remove this key from db->ready_keys so that
-             * we can safely call signalKeyAsReady() against this key. */
+             * we can safely call signalKeyAsReady() against this key.
+             * 将本轮要处理的key从ready_key中移除
+             * */
             dictDelete(rl->db->ready_keys,rl->key);
 
             /* Even if we are not inside call(), increment the call depth
@@ -542,15 +569,20 @@ void handleClientsBlockedOnKeys(void) {
             server.fixed_time_expire++;
             updateCachedTime(0);
 
-            /* Serve clients blocked on the key. */
+            /* Serve clients blocked on the key.
+             * 找到此时正在阻塞的那个redisObject
+             * */
             robj *o = lookupKeyWrite(rl->db,rl->key);
 
+            // 按照robj的类型走不同的处理逻辑
             if (o != NULL) {
                 if (o->type == OBJ_LIST)
                     serveClientsBlockedOnListKey(o,rl);
                 else if (o->type == OBJ_ZSET)
+                    // 阻塞等待的是zset类型的robj
                     serveClientsBlockedOnSortedSetKey(o,rl);
                 else if (o->type == OBJ_STREAM)
+                    // TODO 先忽略stream类型
                     serveClientsBlockedOnStreamKey(o,rl);
                 /* We want to serve clients blocked on module keys
                  * regardless of the object type: we don't know what the
@@ -640,7 +672,7 @@ void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeo
 
 /* Unblock a client that's waiting in a blocking operation such as BLPOP.
  * You should never call this function directly, but unblockClient() instead.
- * 解除client阻塞状态
+ * 这里认为阻塞client的所有key都已经准备完毕了
  * */
 void unblockClientWaitingData(client *c) {
     dictEntry *de;
@@ -649,22 +681,32 @@ void unblockClientWaitingData(client *c) {
 
     serverAssertWithInfo(c,NULL,dictSize(c->bpop.keys) != 0);
     di = dictGetIterator(c->bpop.keys);
-    /* The client may wait for multiple keys, so unblock it for every key. */
+    /* The client may wait for multiple keys, so unblock it for every key.
+     * 该client可能会因为多个key而处于阻塞状态 这里将这些关联关系从db->blocking_keys中移除
+     * */
     while((de = dictNext(di)) != NULL) {
         robj *key = dictGetKey(de);
+
+        // 存储了该client有关于该key阻塞状态的一些信息  bki->listnode 存储的是client么???
         bkinfo *bki = dictGetVal(de);
 
-        /* Remove this client from the list of clients waiting for this key. */
+        /* Remove this client from the list of clients waiting for this key.
+         * 针对db而言 某个被阻塞的key 可能同时有多个client在等待
+         * */
         l = dictFetchValue(c->db->blocking_keys,key);
         serverAssertWithInfo(c,key,l != NULL);
         listDelNode(l,bki->listnode);
-        /* If the list is empty we need to remove it to avoid wasting memory */
+        /* If the list is empty we need to remove it to avoid wasting memory
+         * 因为此时db下因为该key被阻塞的client 都已经收到了数据 所以可以将key从blocking_keys中移除
+         * */
         if (listLength(l) == 0)
             dictDelete(c->db->blocking_keys,key);
     }
     dictReleaseIterator(di);
 
-    /* Cleanup the client structure */
+    /* Cleanup the client structure
+     * TODO bpop.keys结构是什么时候生成的???
+     * */
     dictEmpty(c->bpop.keys,NULL);
     if (c->bpop.target) {
         decrRefCount(c->bpop.target);

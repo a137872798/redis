@@ -2434,26 +2434,36 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     }
 
     /* Send the invalidation messages to clients participating to the
-     * client side caching protocol in broadcasting (BCAST) mode. */
+     * client side caching protocol in broadcasting (BCAST) mode.
+     * TODO 忽略链路相关的
+     * */
     trackingBroadcastInvalidationMessages();
 
-    /* Write the AOF buffer on disk */
+    /* Write the AOF buffer on disk aof文件刷盘 */
     flushAppendOnlyFile(0);
 
-    /* Handle writes with pending output buffers. */
+    /* Handle writes with pending output buffers.
+     * 处理client_pending_writes队列中的任务
+     * */
     handleClientsWithPendingWritesUsingThreads();
 
-    /* Close clients that need to be closed asynchronous */
+    /* Close clients that need to be closed asynchronous
+     * 处理to_close队列中的client
+     * */
     freeClientsInAsyncFreeQueue();
 
     /* Try to process blocked clients every once in while. Example: A module
      * calls RM_SignalKeyAsReady from within a timer callback (So we don't
-     * visit processCommand() at all). */
+     * visit processCommand() at all).
+     * 每轮循环 会根据此时的ready_key 唤醒之前阻塞的client
+     * */
     handleClientsBlockedOnKeys();
 
     /* Before we are going to sleep, let the threads access the dataset by
      * releasing the GIL. Redis main thread will not touch anything at this
-     * time. */
+     * time.
+     * 释放module锁
+     * */
     if (moduleCount()) moduleReleaseGIL();
 
     /* Do NOT add anything below moduleReleaseGIL !!! */
@@ -2461,13 +2471,17 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
 
 /* This function is called immediately after the event loop multiplexing
  * API returned, and the control is going to soon return to Redis by invoking
- * the different events callbacks. */
+ * the different events callbacks.
+ * 在事件循环后触发该方法
+ * */
 void afterSleep(struct aeEventLoop *eventLoop) {
     UNUSED(eventLoop);
 
     /* Do NOT add anything above moduleAcquireGIL !!! */
 
-    /* Aquire the modules GIL so that their threads won't touch anything. */
+    /* Aquire the modules GIL so that their threads won't touch anything.
+     * 这里主要就是重新获取 module锁
+     * */
     if (!ProcessingEventsWhileBlocked) {
         if (moduleCount()) moduleAcquireGIL();
     }
@@ -2475,6 +2489,9 @@ void afterSleep(struct aeEventLoop *eventLoop) {
 
 /* =========================== Server initialization ======================== */
 
+/**
+ * 主要是存储一些常量值
+ */
 void createSharedObjects(void) {
     int j;
 
@@ -2644,6 +2661,7 @@ void initServerConfig(void) {
     server.lruclock = getLRUClock();
     resetServerSaveParams();
 
+    // 当满足这些条件时会触发rdb的存储逻辑
     appendServerSaveParams(60*60,1);  /* save after 1 hour and 1 change */
     appendServerSaveParams(300,100);  /* save after 5 minutes and 100 changes */
     appendServerSaveParams(60,10000); /* save after 1 minute and 10000 changes */
@@ -2737,7 +2755,9 @@ extern char **environ;
  * RESTART_SERVER_CONFIG_REWRITE    Rewrite the config file before restarting.
  *
  * On success the function does not return, because the process turns into
- * a different process. On error C_ERR is returned. */
+ * a different process. On error C_ERR is returned.
+ * 重启redis
+ * */
 int restartServer(int flags, mstime_t delay) {
     int j;
 
@@ -2779,6 +2799,7 @@ int restartServer(int flags, mstime_t delay) {
     if (delay) usleep(delay*1000);
     zfree(server.exec_argv[0]);
     server.exec_argv[0] = zstrdup(server.executable);
+    // 主要就是执行executable函数
     execve(server.executable,server.exec_argv,environ);
 
     /* If an error occurred here, there is nothing we can do, but exit. */
@@ -2849,11 +2870,14 @@ int setOOMScoreAdj(int process_class) {
  *
  * If it will not be possible to set the limit accordingly to the configured
  * max number of clients, the function will do the reverse setting
- * server.maxclients to the value that we can actually handle. */
+ * server.maxclients to the value that we can actually handle.
+ * 调整允许开启的文件数量 这里应该是包含socket句柄文件的
+ * */
 void adjustOpenFilesLimit(void) {
     rlim_t maxfiles = server.maxclients+CONFIG_MIN_RESERVED_FDS;
     struct rlimit limit;
 
+    // 默认仅允许打开8个文件  获取失败时  默认允许打开1024-8个文件句柄
     if (getrlimit(RLIMIT_NOFILE,&limit) == -1) {
         serverLog(LL_WARNING,"Unable to obtain the current NOFILE limit (%s), assuming 1024 and setting the max clients configuration accordingly.",
             strerror(errno));
@@ -2870,6 +2894,8 @@ void adjustOpenFilesLimit(void) {
             /* Try to set the file limit to match 'maxfiles' or at least
              * to the higher value supported less than maxfiles. */
             bestlimit = maxfiles;
+
+            // 更新limit
             while(bestlimit > oldlimit) {
                 rlim_t decr_step = 16;
 
@@ -2879,7 +2905,9 @@ void adjustOpenFilesLimit(void) {
                 setrlimit_error = errno;
 
                 /* We failed to set file limit to 'bestlimit'. Try with a
-                 * smaller limit decrementing by a few FDs per iteration. */
+                 * smaller limit decrementing by a few FDs per iteration.
+                 * 每当无法设置到该最大值时 就将bestlimit-16 直到能够设置成功 如果此时bestlimit已经不足16时 放弃设置
+                 * */
                 if (bestlimit < decr_step) break;
                 bestlimit -= decr_step;
             }
@@ -2890,6 +2918,8 @@ void adjustOpenFilesLimit(void) {
 
             if (bestlimit < maxfiles) {
                 unsigned int old_maxclients = server.maxclients;
+
+                // 更新此时服务器允许的最大句柄数
                 server.maxclients = bestlimit-CONFIG_MIN_RESERVED_FDS;
                 /* maxclients is unsigned so may overflow: in order
                  * to check if maxclients is now logically less than 1
@@ -2959,18 +2989,22 @@ void checkTcpBacklogSettings(void) {
  * error, at least one of the server.bindaddr addresses was
  * impossible to bind, or no bind addresses were specified in the server
  * configuration but the function is not able to bind * for at least
- * one of the IPv4 or IPv6 protocols. */
+ * one of the IPv4 or IPv6 protocols.
+ * redis服务器此时开始监听某个端口  会将绑定的socket句柄 以及数量设置到指针上
+ * */
 int listenToPort(int port, int *fds, int *count) {
     int j;
 
     /* Force binding of 0.0.0.0 if no bind address is specified, always
      * entering the loop if j == 0. */
     if (server.bindaddr_count == 0) server.bindaddr[0] = NULL;
+
+    // 可以看到如果bindaddr_count为0 会设置一个默认的绑定地址
     for (j = 0; j < server.bindaddr_count || j == 0; j++) {
         if (server.bindaddr[j] == NULL) {
             int unsupported = 0;
             /* Bind * for both IPv6 and IPv4, we enter here only if
-             * server.bindaddr_count == 0. */
+             * server.bindaddr_count == 0. TODO 忽略ipv6 */
             fds[*count] = anetTcp6Server(server.neterr,port,NULL,
                 server.tcp_backlog);
             if (fds[*count] != ANET_ERR) {
@@ -2982,7 +3016,7 @@ int listenToPort(int port, int *fds, int *count) {
             }
 
             if (*count == 1 || unsupported) {
-                /* Bind the IPv4 address as well. */
+                /* Bind the IPv4 address as well. 有关C的网络模块实现先不看 认为此时已经绑定成功并返回了socket句柄 当没有指定绑定地址时 就会绑定一个默认地址 */
                 fds[*count] = anetTcpServer(server.neterr,port,NULL,
                     server.tcp_backlog);
                 if (fds[*count] != ANET_ERR) {
@@ -3068,20 +3102,33 @@ void resetServerStats(void) {
 
 /* Make the thread killable at any time, so that kill threads functions
  * can work reliably (default cancelability type is PTHREAD_CANCEL_DEFERRED).
- * Needed for pthread_cancel used by the fast memory test used by the crash report. */
+ * Needed for pthread_cancel used by the fast memory test used by the crash report.
+ * 设置成线程可以被直接关闭 并且采用异步关闭的方式
+ * */
 void makeThreadKillable(void) {
+    // 设置成enable后 如果该线程收到了关闭信号后就会设置成CANCELED状态
     pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+    // 该方法定义了线程的关闭方式 ASYNCHRONOUS 代表可异步取消 也就是不需要等到线程执行到特殊的关闭点就可以直接取消(任意时间点取消)
+    // 默认情况下线程是同步取消 也就是要等到指定的关闭点才可以
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 }
 
+/**
+ * 初始化redis服务器
+ */
 void initServer(void) {
     int j;
 
+    // 忽略这2种信号
     signal(SIGHUP, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
+
+    // 安装信号处理器
     setupSignalHandlers();
+    // 将redis线程设置成可以强制关闭 c的线程操作手法与java不一样 java是不能直接终止某个线程的
     makeThreadKillable();
 
+    // 忽略日志信息
     if (server.syslog_enabled) {
         openlog(server.syslog_ident, LOG_PID | LOG_NDELAY | LOG_NOWAIT,
             server.syslog_facility);
@@ -5308,6 +5355,9 @@ void redisAsciiArt(void) {
     zfree(buf);
 }
 
+/**
+ * redis的信号处理器 只有特定的信号才会被处理 主要就是退出redis进程
+ */
 static void sigShutdownHandler(int sig) {
     char *msg;
 

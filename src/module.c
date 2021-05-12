@@ -4854,14 +4854,18 @@ moduleBlockClient(RedisModuleCtx *ctx, RedisModuleCmdFunc reply_callback, RedisM
  * If the callback returns REDISMODULE_OK, then the client can be unblocked,
  * otherwise the client remains blocked and we'll retry again when one of
  * the keys it blocked for becomes "ready" again.
- * This function returns 1 if client was served (and should be unblocked) */
+ * This function returns 1 if client was served (and should be unblocked)
+ * @param key 某个已经准备好的robj对应的key (db中的key也是robj类型(sds))
+ * */
 int moduleTryServeClientBlockedOnKey(client *c, robj *key) {
     int served = 0;
     RedisModuleBlockedClient *bc = c->bpop.module_blocked_handle;
 
     /* Protect against re-processing: don't serve clients that are already
      * in the unblocking list for any reason (including RM_UnblockClient()
-     * explicit call). See #6798. */
+     * explicit call). See #6798.
+     * TODO
+     * */
     if (bc->unblocked) return 0;
 
     RedisModuleCtx ctx = REDISMODULE_CTX_INIT;

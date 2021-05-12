@@ -161,7 +161,9 @@ void freeReplicationBacklog(void) {
 /* Add data to the replication backlog.
  * This function also increments the global replication offset stored at
  * server.master_repl_offset, because there is no case where we want to feed
- * the backlog without incrementing the offset. */
+ * the backlog without incrementing the offset.
+ *
+ * */
 void feedReplicationBacklog(void *ptr, size_t len) {
     unsigned char *p = ptr;
 
@@ -229,8 +231,7 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
 
     /* If there aren't slaves, and there is no backlog buffer to populate,
      * we can return ASAP.
-     * 如果本次slaves 列表为空 不需要发送数据
-     * TODO 前半句是什么意思???
+     * 如果本次slaves 列表为空 且没有积压的数据 不需要发送数据
      * */
     if (server.repl_backlog == NULL && listLength(slaves) == 0) return;
 
@@ -272,12 +273,15 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
     }
     server.slaveseldb = dictid;
 
-    /* Write the command to the replication backlog if any. */
+    /* Write the command to the replication backlog if any.
+     * TODO 先忽略有数据积压的情况
+     * */
     if (server.repl_backlog) {
         char aux[LONG_STR_SIZE+3];
 
         /* Add the multi bulk reply length. */
         aux[0] = '*';
+        // * 代表是一个bulk协议  然后写入bulk下每个子command数量
         len = ll2string(aux+1,sizeof(aux)-1,argc);
         aux[len+1] = '\r';
         aux[len+2] = '\n';
@@ -299,17 +303,21 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
         }
     }
 
-    /* Write the command to every slave. */
+    /* Write the command to every slave. 将该command写往每个slave节点 */
     listRewind(slaves,&li);
     while((ln = listNext(&li))) {
         client *slave = ln->value;
 
-        /* Don't feed slaves that are still waiting for BGSAVE to start. */
+        /* Don't feed slaves that are still waiting for BGSAVE to start.
+         * 如果该slave正处于通过后台进程存储数据的阶段 忽略本次复写请求
+         * */
         if (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_START) continue;
 
         /* Feed slaves that are waiting for the initial SYNC (so these commands
          * are queued in the output buffer until the initial SYNC completes),
          * or are already in sync with the master. */
+
+        // 下面就是将本次command信息写入到socket
 
         /* Add the multi bulk length. */
         addReplyArrayLen(slave,argc);

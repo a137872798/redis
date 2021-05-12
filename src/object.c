@@ -400,6 +400,13 @@ void decrRefCountVoid(void *o) {
     decrRefCount(o);
 }
 
+/**
+ * 检查某个redisObject是否是指定的类型 如果不是将异常信息发送给client
+ * @param c
+ * @param o
+ * @param type
+ * @return
+ */
 int checkType(client *c, robj *o, int type) {
     /* A NULL is considered an empty key */
     if (o && o->type != type) {

@@ -3345,6 +3345,9 @@ void killIOThreads(void) {
     }
 }
 
+/**
+ * 对io线程锁的释放 就认为是开启线程
+ */
 void startThreadedIO(void) {
     if (tio_debug) { printf("S"); fflush(stdout); }
     if (tio_debug) printf("--- STARTING THREADED IO ---\n");
@@ -3384,7 +3387,7 @@ void stopThreadedIO(void) {
  * The function returns 0 if the I/O threading should be used because there
  * are enough active threads, otherwise 1 is returned and the I/O threads
  * could be possibly stopped (if already active) as a side effect.
- * 检查是否可以暂停某些io线程
+ * 根据此时pending_write的任务数量 判断是否可以暂停io线程
  * */
 int stopThreadedIOIfNeeded(void) {
     int pending = listLength(server.clients_pending_write);
@@ -3401,22 +3404,30 @@ int stopThreadedIOIfNeeded(void) {
     }
 }
 
+/**
+ * 尝试使用io线程处理所有之前被搁置的write任务
+ * @return
+ */
 int handleClientsWithPendingWritesUsingThreads(void) {
     int processed = listLength(server.clients_pending_write);
     if (processed == 0) return 0; /* Return ASAP if there are no clients. */
 
     /* If I/O threads are disabled or we have few clients to serve, don't
-     * use I/O threads, but thejboring synchronous code. */
+     * use I/O threads, but thejboring synchronous code.
+     * 代表仅只用主线程处理 pending_write
+     * */
     if (server.io_threads_num == 1 || stopThreadedIOIfNeeded()) {
         return handleClientsWithPendingWrites();
     }
 
-    /* Start threads if needed. */
+    /* Start threads if needed. 此时io线程处于可激活状态 一般就是此时囤积的任务过多 */
     if (!server.io_threads_active) startThreadedIO();
 
     if (tio_debug) printf("%d TOTAL WRITE pending clients\n", processed);
 
-    /* Distribute the clients across N different lists. */
+    /* Distribute the clients across N different lists.
+     * 通过轮询算法 分发任务
+     * */
     listIter li;
     listNode *ln;
     listRewind(server.clients_pending_write,&li);
@@ -3447,6 +3458,7 @@ int handleClientsWithPendingWritesUsingThreads(void) {
 
     /* Also use the main thread to process a slice of clients. */
     listRewind(io_threads_list[0],&li);
+    // 主线程执行io写入任务 此时调用该方法的也是主线程 其他io线程一旦解锁后就会异步的轮询任务队列 并开始处理任务
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
         writeToClient(c,0);
@@ -3463,13 +3475,17 @@ int handleClientsWithPendingWritesUsingThreads(void) {
     if (tio_debug) printf("I/O WRITE All threads finshed\n");
 
     /* Run the list of clients again to install the write handler where
-     * needed. */
+     * needed.
+     * */
     listRewind(server.clients_pending_write,&li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
 
         /* Install the write handler if there are pending writes in some
-         * of the clients. */
+         * of the clients.
+         * 如果写入任务已经完成就不需要处理 如果写入任务未完成 代表有囤积的数据 注册writeHandler  也就是只有底层socket缓冲区空间不足时才会注册writeHandler
+         * 并且pending_write不是由于socket缓冲区空间不足 仅仅是希望在其他时机执行写入任务 这个就涉及到线程模型了
+         * */
         if (clientHasPendingReplies(c) &&
                 connSetWriteHandler(c->conn, sendReplyToClient) == AE_ERR)
         {

@@ -662,17 +662,22 @@ void lremCommand(client *c) {
  * The idea is to be able to get an element from a list in a reliable way
  * since the element is not just returned but pushed against another list
  * as well. This command was originally proposed by Ezra Zygmuntowicz.
+ * 将value插入到目标key对应的redisObject中 要求robj必须是list类型
  */
-
 void rpoplpushHandlePush(client *c, robj *dstkey, robj *dstobj, robj *value) {
-    /* Create the list if the key does not exist */
+    /* Create the list if the key does not exist
+     * 如果robj尚未创建 先创建对象
+     * */
     if (!dstobj) {
         dstobj = createQuicklistObject();
         quicklistSetOptions(dstobj->ptr, server.list_max_ziplist_size,
                             server.list_compress_depth);
         dbAdd(c->db,dstkey,dstobj);
     }
+
+    // 如果有监听该key的client 这里进行通知
     signalModifiedKey(c,c->db,dstkey);
+    // 将value插入到robj中
     listTypePush(dstobj,value,LIST_HEAD);
     notifyKeyspaceEvent(NOTIFY_LIST,"lpush",dstkey,c->db->id);
     /* Always send the pushed value to the client. */
@@ -741,7 +746,12 @@ void rpoplpushCommand(client *c) {
  * C_ERR is returned to signal the caller that the list POP operation
  * should be undone as the client was not served: This only happens for
  * BRPOPLPUSH that fails to push the value to the destination key as it is
- * of the wrong type. */
+ * of the wrong type.
+ * client原本因为等待某个key而阻塞 当该key准备好时 就可以通知client
+ * @param receiver 本次接收提醒的client
+ * @param value 本次分配给该client的value(redisList的元素)
+ * @param where 上次该client原本要求从哪个方向获取key对应的redisList的元素
+ * */
 int serveClientBlockedOnList(client *receiver, robj *key, robj *dstkey, redisDb *db, robj *value, int where)
 {
     robj *argv[3];
@@ -751,28 +761,37 @@ int serveClientBlockedOnList(client *receiver, robj *key, robj *dstkey, redisDb 
         argv[0] = (where == LIST_HEAD) ? shared.lpop :
                                           shared.rpop;
         argv[1] = key;
+
+        // 将本次请求传播到aof和副本上
         propagate((where == LIST_HEAD) ?
             server.lpopCommand : server.rpopCommand,
             db->id,argv,2,PROPAGATE_AOF|PROPAGATE_REPL);
 
-        /* BRPOP/BLPOP */
+        /* BRPOP/BLPOP 将结果返回给client 也就是server应该会统筹所有client的请求 并在准备好redisObject后将结果挨个返回给client */
         addReplyArrayLen(receiver,2);
         addReplyBulk(receiver,key);
         addReplyBulk(receiver,value);
 
-        /* Notify event. */
+        /* Notify event. 触发一个通知事件 */
         char *event = (where == LIST_HEAD) ? "lpop" : "rpop";
         notifyKeyspaceEvent(NOTIFY_LIST,event,key,receiver->db->id);
     } else {
-        /* BRPOPLPUSH */
+        /* BRPOPLPUSH
+         * 代表本次获取到的key 会写入到另一个列表中
+         * 检查目标key是否能在db中找到对应的redisObject
+         * */
         robj *dstobj =
             lookupKeyWrite(receiver->db,dstkey);
+
         if (!(dstobj &&
              checkType(receiver,dstobj,OBJ_LIST)))
         {
+            // dstobj未创建 或者存在且类型正确
             rpoplpushHandlePush(receiver,dstkey,dstobj,
                 value);
-            /* Propagate the RPOPLPUSH operation. */
+            /* Propagate the RPOPLPUSH operation.
+             * 将本次操作同步到aof/副本 并发出事件
+             * */
             argv[0] = shared.rpoplpush;
             argv[1] = key;
             argv[2] = dstkey;
@@ -785,7 +804,7 @@ int serveClientBlockedOnList(client *receiver, robj *key, robj *dstkey, redisDb 
             notifyKeyspaceEvent(NOTIFY_LIST,"rpop",key,receiver->db->id);
         } else {
             /* BRPOPLPUSH failed because of wrong
-             * destination type. */
+             * destination type. 目标对象存在 但是类型不正确 */
             return C_ERR;
         }
     }
