@@ -184,23 +184,30 @@ int dictExpand(dict *d, unsigned long size)
  * since part of the hash table may be composed of empty spaces, it is not
  * guaranteed that this function will rehash even a single bucket, since it
  * will visit at max N*10 empty buckets in total, otherwise the amount of
- * work it does would be unbound and the function may block for a long time. */
+ * work it does would be unbound and the function may block for a long time.
+ * 将原table上的某个元素移动到新的table上
+ * */
 int dictRehash(dict *d, int n) {
     int empty_visits = n*10; /* Max number of empty buckets to visit. */
     if (!dictIsRehashing(d)) return 0;
 
+    // 此时ht[0]内部还有元素未转移
     while(n-- && d->ht[0].used != 0) {
         dictEntry *de, *nextde;
 
         /* Note that rehashidx can't overflow as we are sure there are more
          * elements because ht[0].used != 0 */
         assert(d->ht[0].size > (unsigned long)d->rehashidx);
+        // rehashidx 代表此时数据迁移的下标 不断的遍历直到找到下一个待移动的entry
         while(d->ht[0].table[d->rehashidx] == NULL) {
             d->rehashidx++;
+            // 最大尝试次数为 n*10
             if (--empty_visits == 0) return 1;
         }
         de = d->ht[0].table[d->rehashidx];
-        /* Move all the keys in this bucket from the old to the new hash HT */
+        /* Move all the keys in this bucket from the old to the new hash HT
+         * 将de下挂载的链表迁移到新table
+         * */
         while(de) {
             uint64_t h;
 
@@ -217,7 +224,9 @@ int dictRehash(dict *d, int n) {
         d->rehashidx++;
     }
 
-    /* Check if we already rehashed the whole table... */
+    /* Check if we already rehashed the whole table...
+     * 当全部元素转移后将2个table交换
+     * */
     if (d->ht[0].used == 0) {
         zfree(d->ht[0].table);
         d->ht[0] = d->ht[1];
@@ -260,6 +269,7 @@ int dictRehashMilliseconds(dict *d, int ms) {
  * dictionary so that the hash table automatically migrates from H1 to H2
  * while it is actively used. */
 static void _dictRehashStep(dict *d) {
+    // 确保此时没有在遍历数据
     if (d->iterators == 0) dictRehash(d,1);
 }
 
@@ -669,7 +679,9 @@ dictEntry *dictGetRandomKey(dict *d)
  * of the returned items, but only when you need to "sample" a given number
  * of continuous elements to run some kind of algorithm or to produce
  * statistics. However the function is much faster than dictGetRandomKey()
- * at producing N elements. */
+ * at producing N elements.
+ * 采用随机抽样的方式 获取count个key后填充到des中
+ * */
 unsigned int dictGetSomeKeys(dict *d, dictEntry **des, unsigned int count) {
     unsigned long j; /* internal hash table id, 0 or 1. */
     unsigned long tables; /* 1 or 2 tables? */
@@ -677,44 +689,58 @@ unsigned int dictGetSomeKeys(dict *d, dictEntry **des, unsigned int count) {
     unsigned long maxsteps;
 
     if (dictSize(d) < count) count = dictSize(d);
+
+    // 代表最多允许探索count*10个slot
     maxsteps = count*10;
 
     /* Try to do a rehashing work proportional to 'count'. */
     for (j = 0; j < count; j++) {
+        // dict内部有2个数组 这里是尽可能将数据搬运到新的数组中
         if (dictIsRehashing(d))
             _dictRehashStep(d);
         else
             break;
     }
 
+    // 本次预计会从几个table中获取元素
     tables = dictIsRehashing(d) ? 2 : 1;
     maxsizemask = d->ht[0].sizemask;
     if (tables > 1 && maxsizemask < d->ht[1].sizemask)
         maxsizemask = d->ht[1].sizemask;
 
-    /* Pick a random point inside the larger table. */
+    /* Pick a random point inside the larger table. 随机选择一个起点 */
     unsigned long i = randomULong() & maxsizemask;
     unsigned long emptylen = 0; /* Continuous empty entries so far. */
+
     while(stored < count && maxsteps--) {
+        // 挨个从table中获取元素
         for (j = 0; j < tables; j++) {
             /* Invariant of the dict.c rehashing: up to the indexes already
              * visited in ht[0] during the rehashing, there are no populated
-             * buckets, so we can skip ht[0] for indexes between 0 and idx-1. */
+             * buckets, so we can skip ht[0] for indexes between 0 and idx-1.
+             * rehashidx 代表此时已经迁移到了哪个下标 需要到2号table查询数据
+             * */
             if (tables == 2 && j == 0 && i < (unsigned long) d->rehashidx) {
                 /* Moreover, if we are currently out of range in the second
                  * table, there will be no elements in both tables up to
                  * the current rehashing index, so we jump if possible.
                  * (this happens when going from big to small table). */
                 if (i >= d->ht[1].size)
+                    // 超过范围的话 从rehashidx开始
                     i = d->rehashidx;
                 else
                     continue;
             }
+            // 超过了当前table的范围
             if (i >= d->ht[j].size) continue; /* Out of range for this table. */
+
+            // 命中的第一个entry
             dictEntry *he = d->ht[j].table[i];
 
             /* Count contiguous empty buckets, and jump to other
-             * locations if they reach 'count' (with a minimum of 5). */
+             * locations if they reach 'count' (with a minimum of 5).
+             * 当连续发现5个空slot后 重新产生i
+             * */
             if (he == NULL) {
                 emptylen++;
                 if (emptylen >= 5 && emptylen > count) {
@@ -722,10 +748,13 @@ unsigned int dictGetSomeKeys(dict *d, dictEntry **des, unsigned int count) {
                     emptylen = 0;
                 }
             } else {
+                // 每当发现一个有效的entry后 会重置emptylen
                 emptylen = 0;
                 while (he) {
                     /* Collect all the elements of the buckets found non
-                     * empty while iterating. */
+                     * empty while iterating.
+                     * 将链表下每个元素取出来 设置到des上 注意传入的是 dictEntry** 也就是一个数组类型 所以就是普通的数组填充操作
+                     * */
                     *des = he;
                     des++;
                     he = he->next;

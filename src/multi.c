@@ -31,7 +31,9 @@
 
 /* ================================ MULTI/EXEC ============================== */
 
-/* Client state initialization for MULTI/EXEC */
+/* Client state initialization for MULTI/EXEC
+ * 重置一些multi任务状态
+ * */
 void initClientMultiState(client *c) {
     c->mstate.commands = NULL;
     c->mstate.count = 0;
@@ -39,7 +41,9 @@ void initClientMultiState(client *c) {
     c->mstate.cmd_inv_flags = 0;
 }
 
-/* Release all the resources associated with MULTI/EXEC state */
+/* Release all the resources associated with MULTI/EXEC state
+ * 释放所有之前存储的任务占用的内存
+ * */
 void freeClientMultiState(client *c) {
     int j;
 
@@ -82,6 +86,10 @@ void queueMultiCommand(client *c) {
     c->mstate.cmd_inv_flags |= ~c->cmd->flags;
 }
 
+/**
+ * 放弃本次执行的事务
+ * @param c
+ */
 void discardTransaction(client *c) {
     freeClientMultiState(c);
     initClientMultiState(c);
@@ -90,7 +98,9 @@ void discardTransaction(client *c) {
 }
 
 /* Flag the transaction as DIRTY_EXEC so that EXEC will fail.
- * Should be called every time there is an error while queueing a command. */
+ * Should be called every time there is an error while queueing a command.
+ * 打上一个dirty_exec标记 代表本次任务会执行失败
+ * */
 void flagTransaction(client *c) {
     if (c->flags & CLIENT_MULTI)
         c->flags |= CLIENT_DIRTY_EXEC;
@@ -130,7 +140,10 @@ void execCommandPropagateExec(client *c) {
  * The transaction is always aboarted with -EXECABORT so that the client knows
  * the server exited the multi state, but the actual reason for the abort is
  * included too.
- * Note: 'error' may or may not end with \r\n. see addReplyErrorFormat. */
+ * Note: 'error' may or may not end with \r\n. see addReplyErrorFormat.
+ * 由于某些原因 之前执行的multi命令需要被终止
+ * @param error 本次要返回的异常信息
+ * */
 void execCommandAbort(client *c, sds error) {
     discardTransaction(c);
 
@@ -139,7 +152,9 @@ void execCommandAbort(client *c, sds error) {
 
     /* Send EXEC to clients waiting data from MONITOR. We did send a MULTI
      * already, and didn't send any of the queued commands, now we'll just send
-     * EXEC so it is clear that the transaction is over. */
+     * EXEC so it is clear that the transaction is over.
+     * 这些信息会被发往监控模块
+     * */
     if (listLength(server.monitors) && !server.loading)
         replicationFeedMonitors(c,server.monitors,c->db->id,c->argv,c->argc);
 }

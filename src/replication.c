@@ -391,6 +391,14 @@ void replicationFeedSlavesFromMasterStream(list *slaves, char *buf, size_t bufle
     }
 }
 
+/**
+ * 某些特殊的信息会被发往监控模块 比如失败信息
+ * @param c
+ * @param monitors
+ * @param dictid
+ * @param argv
+ * @param argc
+ */
 void replicationFeedMonitors(client *c, list *monitors, int dictid, robj **argv, int argc) {
     listNode *ln;
     listIter li;

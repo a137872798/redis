@@ -346,7 +346,9 @@ void ACLFreeUsersSet(rax *users) {
  * where the corresponding bit for the provided ID is stored, and
  * so that user->allowed_commands[word]&bit will identify that specific
  * bit. The function returns C_ERR in case the specified ID overflows
- * the bitmap in the user representation. */
+ * the bitmap in the user representation.
+ * @param id 本次要执行的command_id
+ * */
 int ACLGetCommandBitCoordinates(uint64_t id, uint64_t *word, uint64_t *bit) {
     if (id >= USER_COMMAND_BITS_COUNT) return C_ERR;
     *word = id / sizeof(uint64_t) / 8;
@@ -1109,26 +1111,40 @@ user *ACLGetUserByName(const char *name, size_t namelen) {
  * ACL_DENIED_CMD or ACL_DENIED_KEY is returned: the first in case the
  * command cannot be executed because the user is not allowed to run such
  * command, the second if the command is denied because the user is trying
- * to access keys that are not among the specified patterns. */
+ * to access keys that are not among the specified patterns.
+ * 为某个client绑定的用户进行权限校验
+ * */
 int ACLCheckCommandPerm(client *c, int *keyidxptr) {
+
+    // 该client绑定的用户
     user *u = c->user;
+    // 此时该client即将执行的command_id
     uint64_t id = c->cmd->id;
 
-    /* If there is no associated user, the connection can run anything. */
+    /* If there is no associated user, the connection can run anything.
+     * client未绑定用户 默认就是通过校验
+     * */
     if (u == NULL) return ACL_OK;
 
-    /* Check if the user can execute this command. */
+    /* Check if the user can execute this command.
+     * authCommand 本身是不需要权限校验的
+     * */
     if (!(u->flags & USER_FLAG_ALLCOMMANDS) &&
         c->cmd->proc != authCommand)
     {
         /* If the bit is not set we have to check further, in case the
-         * command is allowed just with that specific subcommand. */
+         * command is allowed just with that specific subcommand.
+         * 每个用户有自己的权限位图 因为command本身数量比较多 所以会想到用位图来表示  TODO 这里不细看了 基本就是通过位图实现权限校验
+         * */
         if (ACLGetUserCommandBit(u,id) == 0) {
-            /* Check if the subcommand matches. */
+            /* Check if the subcommand matches.
+             * 这里是command没有匹配上的情况  尝试匹配subcommand
+             * */
             if (c->argc < 2 ||
                 u->allowed_subcommands == NULL ||
                 u->allowed_subcommands[id] == NULL)
             {
+                // 子命令匹配失败 返回权限校验失败
                 return ACL_DENIED_CMD;
             }
 
@@ -1136,6 +1152,7 @@ int ACLCheckCommandPerm(client *c, int *keyidxptr) {
             while (1) {
                 if (u->allowed_subcommands[id][subid] == NULL)
                     return ACL_DENIED_CMD;
+                // 这里尝试匹配subcommand
                 if (!strcasecmp(c->argv[1]->ptr,
                                 u->allowed_subcommands[id][subid]))
                     break; /* Subcommand match found. Stop here. */
@@ -1145,23 +1162,35 @@ int ACLCheckCommandPerm(client *c, int *keyidxptr) {
     }
 
     /* Check if the user can execute commands explicitly touching the keys
-     * mentioned in the command arguments. */
+     * mentioned in the command arguments.
+     * 除了对command本身做校验外 还需要对参数做校验
+     * 通过执行getkeys_proc 可以知道要对哪些参数做校验
+     * 或者设置了firstkey 就可以定位到某几个参数 并进行校验
+     * */
     if (!(c->user->flags & USER_FLAG_ALLKEYS) &&
         (c->cmd->getkeys_proc || c->cmd->firstkey))
     {
+        // 获取一个空的getKeyResult
         getKeysResult result = GETKEYS_RESULT_INIT;
+
+        // numkeys 代表本次要检查的key数量
         int numkeys = getKeysFromCommand(c->cmd,c->argv,c->argc,&result);
+
+        // keyidx对应参数下标
         int *keyidx = result.keys;
         for (int j = 0; j < numkeys; j++) {
             listIter li;
             listNode *ln;
             listRewind(u->patterns,&li);
 
-            /* Test this key against every pattern. */
+            /* Test this key against every pattern.
+             * 针对参数级别进行校验 要求匹配pattern
+             * */
             int match = 0;
             while((ln = listNext(&li))) {
                 sds pattern = listNodeValue(ln);
                 size_t plen = sdslen(pattern);
+                // 获取该key在db中的下标
                 int idx = keyidx[j];
                 if (stringmatchlen(pattern,plen,c->argv[idx]->ptr,
                                    sdslen(c->argv[idx]->ptr),0))
@@ -1170,6 +1199,8 @@ int ACLCheckCommandPerm(client *c, int *keyidxptr) {
                     break;
                 }
             }
+
+            // 某个参数key 匹配不上任何一个pattern
             if (!match) {
                 if (keyidxptr) *keyidxptr = keyidx[j];
                 getKeysFreeResult(&result);

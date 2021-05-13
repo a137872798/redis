@@ -390,13 +390,13 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
  * properties common to multiple policies is faster. */
 #define MAXMEMORY_FLAG_LRU (1<<0)
 #define MAXMEMORY_FLAG_LFU (1<<1)
-#define MAXMEMORY_FLAG_ALLKEYS (1<<2)
+#define MAXMEMORY_FLAG_ALLKEYS (1<<2)  // 在进行内存淘汰时 是选择db下所有key 还是仅针对设置了超时时间的key
 #define MAXMEMORY_FLAG_NO_SHARED_INTEGERS \
     (MAXMEMORY_FLAG_LRU|MAXMEMORY_FLAG_LFU)
 
 #define MAXMEMORY_VOLATILE_LRU ((0<<8)|MAXMEMORY_FLAG_LRU)
 #define MAXMEMORY_VOLATILE_LFU ((1<<8)|MAXMEMORY_FLAG_LFU)
-#define MAXMEMORY_VOLATILE_TTL (2<<8)
+#define MAXMEMORY_VOLATILE_TTL (2<<8)  // 如果使用该算法就是看哪个key最快过期就先淘汰哪个key
 #define MAXMEMORY_VOLATILE_RANDOM (3<<8)
 #define MAXMEMORY_ALLKEYS_LRU ((4<<8)|MAXMEMORY_FLAG_LRU|MAXMEMORY_FLAG_ALLKEYS)
 #define MAXMEMORY_ALLKEYS_LFU ((5<<8)|MAXMEMORY_FLAG_LFU|MAXMEMORY_FLAG_ALLKEYS)
@@ -670,7 +670,7 @@ typedef struct clientReplyBlock {
  * database. The database number is the 'id' field in the structure. */
 typedef struct redisDb {
     dict *dict;                 /* The keyspace for this DB */
-    dict *expires;              /* Timeout of keys with a timeout set */
+    dict *expires;   dict;           /* Timeout of keys with a timeout set */
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP)*/
 
     // 代表这些key已经准备完成  对应blocking_keys
@@ -785,7 +785,9 @@ typedef struct {
      *
      * If the bit for a given command is NOT set and the command has
      * subcommands, Redis will also check allowed_subcommands in order to
-     * understand if the command can be executed. */
+     * understand if the command can be executed.
+     * 每个用户对于可使用的command有一个权限位图
+     * */
     uint64_t allowed_commands[USER_COMMAND_BITS_COUNT/64];
 
     /* This array points, for each command ID (corresponding to the command
@@ -1383,6 +1385,8 @@ struct redisServer {
     /* Replication (slave) */
     char *masteruser;               /* AUTH with this user and masterauth with master */
     char *masterauth;               /* AUTH with this password with master */
+
+    // 应该是只有slave节点才会设置该地址吧
     char *masterhost;               /* Hostname of master */
     int masterport;                 /* Port of master */
     int repl_timeout;               /* Timeout after N seconds of master idle */
@@ -1421,7 +1425,10 @@ struct redisServer {
     /* Limits */
     unsigned int maxclients;            /* Max number of simultaneous clients */
     unsigned long long maxmemory;   /* Max number of memory bytes to use */
+
+    // 当内存不足时使用的内存淘汰策略
     int maxmemory_policy;           /* Policy for key eviction */
+    // 这是一个采样数量  当redis内部的key已经比较多的时候 不可能遍历全db 所以采用抽样的方式
     int maxmemory_samples;          /* Precision of random sampling */
     int lfu_log_factor;             /* LFU logarithmic counter factor. */
     int lfu_decay_time;             /* LFU counter decay factor. */
@@ -1576,7 +1583,7 @@ struct redisCommand {
      * Used for Redis Cluster redirect. */
     redisGetKeysProc *getkeys_proc;
     /* What keys should be loaded in background when calling this command? */
-    int firstkey; /* The first argument that's a key (0 = no keys) */
+    int firstkey; /* The first argument that's a key (0 = no keys) 因为argv[0]应当是command名称 */
     int lastkey;  /* The last argument that's a key */
     int keystep;  /* The step between first and last key */
     long long microseconds, calls;

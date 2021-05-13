@@ -3861,6 +3861,7 @@ void call(client *c, int flags) {
                 multi_emitted = 1;
             }
 
+            // 处理之前囤积的所有同步command
             for (j = 0; j < server.also_propagate.numops; j++) {
                 rop = &server.also_propagate.ops[j];
                 int target = rop->target;
@@ -3871,20 +3872,25 @@ void call(client *c, int flags) {
                     propagate(rop->cmd,rop->dbid,rop->argv,rop->argc,target);
             }
 
+            // 此时可以提交之前出来的所有command了  为什么redis会需要事务 基于什么原因引出这个概念
             if (multi_emitted) {
                 execCommandPropagateExec(c);
             }
         }
-        // 此时
+        // 此时以及处理完所有also_propagate命令了 所以可以清除list
         redisOpArrayFree(&server.also_propagate);
     }
 
-    // 还原之前所有待执行的传播任务
+    // 还原之前所有待执行的传播任务   也就是上面执行的传播任务都是在执行command后产生的
     server.also_propagate = prev_also_propagate;
 
     /* If the client has keys tracking enabled for client side caching,
-     * make sure to remember the keys it fetched via this command. */
+     * make sure to remember the keys it fetched via this command.
+     * 代表本次command 仅仅是访问redisObject 而没有修改数据
+     * TODO 忽略track
+     * */
     if (c->cmd->flags & CMD_READONLY) {
+        // 忽略lua脚本的情况下 caller就是client
         client *caller = (c->flags & CLIENT_LUA && server.lua_caller) ?
                             server.lua_caller : c;
         if (caller->flags & CLIENT_TRACKING &&
@@ -3908,7 +3914,9 @@ void call(client *c, int flags) {
  * varios pre-execution checks. it returns the appropriate error to the client.
  * If there's a transaction is flags it as dirty, and if the command is EXEC,
  * it aborts the transaction.
- * Note: 'reply' is expected to end with \r\n */
+ * Note: 'reply' is expected to end with \r\n
+ * 当准备执行某个命令时  可能是由于一些校验未通过 或者别的原因 拒绝执行本次命令时 触发下面的方法
+ * */
 void rejectCommand(client *c, robj *reply) {
     flagTransaction(c);
     if (c->cmd && c->cmd->proc == execCommand) {
@@ -3919,6 +3927,12 @@ void rejectCommand(client *c, robj *reply) {
     }
 }
 
+/**
+ * 根据动态参数 + 格式化语句生成拒绝信息
+ * @param c
+ * @param fmt
+ * @param ...
+ */
 void rejectCommandFormat(client *c, const char *fmt, ...) {
     flagTransaction(c);
     va_list ap;
@@ -3947,12 +3961,16 @@ void rejectCommandFormat(client *c, const char *fmt, ...) {
  * 执行command
  * */
 int processCommand(client *c) {
+
+    // 在执行命令前一般都要通过一组过滤器 比如是否接受这样的命令等等
     moduleCallCommandFilters(c);
 
     /* The QUIT command is handled separately. Normal command procs will
      * go through checking for replication and QUIT will cause trouble
      * when FORCE_REPLICATION is enabled and would be implemented in
-     * a regular command proc. */
+     * a regular command proc.
+     * 本次接收到一条退出指令 在恢复完client会 立即关闭server
+     * */
     if (!strcasecmp(c->argv[0]->ptr,"quit")) {
         addReply(c,shared.ok);
         c->flags |= CLIENT_CLOSE_AFTER_REPLY;
@@ -3960,8 +3978,12 @@ int processCommand(client *c) {
     }
 
     /* Now lookup the command and check ASAP about trivial error conditions
-     * such as wrong arity, bad command name and so forth. */
+     * such as wrong arity, bad command name and so forth.
+     * 去命令池中寻找匹配的命令
+     * */
     c->cmd = c->lastcmd = lookupCommand(c->argv[0]->ptr);
+
+    // command 未找到时 返回异常信息给client
     if (!c->cmd) {
         sds args = sdsempty();
         int i;
@@ -3971,6 +3993,7 @@ int processCommand(client *c) {
             (char*)c->argv[0]->ptr, args);
         sdsfree(args);
         return C_OK;
+        // 如果只是参数数量不匹配的情况 认为是client的问题 不会返回异常
     } else if ((c->cmd->arity > 0 && c->cmd->arity != c->argc) ||
                (c->argc < -c->cmd->arity)) {
         rejectCommandFormat(c,"wrong number of arguments for '%s' command",
@@ -3978,6 +4001,7 @@ int processCommand(client *c) {
         return C_OK;
     }
 
+    // 获取本次执行的command类型标识
     int is_write_command = (c->cmd->flags & CMD_WRITE) ||
                            (c->cmd->proc == execCommand && (c->mstate.cmd_flags & CMD_WRITE));
     int is_denyoom_command = (c->cmd->flags & CMD_DENYOOM) ||
@@ -3988,10 +4012,13 @@ int processCommand(client *c) {
                                  (c->cmd->proc == execCommand && (c->mstate.cmd_inv_flags & CMD_LOADING));
 
     /* Check if the user is authenticated. This check is skipped in case
-     * the default user is flagged as "nopass" and is active. */
+     * the default user is flagged as "nopass" and is active.
+     * c->authenticated只是判断默认用户是否要校验
+     * */
     int auth_required = (!(DefaultUser->flags & USER_FLAG_NOPASS) ||
                           (DefaultUser->flags & USER_FLAG_DISABLED)) &&
                         !c->authenticated;
+    // 默认用户也需要校验 将错误信息通知给client
     if (auth_required) {
         /* AUTH and HELLO and no auth modules are valid even in
          * non-authenticated state. */
@@ -4004,7 +4031,10 @@ int processCommand(client *c) {
     /* Check if the user can run this command according to the current
      * ACLs. */
     int acl_keypos;
+    // 除了执行command的权限校验外 可能还有参数级别的校验
     int acl_retval = ACLCheckCommandPerm(c,&acl_keypos);
+
+    // 权限校验失败认为是client参数错误 本次processCommand还是成功的
     if (acl_retval != ACL_OK) {
         addACLLogEntry(c,acl_retval,acl_keypos,NULL);
         if (acl_retval == ACL_DENIED_CMD)
@@ -4021,7 +4051,9 @@ int processCommand(client *c) {
     /* If cluster is enabled perform the cluster redirection here.
      * However we don't perform the redirection if:
      * 1) The sender of this command is our master.
-     * 2) The command has no key arguments. */
+     * 2) The command has no key arguments.
+     * TODO 这里涉及到请求在集群内的转发
+     * */
     if (server.cluster_enabled &&
         !(c->flags & CLIENT_MASTER) &&
         !(c->flags & CLIENT_LUA &&
@@ -4049,8 +4081,11 @@ int processCommand(client *c) {
      * Note that we do not want to reclaim memory if we are here re-entering
      * the event loop since there is a busy Lua script running in timeout
      * condition, to avoid mixing the propagation of scripts with the
-     * propagation of DELs due to eviction. */
+     * propagation of DELs due to eviction.
+     * 检查是否有足够的内存执行任务
+     * */
     if (server.maxmemory && !server.lua_timedout) {
+        // 释放内存的方式就会涉及到内存淘汰策略
         int out_of_memory = freeMemoryIfNeededAndSafe() == C_ERR;
         /* freeMemoryIfNeeded may flush slave output buffers. This may result
          * into a slave, that may be the active client, to be freed. */

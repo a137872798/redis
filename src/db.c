@@ -878,7 +878,7 @@ void scanGenericCommand(client *c, robj *o, unsigned long cursor) {
     /* Handle the case of a hash table. */
     ht = NULL;
     if (o == NULL) {
-        ht = c->db->dict;
+        ht = c->db->
     } else if (o->type == OBJ_SET && o->encoding == OBJ_ENCODING_HT) {
         ht = o->ptr;
     } else if (o->type == OBJ_HASH && o->encoding == OBJ_ENCODING_HT) {
@@ -1437,7 +1437,8 @@ int expireIfNeeded(redisDb *db, robj *key) {
  *
  * This function must be called at least once before starting to populate
  * the result, and can be called repeatedly to enlarge the result array.
- * 为getKeysResult 做一些初始化工作
+ *
+ * 为result内部成员申请足够的内存
  * @param numkeys 预计会有多少keys
  */
 int *getKeysPrepareResult(getKeysResult *result, int numkeys) {
@@ -1466,11 +1467,14 @@ int *getKeysPrepareResult(getKeysResult *result, int numkeys) {
 }
 
 /* The base case is to use the keys position as given in the command table
- * (firstkey, lastkey, step). */
+ * (firstkey, lastkey, step).
+ * 当command设置了firstkey,lastkey,step时 计算需要校验的key的下标并设置到result中
+ * */
 int getKeysUsingCommandTable(struct redisCommand *cmd,robj **argv, int argc, getKeysResult *result) {
     int j, i = 0, last, *keys;
     UNUSED(argv);
 
+    // 如果firstkey为0 就代表不需要获取任何key
     if (cmd->firstkey == 0) {
         result->numkeys = 0;
         return 0;
@@ -1479,22 +1483,30 @@ int getKeysUsingCommandTable(struct redisCommand *cmd,robj **argv, int argc, get
     last = cmd->lastkey;
     if (last < 0) last = argc+last;
 
+    // 代表本次总计要校验多少个key
     int count = ((last - cmd->firstkey)+1);
+    // 提前为result申请内存
     keys = getKeysPrepareResult(result, count);
 
+    // 每次移动固定的step 将获取到的argc下标填充到result中
     for (j = cmd->firstkey; j <= last; j += cmd->keystep) {
+
+        // 本次要校验的参数下标超过了参数的总长度
         if (j >= argc) {
             /* Modules commands, and standard commands with a not fixed number
              * of arguments (negative arity parameter) do not have dispatch
              * time arity checks, so we need to handle the case where the user
              * passed an invalid number of arguments here. In this case we
              * return no keys and expect the command implementation to report
-             * an arity or syntax error. */
+             * an arity or syntax error.
+             * TODO
+             * */
             if (cmd->flags & CMD_MODULE || cmd->arity < 0) {
                 getKeysFreeResult(result);
                 result->numkeys = 0;
                 return 0;
             } else {
+                // 仅仅打印日志提示
                 serverPanic("Redis built-in command declared keys positions not matching the arity requirements.");
             }
         }
@@ -1514,13 +1526,19 @@ int getKeysUsingCommandTable(struct redisCommand *cmd,robj **argv, int argc, get
  * table, according to the command name in argv[0].
  *
  * This function uses the command table if a command-specific helper function
- * is not required, otherwise it calls the command-specific function. */
+ * is not required, otherwise it calls the command-specific function.
+ * 根据command信息以及参数信息 从db中读取一些key 并填充到result中
+ * */
 int getKeysFromCommand(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result) {
+    // TODO 先忽略module相关的
     if (cmd->flags & CMD_MODULE_GETKEYS) {
         return moduleGetCommandKeysViaAPI(cmd,argv,argc,result);
+
+        // 在对client执行command 进行权限校验时 如果发现携带了getKeys_proc就会进入该分支
     } else if (!(cmd->flags & CMD_MODULE) && cmd->getkeys_proc) {
         return cmd->getkeys_proc(cmd,argv,argc,result);
     } else {
+        // 如果command携带了 firstkey lasterkey step等参数时 就代表需要对本次command携带的参数做校验
         return getKeysUsingCommandTable(cmd,argv,argc,result);
     }
 }
