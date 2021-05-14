@@ -318,6 +318,7 @@ int dbSyncDelete(redisDb *db, robj *key) {
      * the key, because it is shared with the main dictionary. */
     if (dictSize(db->expires) > 0) dictDelete(db->expires,key->ptr);
     if (dictDelete(db->dict,key->ptr) == DICT_OK) {
+        // master节点会知道某些key 存在于集群的哪个节点上
         if (server.cluster_enabled) slotToKeyDel(key->ptr);
         return 1;
     } else {
@@ -1326,7 +1327,7 @@ long long getExpire(redisDb *db, robj *key) {
  * AOF and the master->slave link guarantee operation ordering, everything
  * will be consistent even if we allow write operations against expiring
  * keys.
- * @param lazy 是否惰性处理过期事件
+ * @param lazy 是否采用惰性淘汰的方式
  * */
 void propagateExpire(redisDb *db, robj *key, int lazy) {
     robj *argv[2];

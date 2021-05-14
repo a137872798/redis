@@ -599,6 +599,7 @@ int freeMemoryIfNeeded(void) {
                 /* We don't want to make local-db choices when expiring keys,
                  * so to start populate the eviction pool sampling keys from
                  * every DB.
+                 * 扫描所有db之后(抽样) 得到评分最低的16个key
                  * */
                 for (i = 0; i < server.dbnum; i++) {
                     db = server.db + i;
@@ -606,18 +607,22 @@ int freeMemoryIfNeeded(void) {
                     dict = (server.maxmemory_policy & MAXMEMORY_FLAG_ALLKEYS) ?
                            db->dict : db->expires;
                     if ((keys = dictSize(dict)) != 0) {
-                        // 每次选出评分最低的16个key 这些key可能会被删除  总计有3种内存淘汰策略 lru lfu ttl    ttl就是依据什么key最快过期作为指标
                         evictionPoolPopulate(i, dict, db->dict, pool);
                         total_keys += keys;
                     }
                 }
+
+                // 代表此时db下没有任何key 也就无法淘汰数据
                 if (!total_keys) break; /* No keys to evict. */
 
-                /* Go backward from best to worst element to evict. */
+                /* Go backward from best to worst element to evict.
+                 * 从后往前看 因为在pool中 idle得分越高的在越后面
+                 * */
                 for (k = EVPOOL_SIZE - 1; k >= 0; k--) {
                     if (pool[k].key == NULL) continue;
                     bestdbid = pool[k].dbid;
 
+                    // 回查之前存入的数据
                     if (server.maxmemory_policy & MAXMEMORY_FLAG_ALLKEYS) {
                         de = dictFind(server.db[pool[k].dbid].dict,
                                       pool[k].key);
@@ -644,7 +649,11 @@ int freeMemoryIfNeeded(void) {
             }
         }
 
-            /* volatile-random and allkeys-random policy */
+            /* volatile-random and allkeys-random policy
+             * 采用非lru lfu ttl 的淘汰策略时
+             * 随机淘汰策略  上面的话扫描n个db后 仅选出了一个key 效率会不会太低啊
+             * 这里随机选出一个key后就可以直接返回了
+             * */
         else if (server.maxmemory_policy == MAXMEMORY_ALLKEYS_RANDOM ||
                  server.maxmemory_policy == MAXMEMORY_VOLATILE_RANDOM) {
             /* When evicting a random key, we try to evict a key for
@@ -664,10 +673,14 @@ int freeMemoryIfNeeded(void) {
             }
         }
 
-        /* Finally remove the selected key. */
+        /* Finally remove the selected key.
+         * 如果找到了最合适被移除的key
+         * */
         if (bestkey) {
             db = server.db + bestdbid;
             robj *keyobj = createStringObject(bestkey, sdslen(bestkey));
+
+            // 因为该key将被强制淘汰 需要将信息同步到aof/副本上
             propagateExpire(db, keyobj, server.lazyfree_lazy_eviction);
             /* We compute the amount of memory freed by db*Delete() alone.
              * It is possible that actually the memory needed to propagate
@@ -681,6 +694,10 @@ int freeMemoryIfNeeded(void) {
              * we only care about memory used by the key space. */
             delta = (long long) zmalloc_used_memory();
             latencyStartMonitor(eviction_latency);
+
+            // 判断是否采用惰性释放的方式 进行淘汰
+            // 无论是同步还是异步都会立即从db中删除这个key  但是内存的释放可能会延后(调用dbAsyncDelete不一定就会通过bio进行释放 还要看本次要释放的redisObject大小
+            // 只有对象比较大的时候 回收耗时长 才会创建bio回收任务)
             if (server.lazyfree_lazy_eviction)
                 dbAsyncDelete(db, keyobj);
             else
@@ -688,9 +705,12 @@ int freeMemoryIfNeeded(void) {
             latencyEndMonitor(eviction_latency);
             latencyAddSampleIfNeeded("eviction-del", eviction_latency);
             delta -= (long long) zmalloc_used_memory();
+            // 计算此时已经被释放掉的内存 如果对象被惰性删除了 实际上这里内存还不会立即释放 还会继续抽样
             mem_freed += delta;
             server.stat_evictedkeys++;
             signalModifiedKey(NULL, db, keyobj);
+
+            // 发出一个淘汰事件
             notifyKeyspaceEvent(NOTIFY_EVICTED, "evicted",
                                 keyobj, db->id);
             decrRefCount(keyobj);
@@ -699,7 +719,9 @@ int freeMemoryIfNeeded(void) {
             /* When the memory to free starts to be big enough, we may
              * start spending so much time here that is impossible to
              * deliver data to the slaves fast enough, so we force the
-             * transmission here inside the loop. */
+             * transmission here inside the loop.
+             * 此时将slave的数据尽可能的发送出去
+             * */
             if (slaves) flushSlavesOutputBuffers();
 
             /* Normally our stop condition is the ability to release
@@ -708,7 +730,9 @@ int freeMemoryIfNeeded(void) {
              * check, from time to time, if we already reached our target
              * memory, since the "mem_freed" amount is computed only
              * across the dbAsyncDelete() call, while the thread can
-             * release the memory all the time. */
+             * release the memory all the time.
+             * 每当释放的key 满16个时 检查是否有足够的空间
+             * */
             if (server.lazyfree_lazy_eviction && !(keys_freed % 16)) {
                 if (getMaxmemoryState(NULL, NULL, NULL, NULL) == C_OK) {
                     /* Let's satisfy our stop condition. */
@@ -716,6 +740,7 @@ int freeMemoryIfNeeded(void) {
                 }
             }
         } else {
+            // 代表本轮没有找到任何可以释放的key
             goto cant_free; /* nothing to free... */
         }
     }
@@ -724,14 +749,18 @@ int freeMemoryIfNeeded(void) {
     cant_free:
     /* We are here if we are not able to reclaim memory. There is only one
      * last thing we can try: check if the lazyfree thread has jobs in queue
-     * and wait... */
+     * and wait...
+     * 代表本次没有释放足够的空间
+     * */
     if (result != C_OK) {
         latencyStartMonitor(lazyfree_latency);
+        // 阻塞等待所有bio任务处理完成
         while (bioPendingJobsOfType(BIO_LAZY_FREE)) {
             if (getMaxmemoryState(NULL, NULL, NULL, NULL) == C_OK) {
                 result = C_OK;
                 break;
             }
+            // 这是沉睡1000毫秒
             usleep(1000);
         }
         latencyEndMonitor(lazyfree_latency);
@@ -752,5 +781,6 @@ int freeMemoryIfNeeded(void) {
 int freeMemoryIfNeededAndSafe(void) {
     // 如果此时服务器处于数据恢复阶段 内存必然是够用的
     if (server.lua_timedout || server.loading) return C_OK;
+    // 判断此时是否有足够的内存空间 并按照内存淘汰策略进行内存释放
     return freeMemoryIfNeeded();
 }

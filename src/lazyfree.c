@@ -27,7 +27,9 @@ size_t lazyfreeGetPendingObjectsCount(void) {
  * elements.
  *
  * For lists the function returns the number of elements in the quicklist
- * representing the list. */
+ * representing the list.
+ * 预估释放该对象的工作量  基本就是返回redisObject.size
+ * */
 size_t lazyfreeGetFreeEffort(robj *obj) {
     if (obj->type == OBJ_LIST) {
         quicklist *ql = obj->ptr;
@@ -74,20 +76,26 @@ size_t lazyfreeGetFreeEffort(robj *obj) {
  * If there are enough allocations to free the value object may be put into
  * a lazy free list instead of being freed synchronously. The lazy free list
  * will be reclaimed in a different bio.c thread.
- * 惰性删除某个db下的key
+ * 删除db下的某个key/redisObject 但是不立即释放内存
  * */
 #define LAZYFREE_THRESHOLD 64
 int dbAsyncDelete(redisDb *db, robj *key) {
     /* Deleting an entry from the expires dict will not free the sds of
-     * the key, because it is shared with the main dictionary. */
+     * the key, because it is shared with the main dictionary.
+     * 该key以及被标记成要删除了 就不需要在expires中维护它了
+     * */
     if (dictSize(db->expires) > 0) dictDelete(db->expires,key->ptr);
 
     /* If the value is composed of a few allocations, to free in a lazy way
      * is actually just slower... So under a certain limit we just free
      * the object synchronously. */
     dictEntry *de = dictUnlink(db->dict,key->ptr);
+
+    // 创建一个后台删除任务  等待bio线程进行数据删除
     if (de) {
         robj *val = dictGetVal(de);
+
+        // 预估释放该对象的工作量  一般就是返回redisObject.size
         size_t free_effort = lazyfreeGetFreeEffort(val);
 
         /* If releasing the object is too much work, do it in the background
@@ -97,16 +105,23 @@ int dbAsyncDelete(redisDb *db, robj *key) {
          * of parts of the Redis core may call incrRefCount() to protect
          * objects, and then call dbDelete(). In this case we'll fall
          * through and reach the dictFreeUnlinkedEntry() call, that will be
-         * equivalent to just calling decrRefCount(). */
+         * equivalent to just calling decrRefCount().
+         * 当内部要删除的元素数量超过64个时 会通过其他线程执行内存释放任务 这个逻辑应该是仅针对C才有效 java的内存释放是通过jvm实现的 无法通过异步化提升这部分性能
+         * */
         if (free_effort > LAZYFREE_THRESHOLD && val->refcount == 1) {
+            // lazyfree_objects 记录了此时需要惰性释放(bio线程释放) 的对象数量
             atomicIncr(lazyfree_objects,1);
+            // TODO 后台任务会去哪里找需要被释放的对象呢???
             bioCreateBackgroundJob(BIO_LAZY_FREE,val,NULL,NULL);
+            // 更新entry的值
             dictSetVal(db->dict,de,NULL);
         }
     }
 
     /* Release the key-val pair, or just the key if we set the val
-     * field to NULL in order to lazy free it later. */
+     * field to NULL in order to lazy free it later.
+     * 代表本次采用的是非惰性删除 也就是直接释放内存
+     * */
     if (de) {
         dictFreeUnlinkedEntry(db->dict,de);
         if (server.cluster_enabled) slotToKeyDel(key->ptr);

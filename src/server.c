@@ -4004,6 +4004,7 @@ int processCommand(client *c) {
     // 获取本次执行的command类型标识
     int is_write_command = (c->cmd->flags & CMD_WRITE) ||
                            (c->cmd->proc == execCommand && (c->mstate.cmd_flags & CMD_WRITE));
+    // 当前命令本身不应该在oom的情况下执行 如果本次是一个执行任务 mstate.cmd_flags 代表的是这组任务 这组任务也不应该在oom的情况下继续执行
     int is_denyoom_command = (c->cmd->flags & CMD_DENYOOM) ||
                              (c->cmd->proc == execCommand && (c->mstate.cmd_flags & CMD_DENYOOM));
     int is_denystale_command = !(c->cmd->flags & CMD_STALE) ||
@@ -4082,27 +4083,33 @@ int processCommand(client *c) {
      * the event loop since there is a busy Lua script running in timeout
      * condition, to avoid mixing the propagation of scripts with the
      * propagation of DELs due to eviction.
-     * 检查是否有足够的内存执行任务
+     * 代表redis服务器有设置内存使用上限
      * */
     if (server.maxmemory && !server.lua_timedout) {
-        // 释放内存的方式就会涉及到内存淘汰策略
+        // 这里判断此时是否有足够的内存  释放内存的方式就会涉及到内存淘汰策略
         int out_of_memory = freeMemoryIfNeededAndSafe() == C_ERR;
         /* freeMemoryIfNeeded may flush slave output buffers. This may result
-         * into a slave, that may be the active client, to be freed. */
+         * into a slave, that may be the active client, to be freed.
+         * TODO current_client 代表此时正在执行哪个client发起的命令 什么情况下会被置空
+         * */
         if (server.current_client == NULL) return C_ERR;
 
+        // 判断当前command是否不允许在oom的情况下执行 比如get操作不会使用新内存 还是可以正常执行的
         int reject_cmd_on_oom = is_denyoom_command;
         /* If client is in MULTI/EXEC context, queuing may consume an unlimited
          * amount of memory, so we want to stop that.
          * However, we never want to reject DISCARD, or even EXEC (unless it
          * contains denied commands, in which case is_denyoom_command is already
-         * set. */
+         * set.
+         * 如果本次正在执行一组command 并且其中没有表示完结的exec/discard 那么之后可能会使用大量内存 以防万一就拒绝本次任务
+         * */
         if (c->flags & CLIENT_MULTI &&
             c->cmd->proc != execCommand &&
             c->cmd->proc != discardCommand) {
             reject_cmd_on_oom = 1;
         }
 
+        // 此时内存不足 且本次command无法在oom的情况下继续执行 将错误信息返回给client
         if (out_of_memory && reject_cmd_on_oom) {
             rejectCommand(c, shared.oomerr);
             return C_OK;
@@ -4110,7 +4117,9 @@ int processCommand(client *c) {
 
         /* Save out_of_memory result at script start, otherwise if we check OOM
          * until first write within script, memory used by lua stack and
-         * arguments might interfere. */
+         * arguments might interfere.
+         * TODO 忽略lua
+         * */
         if (c->cmd->proc == evalCommand || c->cmd->proc == evalShaCommand) {
             server.lua_oom = out_of_memory;
         }

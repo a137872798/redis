@@ -372,14 +372,19 @@ dictEntry *dictAddOrFind(dict *d, void *key) {
 
 /* Search and remove an element. This is an helper function for
  * dictDelete() and dictUnlink(), please check the top comment
- * of those functions. */
+ * of those functions.
+ * 从dict中删除某个key
+ * @param nofree 代表是否要释放内存
+ * */
 static dictEntry *dictGenericDelete(dict *d, const void *key, int nofree) {
     uint64_t h, idx;
     dictEntry *he, *prevHe;
     int table;
 
+    // 代表dict为空
     if (d->ht[0].used == 0 && d->ht[1].used == 0) return NULL;
 
+    // 如果当前有数据需要被转移到新的table上 就顺便进行迁移
     if (dictIsRehashing(d)) _dictRehashStep(d);
     h = dictHashKey(d, key);
 
@@ -394,6 +399,8 @@ static dictEntry *dictGenericDelete(dict *d, const void *key, int nofree) {
                     prevHe->next = he->next;
                 else
                     d->ht[table].table[idx] = he->next;
+
+                // 代表仅从dict中移除 但是没有释放内存
                 if (!nofree) {
                     dictFreeKey(d, he);
                     dictFreeVal(d, he);
