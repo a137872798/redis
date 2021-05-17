@@ -4126,13 +4126,21 @@ int processCommand(client *c) {
     }
 
     /* Make sure to use a reasonable amount of memory for client side
-     * caching metadata. */
+     * caching metadata.
+     * TODO 先忽略链路追踪
+     * */
     if (server.tracking_clients) trackingLimitUsedSlots();
 
     /* Don't accept write commands if there are problems persisting on disk
-     * and if this is a master instance. */
+     * and if this is a master instance.
+     * 检测redis在执行磁盘写入时是否出现了异常 这里的磁盘写入异常指的是 aof/rdb写入异常
+     * */
     int deny_write_type = writeCommandsDeniedByDiskError();
+
+    // 代表此时无法正常将数据写入到磁盘 并且本次收到的是一条write命令
     if (deny_write_type != DISK_ERROR_TYPE_NONE &&
+    // TODO 这个条件应该是代表当前节点是master节点 也就是副本即使发现此时rdb/aof写入失败 也要执行command
+    //  (也就是副本能否正常的进行刷盘实际上是不关心的 只要master能够正常刷盘就可以)
         server.masterhost == NULL &&
         (is_write_command ||c->cmd->proc == pingCommand))
     {
@@ -4146,11 +4154,15 @@ int processCommand(client *c) {
     }
 
     /* Don't accept write commands if there are not enough good slaves and
-     * user configured the min-slaves-to-write option. */
+     * user configured the min-slaves-to-write option.
+     * 当前节点是master节点就要检测此时有多少能正常工作的slave节点
+     * */
     if (server.masterhost == NULL &&
         server.repl_min_slaves_to_write &&
+        // 滞后节点是干嘛的
         server.repl_min_slaves_max_lag &&
         is_write_command &&
+        // 当此时可用的slave节点过少时 任务本次数据可能会丢失 所以拒绝本次请求
         server.repl_good_slaves_count < server.repl_min_slaves_to_write)
     {
         rejectCommand(c, shared.noreplicaserr);
@@ -4158,7 +4170,9 @@ int processCommand(client *c) {
     }
 
     /* Don't accept write commands if this is a read only slave. But
-     * accept write commands if this is our master. */
+     * accept write commands if this is our master.
+     * 当前节点是slave节点 并且是一个只读节点是不能接收外部的写入操作的 但是master的写入任务还是会执行(复写)
+     * */
     if (server.masterhost && server.repl_slave_ro &&
         !(c->flags & CLIENT_MASTER) &&
         is_write_command)
@@ -4168,7 +4182,9 @@ int processCommand(client *c) {
     }
 
     /* Only allow a subset of commands in the context of Pub/Sub if the
-     * connection is in RESP2 mode. With RESP3 there are no limits. */
+     * connection is in RESP2 mode. With RESP3 there are no limits.
+     * 某个订阅发布的client 只能发起这些指令
+     * */
     if ((c->flags & CLIENT_PUBSUB && c->resp == 2) &&
         c->cmd->proc != pingCommand &&
         c->cmd->proc != subscribeCommand &&
@@ -4184,8 +4200,11 @@ int processCommand(client *c) {
 
     /* Only allow commands with flag "t", such as INFO, SLAVEOF and so on,
      * when slave-serve-stale-data is no and we are a slave with a broken
-     * link with master. */
+     * link with master.
+     * 当前是slave节点 并且与集群断开连接
+     * */
     if (server.masterhost && server.repl_state != REPL_STATE_CONNECTED &&
+    // TODO 这2个参数???
         server.repl_serve_stale_data == 0 &&
         is_denystale_command)
     {
@@ -4194,7 +4213,9 @@ int processCommand(client *c) {
     }
 
     /* Loading DB? Return an error if the command has not the
-     * CMD_LOADING flag. */
+     * CMD_LOADING flag.
+     * 此时还处于数据加载阶段 某些command就会被拒绝
+     * */
     if (server.loading && is_denyloading_command) {
         rejectCommand(c, shared.loadingerr);
         return C_OK;
@@ -4205,7 +4226,9 @@ int processCommand(client *c) {
      * sending a transaction with pipelining without error checking, may have
      * the MULTI plus a few initial commands refused, then the timeout
      * condition resolves, and the bottom-half of the transaction gets
-     * executed, see Github PR #7022. */
+     * executed, see Github PR #7022.
+     * 忽略lua脚本相关的
+     * */
     if (server.lua_timedout &&
           c->cmd->proc != authCommand &&
           c->cmd->proc != helloCommand &&
@@ -4225,7 +4248,10 @@ int processCommand(client *c) {
         return C_OK;
     }
 
-    /* Exec the command */
+    /* Exec the command
+     * 在通过参数校验 command执行权限校验 内存校验 节点状态校验后 终于开始执行command
+     * 如果发现本次执行的是一个批任务 并且本次不是表示终止的任务 将command 加入到队列中
+     * */
     if (c->flags & CLIENT_MULTI &&
         c->cmd->proc != execCommand && c->cmd->proc != discardCommand &&
         c->cmd->proc != multiCommand && c->cmd->proc != watchCommand)
@@ -4233,8 +4259,10 @@ int processCommand(client *c) {
         queueMultiCommand(c);
         addReply(c,shared.queued);
     } else {
+        // 在执行任务的过程中又会涉及到 aof/slave节点的数据复写
         call(c,CMD_CALL_FULL);
         c->woff = server.master_repl_offset;
+        // 在执行完某些任务后 可能某些key会被加入到ready_keys 此时就可以唤醒阻塞等待这些key的client
         if (listLength(server.ready_keys))
             handleClientsBlockedOnKeys();
     }
@@ -4244,7 +4272,9 @@ int processCommand(client *c) {
 /*================================== Shutdown =============================== */
 
 /* Close listening sockets. Also unlink the unix domain socket if
- * unlink_unix_socket is non-zero. */
+ * unlink_unix_socket is non-zero.
+ * 关闭此时所有监听的套接字
+ * */
 void closeListeningSockets(int unlink_unix_socket) {
     int j;
 
@@ -4274,7 +4304,7 @@ int prepareForShutdown(int flags) {
      * 此时还处于数据恢复阶段 或者本次以哨兵模式启动的服务器   这些标记是用来确定是否要在终止redis时存储一份rdb数据的
      * */
     if (server.loading || server.sentinel_mode)
-        // 清除save标记 并设置一个nosave的标记
+        // 清除save标记 并设置一个nosave的标记  代表在关闭redis时 不需要存储数据 数据都未加载完成 必然没有需要存储的数据  哨兵模式下为什么不需要存储呢???
         flags = (flags & ~SHUTDOWN_SAVE) | SHUTDOWN_NOSAVE;
 
     int save = flags & SHUTDOWN_SAVE;
@@ -4293,7 +4323,7 @@ int prepareForShutdown(int flags) {
     /* Kill the saving child if there is a background saving in progress.
        We want to avoid race conditions, for instance our saving child may
        overwrite the synchronous saving did by SHUTDOWN. */
-    // 关闭rdb子进程
+    // 这里关闭了rdb的子进程
     if (server.rdb_child_pid != -1) {
         serverLog(LL_WARNING,"There is a child saving an .rdb. Killing it!");
         /* Note that, in killRDBChild, we call rdbRemoveTempFile that will
@@ -4304,11 +4334,11 @@ int prepareForShutdown(int flags) {
     }
 
     /* Kill module child if there is one.
-     * 如果此时存在module子进程  关闭
+     * 强制关闭module相关的子进程
      * */
     if (server.module_child_pid != -1) {
         serverLog(LL_WARNING,"There is a module fork child. Killing it!");
-        // 以非等待模式关闭子进程
+        // 以非等待模式关闭子进程  这里会发出kill命令来强制关闭进程
         TerminateModuleForkChild(server.module_child_pid,0);
     }
 
@@ -4316,7 +4346,7 @@ int prepareForShutdown(int flags) {
     if (server.aof_state != AOF_OFF) {
         /* Kill the AOF saving child as the AOF we already have may be longer
          * but contains the full dataset anyway.
-         * 如果此时aof子进程处于工作状态 尝试关闭
+         * 关闭aof子进程
          * */
         if (server.aof_child_pid != -1) {
             /* If we have AOF enabled but haven't written the AOF yet, don't
@@ -4329,7 +4359,6 @@ int prepareForShutdown(int flags) {
             }
             serverLog(LL_WARNING,
                 "There is a child rewriting the AOF. Killing it!");
-            // 杀死aof子进程
             killAppendOnlyChild();
         }
         /* Append only file: flush buffers and fsync() the AOF at exit */
@@ -4340,13 +4369,16 @@ int prepareForShutdown(int flags) {
         redis_fsync(server.aof_fd);
     }
 
+    // 以上操作已经关闭了所有的子进程
+
     /* Create a new RDB file before exiting.
-     * 如果此时存在一些保存点 nosave的含义是???
-     * 或者此时强制要求save  都会生成一份rdb数据
+     * 如果强制要求了save 就会生成一份rdb数据
+     * 如果没有强制要求save 就会检测此时是否满足saveparam条件
+     * 如果要求了nosave 就必然不会生成rdb数据
      * */
     if ((server.saveparamslen > 0 && !nosave) || save) {
         serverLog(LL_NOTICE,"Saving the final RDB snapshot before exiting.");
-        // TODO
+        // 打印一些监督信息 先忽略
         if (server.supervised_mode == SUPERVISED_SYSTEMD)
             redisCommunicateSystemd("STATUS=Saving the final RDB snapshot\n");
         /* Snapshotting. Perform a SYNC SAVE and exit */
@@ -4401,6 +4433,7 @@ int prepareForShutdown(int flags) {
  * DISK_ERROR_TYPE_NONE:    No problems, we can accept writes.
  * DISK_ERROR_TYPE_AOF:     Don't accept writes: AOF errors.
  * DISK_ERROR_TYPE_RDB:     Don't accept writes: RDB errors.
+ * 判断此时redis在写入rdb/aof时是否出现了异常
  */
 int writeCommandsDeniedByDiskError(void) {
     if (server.stop_writes_on_bgsave_err &&
@@ -4418,7 +4451,9 @@ int writeCommandsDeniedByDiskError(void) {
 }
 
 /* The PING command. It works in a different way if the client is in
- * in Pub/Sub mode. */
+ * in Pub/Sub mode.
+ * 处理ping命令
+ * */
 void pingCommand(client *c) {
     /* The command takes zero or one arguments. */
     if (c->argc > 2) {
@@ -4427,6 +4462,7 @@ void pingCommand(client *c) {
         return;
     }
 
+    // 将pong写入到对端
     if (c->flags & CLIENT_PUBSUB && c->resp == 2) {
         addReply(c,shared.mbulkhdr[2]);
         addReplyBulkCBuffer(c,"pong",4);
@@ -4442,10 +4478,16 @@ void pingCommand(client *c) {
     }
 }
 
+/**
+ * 将传入的参数 原封不动的返回
+ */
 void echoCommand(client *c) {
     addReplyBulk(c,c->argv[1]);
 }
 
+/**
+ * 获取当前时间 并返回
+ */
 void timeCommand(client *c) {
     struct timeval tv;
 
@@ -5206,6 +5248,9 @@ sds genRedisInfoString(const char *section) {
     return info;
 }
 
+/**
+ * 执行redis.info command 就是将此时redisServer的各种信息返回
+ */
 void infoCommand(client *c) {
     char *section = c->argc == 2 ? c->argv[1]->ptr : "default";
 
@@ -5404,6 +5449,9 @@ exit:
 #endif /* __arm64__ */
 #endif /* __linux__ */
 
+/**
+ * 创建一个进程文件
+ */
 void createPidFile(void) {
     /* If pidfile requested, but no pidfile defined, use
      * default pidfile path */
@@ -5558,7 +5606,8 @@ void setupSignalHandlers(void) {
 /* This is the signal handler for children process. It is currently useful
  * in order to track the SIGUSR1, that we send to a child in order to terminate
  * it in a clean way, without the parent detecting an error and stop
- * accepting writes because of a write error condition. */
+ * accepting writes because of a write error condition.
+ * */
 static void sigKillChildHandler(int sig) {
     UNUSED(sig);
     int level = server.in_fork_child == CHILD_TYPE_MODULE? LL_VERBOSE: LL_WARNING;
@@ -5640,7 +5689,9 @@ void sendChildCOWInfo(int ptype, char *pname) {
 void memtest(size_t megabytes, int passes);
 
 /* Returns 1 if there is --sentinel among the arguments or if
- * argv[0] contains "redis-sentinel". */
+ * argv[0] contains "redis-sentinel".
+ * 判断当前redis是否以哨兵模式启动
+ * */
 int checkForSentinelMode(int argc, char **argv) {
     int j;
 
@@ -5650,23 +5701,31 @@ int checkForSentinelMode(int argc, char **argv) {
     return 0;
 }
 
-/* Function called at startup to load RDB or AOF file in memory. */
+/* Function called at startup to load RDB or AOF file in memory.
+ * 从磁盘中恢复数据 实际上就是通过加载rdb/aof
+ * */
 void loadDataFromDisk(void) {
     long long start = ustime();
     if (server.aof_state == AOF_ON) {
+        // 其中aof文件中可能会包含rdb数据 这里就是一些数据的还原操作
         if (loadAppendOnlyFile(server.aof_filename) == C_OK)
             serverLog(LL_NOTICE,"DB loaded from append only file: %.3f seconds",(float)(ustime()-start)/1000000);
     } else {
+        // 当aof被关闭时尝试通过rdb进行数据恢复
         rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
         errno = 0; /* Prevent a stale value from affecting error checking */
         if (rdbLoad(server.rdb_filename,&rsi,RDBFLAGS_NONE) == C_OK) {
             serverLog(LL_NOTICE,"DB loaded from disk: %.3f seconds",
                 (float)(ustime()-start)/1000000);
 
-            /* Restore the replication ID / offset from the RDB file. */
+            /* Restore the replication ID / offset from the RDB file.
+             * 当本节点是slave节点时 从rdb文件中恢复副本数据的偏移量 也就是集群间数据同步的状态通过offset来追踪
+             * */
             if ((server.masterhost ||
                 (server.cluster_enabled &&
                 nodeIsSlave(server.cluster->myself))) &&
+
+                // 代表在rdb文件中存储了副本的偏移量
                 rsi.repl_id_is_set &&
                 rsi.repl_offset != -1 &&
                 /* Note that older implementations may save a repl_stream_db
@@ -5678,8 +5737,9 @@ void loadDataFromDisk(void) {
                 server.master_repl_offset = rsi.repl_offset;
                 /* If we are a slave, create a cached master from this
                  * information, in order to allow partial resynchronizations
-                 * with masters. */
+                 * with masters. 设置一些集群相关的信息 缓存一份master数据 作用是什么??? */
                 replicationCacheMasterUsingMyself();
+                // 恢复master上次同步数据的db
                 selectDb(server.cached_master,rsi.repl_stream_db);
             }
         } else if (errno != ENOENT) {
@@ -5689,6 +5749,9 @@ void loadDataFromDisk(void) {
     }
 }
 
+/**
+ * oom处理器 实际上就是打印日志
+ */
 void redisOutOfMemoryHandler(size_t allocation_size) {
     serverLog(LL_WARNING,"Out Of Memory allocating %zu bytes!",
         allocation_size);
@@ -5722,8 +5785,8 @@ void redisSetCpuAffinity(const char *cpulist) {
 
 /*
  * Check whether systemd or upstart have been used to start redis.
+ * 对外发出一个停止的信号
  */
-
 int redisSupervisedUpstart(void) {
     const char *upstart_job = getenv("UPSTART_JOB");
 
@@ -5786,6 +5849,9 @@ int iAmMaster(void) {
             (server.cluster_enabled && nodeIsMaster(server.cluster->myself)));
 }
 
+/**
+ * redis主入口
+ */
 int main(int argc, char **argv) {
     struct timeval tv;
     int j;
@@ -5838,10 +5904,14 @@ int main(int argc, char **argv) {
     getRandomBytes(hashseed,sizeof(hashseed));
     dictSetHashFunctionSeed(hashseed);
     server.sentinel_mode = checkForSentinelMode(argc,argv);
+    // 加载服务器默认配置项
     initServerConfig();
+    // 初始化权限模块 主要就是创建一个defaultUser
     ACLInit(); /* The ACL subsystem must be initialized ASAP because the
                   basic networking code and client creation depends on it. */
+    // 初始化模块系统 注册各种模块系统
     moduleInitModulesSystem();
+    // 忽略安全层
     tlsInit();
 
     /* Store the executable path and arguments in a safe place in order
@@ -5861,12 +5931,15 @@ int main(int argc, char **argv) {
 
     /* Check if we need to start in redis-check-rdb/aof mode. We just execute
      * the program main. However the program is part of the Redis executable
-     * so that we can easily execute an RDB check on loading errors. */
+     * so that we can easily execute an RDB check on loading errors.
+     * TODO 忽略检查逻辑
+     * */
     if (strstr(argv[0],"redis-check-rdb") != NULL)
         redis_check_rdb_main(argc,argv,NULL);
     else if (strstr(argv[0],"redis-check-aof") != NULL)
         redis_check_aof_main(argc,argv);
 
+    // 如果启动命令携带了参数 设置一些配置项
     if (argc >= 2) {
         j = 1; /* First option to parse in argv[] */
         sds options = sdsempty();
@@ -5934,6 +6007,8 @@ int main(int argc, char **argv) {
     }
 
     server.supervised = redisIsSupervised(server.supervised_mode);
+
+    // 如果条件允许 使用后台进程执行redis
     int background = server.daemonize && !server.supervised;
     if (background) daemonize();
 
@@ -5952,6 +6027,7 @@ int main(int argc, char **argv) {
         serverLog(LL_WARNING, "Configuration loaded");
     }
 
+    // 调节可使用的内存量
     readOOMScoreAdj();
     initServer();
     if (background || server.pidfile) createPidFile();
@@ -5981,9 +6057,13 @@ int main(int argc, char **argv) {
         }
     #endif /* __arm64__ */
     #endif /* __linux__ */
+        // 加载module_queue 中的所有模块
         moduleLoadFromQueue();
+        // 从acl文件中加载数据
         ACLLoadUsersAtStartup();
+        // 初始化bio线程 和networking的子线程
         InitServerLast();
+        // 从磁盘中恢复数据
         loadDataFromDisk();
         if (server.cluster_enabled) {
             if (verifyClusterConfigWithData() == C_ERR) {

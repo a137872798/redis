@@ -859,6 +859,7 @@ int loadAppendOnlyFile(char *filename) {
 
         /* Serve the clients from time to time */
         if (!(loops++ % 1000)) {
+            // 刷新此时的加载进度
             loadingProgress(ftello(fp));
             processEventsWhileBlocked();
             processModuleLoadingProgressEvent(1);

@@ -7901,6 +7901,9 @@ int moduleRegisterApi(const char *funcname, void *funcptr) {
 /* Global initialization at Redis startup. */
 void moduleRegisterCoreAPI(void);
 
+/**
+ * 初始化模块系统
+ */
 void moduleInitModulesSystem(void) {
     moduleUnblockedClients = listCreate();
     server.loadmodule_queue = listCreate();
@@ -7916,6 +7919,7 @@ void moduleInitModulesSystem(void) {
     moduleCommandFilters = listCreate();
 
     moduleRegisterCoreAPI();
+    // 这里开启的pipe是为了什么
     if (pipe(server.module_blocked_pipe) == -1) {
         serverLog(LL_WARNING,
                   "Can't create the pipe for module blocking commands: %s",
