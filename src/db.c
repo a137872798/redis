@@ -376,7 +376,9 @@ robj *dbUnshareStringValue(redisDb *db, robj *key, robj *o) {
  *
  * The dbnum can be -1 if all the DBs should be emptied, or the specified
  * DB index if we want to empty only a single database.
- * The function returns the number of keys removed from the database(s). */
+ * The function returns the number of keys removed from the database(s).
+ * 清空db数据
+ * */
 long long emptyDbStructure(redisDb *dbarray, int dbnum, int async,
                            void(callback)(void*))
 {
@@ -392,6 +394,7 @@ long long emptyDbStructure(redisDb *dbarray, int dbnum, int async,
 
     for (int j = startdb; j <= enddb; j++) {
         removed += dictSize(dbarray[j].dict);
+        // 采用异步清理的方式  惰性清理 首先将当前指针置空 通过一个临时指针指向这些内存块 并通过bio线程进行内存释放
         if (async) {
             emptyDbAsync(&dbarray[j]);
         } else {
@@ -419,8 +422,11 @@ long long emptyDbStructure(redisDb *dbarray, int dbnum, int async,
  *
  * On success the function returns the number of keys removed from the
  * database(s). Otherwise -1 is returned in the specific case the
- * DB number is out of range, and errno is set to EINVAL. */
+ * DB number is out of range, and errno is set to EINVAL.
+ * 根据 dbnum来清空db 并触发回调函数
+ * */
 long long emptyDb(int dbnum, int flags, void(callback)(void*)) {
+    // 采用异步清理的方式
     int async = (flags & EMPTYDB_ASYNC);
     RedisModuleFlushInfoV1 fi = {REDISMODULE_FLUSHINFO_VERSION,!async,dbnum};
     long long removed = 0;
@@ -440,14 +446,19 @@ long long emptyDb(int dbnum, int flags, void(callback)(void*)) {
      * there. */
     signalFlushedDb(dbnum);
 
-    /* Empty redis database structure. */
+    /* Empty redis database structure.
+     * 将结构体清空
+     * */
     removed = emptyDbStructure(server.db, dbnum, async, callback);
 
     /* Flush slots to keys map if enable cluster, we can flush entire
      * slots to keys map whatever dbnum because only support one DB
-     * in cluster mode. */
+     * in cluster mode.
+     * 清空路由表
+     * */
     if (server.cluster_enabled) slotToKeyFlush(async);
 
+    // 随着db被清空 不再需要维护这个链表了 该链表记录了所有抽样检测到的已经过期的key
     if (dbnum == -1) flushSlaveKeysWithExpireList();
 
     /* Also fire the end event. Note that this event will fire almost
@@ -460,19 +471,26 @@ long long emptyDb(int dbnum, int flags, void(callback)(void*)) {
 }
 
 /* Store a backup of the database for later use, and put an empty one
- * instead of it. */
+ * instead of it.
+ * 生成一个db的备份数据
+ * */
 dbBackup *backupDb(void) {
     dbBackup *backup = zmalloc(sizeof(dbBackup));
 
-    /* Backup main DBs. */
+    /* Backup main DBs.
+     * 根据当前server中db的数量  产生等量的db 并存储在backup中
+     * */
     backup->dbarray = zmalloc(sizeof(redisDb)*server.dbnum);
     for (int i=0; i<server.dbnum; i++) {
         backup->dbarray[i] = server.db[i];
+        // 这里只是更新指针  backup中存储的是原数据
         server.db[i].dict = dictCreate(&dbDictType,NULL);
         server.db[i].expires = dictCreate(&keyptrDictType,NULL);
     }
 
-    /* Backup cluster slots to keys map if enable cluster. */
+    /* Backup cluster slots to keys map if enable cluster.
+     * 在集群模式下 有一个路由表
+     * */
     if (server.cluster_enabled) {
         backup->slots_to_keys = server.cluster->slots_to_keys;
         memcpy(backup->slots_keys_count, server.cluster->slots_keys_count,

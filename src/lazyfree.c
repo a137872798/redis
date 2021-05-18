@@ -144,7 +144,9 @@ void freeObjAsync(robj *o) {
 
 /* Empty a Redis DB asynchronously. What the function does actually is to
  * create a new empty set of hash tables and scheduling the old ones for
- * lazy freeing. */
+ * lazy freeing.
+ * 使用临时指针指向内存块 将当前指针置空 由bio线程执行内存释放工作
+ * */
 void emptyDbAsync(redisDb *db) {
     dict *oldht1 = db->dict, *oldht2 = db->expires;
     db->dict = dictCreate(&dbDictType,NULL);

@@ -312,6 +312,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define REPL_STATE_SEND_PSYNC 12 /* Send PSYNC */
 #define REPL_STATE_RECEIVE_PSYNC 13 /* Wait for PSYNC reply */
 /* --- End of handshake states --- */
+// 此时处于等待master发送的全量rdb数据的阶段
 #define REPL_STATE_TRANSFER 14 /* Receiving .rdb from master */
 #define REPL_STATE_CONNECTED 15 /* Connected to master */
 
@@ -321,6 +322,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
  * to start the next background saving in order to send updates to it. */
 #define SLAVE_STATE_WAIT_BGSAVE_START 6 /* We need to produce a new RDB file. 某个slave开始与master的全量数据同步工作 */
 #define SLAVE_STATE_WAIT_BGSAVE_END 7 /* Waiting RDB file creation to finish. */
+// 将rdb文件流传输到slave节点上 注意是从rdb文件中  还有种socket类型是将数据暂存在内存中 直接传输给slave
 #define SLAVE_STATE_SEND_BULK 8 /* Sending RDB file to slave. */
 // 此时server可以探测到此slave
 #define SLAVE_STATE_ONLINE 9 /* RDB file transmitted, sending just updates. */
@@ -853,7 +855,10 @@ typedef struct client {
     // 记录了针对master而言 该slave此时的状态 比如是否在线
     int replstate;          /* Replication state if this is a slave. */
     int repl_put_online_on_ack; /* Install slave write handler on first ACK. */
+
+    // 当通过读取rdb文件 完成slave的数据同步时 用于记录文件id
     int repldbfd;           /* Replication DB file descriptor. */
+    // 在数据同步阶段 master生成rdb数据并开始传输时 可能会遇到一批数据无法一次发送 这是每个slave需要维护自己的偏移量 避免重复写入 同时也不会影响到其他slave
     off_t repldboff;        /* Replication DB file offset. */
     off_t repldbsize;       /* Replication DB file size. */
     sds replpreamble;       /* Replication DB preamble. */
@@ -1382,6 +1387,7 @@ struct redisServer {
     int repl_min_slaves_to_write;   /* Min number of slaves to write. */
     int repl_min_slaves_max_lag;    /* Max lag of <count> slaves to write. */
     int repl_good_slaves_count;     /* Number of slaves with lag <= max_lag. */
+    // 在slave的数据恢复阶段 无法从磁盘加载数据
     int repl_diskless_sync;         /* Master send RDB to slaves sockets directly. */
     int repl_diskless_load;         /* Slave parse RDB directly from the socket.
                                      * see REPL_DISKLESS_LOAD_* enum */
@@ -1394,6 +1400,7 @@ struct redisServer {
     char *masterhost;               /* Hostname of master */
     int masterport;                 /* Port of master */
     int repl_timeout;               /* Timeout after N seconds of master idle */
+    // 作为slave 会保存master的指针
     client *master;     /* Client that is master for this slave */
     client *cached_master; /* Cached master to be reused for PSYNC. */
     int repl_syncio_timeout; /* Timeout for synchronous I/O calls */
@@ -1401,6 +1408,8 @@ struct redisServer {
     off_t repl_transfer_size; /* Size of RDB to read from master during sync. */
     off_t repl_transfer_read; /* Amount of RDB read from master during sync. */
     off_t repl_transfer_last_fsync_off; /* Offset when we fsync-ed last time. */
+
+    // 作为slave存储了master的连接
     connection *repl_transfer_s;     /* Slave -> Master SYNC connection */
     int repl_transfer_fd;    /* Slave -> Master SYNC temp file descriptor */
     char *repl_transfer_tmpfile; /* Slave-> master SYNC temp file name */

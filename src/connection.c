@@ -280,6 +280,7 @@ static void connSocketEventHandler(struct aeEventLoop *el, int fd, void *clientD
 
         if (!conn->write_handler) aeDeleteFileEvent(server.el,conn->fd,AE_WRITABLE);
 
+        // 当连接建立成功后 触发回调函数
         if (!callHandler(conn, conn->conn_handler)) return;
         conn->conn_handler = NULL;
     }

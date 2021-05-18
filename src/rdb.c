@@ -2522,13 +2522,14 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
 
 /* A background saving child (BGSAVE) terminated its work. Handle this.
  * This function covers the case of actual BGSAVEs.
- * 某个后台存储rdb文件的任务 已经完成 这时清理逻辑
+ * 某个后台存储rdb文件的任务已经完成 这时清理逻辑
  * */
 static void backgroundSaveDoneHandlerDisk(int exitcode, int bysignal) {
     // 代表本次处理成功
     if (!bysignal && exitcode == 0) {
         serverLog(LL_NOTICE,
             "Background saving terminated with success");
+        // 此时dirty的数值就更新成 仅生成rdb文件期间产生的数据
         server.dirty = server.dirty - server.dirty_before_bgsave;
         server.lastsave = time(NULL);
         server.lastbgsave_status = C_OK;
@@ -2577,9 +2578,12 @@ void backgroundSaveDoneHandler(int exitcode, int bysignal) {
     int type = server.rdb_child_type;
     switch(server.rdb_child_type) {
     case RDB_CHILD_TYPE_DISK:
+        // 当负责将rdb数据写入到文件的子进程完成工作后 触发该方法 判断子进程是否被意外关闭 并清理临时文件
         backgroundSaveDoneHandlerDisk(exitcode,bysignal);
         break;
+        // 当slave需要同步数据时 产生的rdb子进程类型就是socket类型
     case RDB_CHILD_TYPE_SOCKET:
+        // 这里主要就是打印日志
         backgroundSaveDoneHandlerSocket(exitcode,bysignal);
         break;
     default:
@@ -2628,7 +2632,9 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
     /* Before to fork, create a pipe that is used to transfer the rdb bytes to
      * the parent, we can't let it write directly to the sockets, since in case
      * of TLS we must let the parent handle a continuous TLS state when the
-     * child terminates and parent takes over. */
+     * child terminates and parent takes over.
+     * 生成master rdb快照 并写入到pipeline中
+     * */
     if (pipe(pipefds) == -1) return C_ERR;
     server.rdb_pipe_read = pipefds[0];
     server.rdb_pipe_write = pipefds[1];
@@ -2636,7 +2642,7 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
 
     /* Collect the connections of the replicas we want to transfer
      * the RDB to, which are i WAIT_BGSAVE_START state.
-     * 存储需要传输rdb数据流的 slave节点连接
+     * 为每个节点创建自己的conn
      * */
     server.rdb_pipe_conns = zmalloc(sizeof(connection *)*listLength(server.slaves));
     server.rdb_pipe_numconns = 0;
@@ -2644,9 +2650,10 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
     listRewind(server.slaves,&li);
     while((ln = listNext(&li))) {
         client *slave = ln->value;
-        // 找到所有需要传输rdb数据的slave
+        // 当某个节点发起了同步数据的请求时 会将状态修改成 start 这里就是在寻找申请数据同步的节点
         if (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_START) {
             server.rdb_pipe_conns[server.rdb_pipe_numconns++] = slave->conn;
+            // 此时已经完成了准备工作 会发送一个特殊的头部信息给client
             replicationSetupSlaveForFullResync(slave,getPsyncInitialOffset());
         }
     }
@@ -2714,11 +2721,14 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
             serverLog(LL_NOTICE,"Background RDB transfer started by pid %d",
                 childpid);
             server.rdb_save_time_start = time(NULL);
+            // 将本次子进程id设置到 rdb_child_pid上
             server.rdb_child_pid = childpid;
+            // 代表本次子进程的工作类型是 socket 也就是为了slave的数据同步 主要是进行数据传输工作
+            // 如果是disk类型就是将rdb数据持久化到磁盘
             server.rdb_child_type = RDB_CHILD_TYPE_SOCKET;
             updateDictResizePolicy();
             close(server.rdb_pipe_write); /* close write in parent so that it can detect the close on the child. */
-            // 将读通道注册上去 一旦子进程写入完毕 并关闭写通道后 读通道就会接收到数据
+            // 这个就是利用pipe实现跨进程通信么 使用子进程往pipe_write中写入数据 当写入完毕后关闭pipe_write 此时pipe_read就会收到数据 主进程就可以开始处理结果了
             if (aeCreateFileEvent(server.el, server.rdb_pipe_read, AE_READABLE, rdbPipeReadHandler,NULL) == AE_ERR) {
                 serverPanic("Unrecoverable error creating server.rdb_pipe_read file event.");
             }

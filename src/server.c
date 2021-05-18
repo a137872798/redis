@@ -1915,6 +1915,7 @@ void updateCachedTime(int update_daylight_info) {
 
 /**
  * 检查某个子进程是否完成了任务
+ * 在server的serverCron中 每隔一段时间就会检测此时后台进程是否完成了任务
  */
 void checkChildrenDone(void) {
     int statloc;
@@ -1925,12 +1926,13 @@ void checkChildrenDone(void) {
      * as long as we didn't finish to drain the pipe, since then we're at risk
      * of starting a new fork and a new pipe before we're done with the previous
      * one.
-     * 这是一种特殊情况 此时不需要对rdb子进程进行检测
+     * 代表此时尚未完成任务  pipe_conns代表此时需要同步数据的slave连接
      * */
     if (server.rdb_child_pid != -1 && server.rdb_pipe_conns)
         return;
 
-    // 等待子进程被彻底关闭  exit只是将子进程变成僵尸进程 WNOHANG 代表当没有子进程时 立即返回 而不是继续阻塞  返回值是收集到的子进程id 如果没有收集到进程则返回0
+    // 等待子进程被彻底关闭
+    // exit只是将子进程变成僵尸进程(也可能会自动清理?内核级别不太了解) WNOHANG代表当没有子进程时立即返回，而不是继续阻塞 返回值是收集到的子进程id 如果没有收集到进程则返回0
     // 第三个参数就是获取采集到的子进程信息 这里传入null代表不需要采集
     if ((pid = wait3(&statloc,WNOHANG,NULL)) != 0) {
         // 判断子进程是否是正常返回的
@@ -1965,7 +1967,9 @@ void checkChildrenDone(void) {
 
             // 代表本次关闭的是一个rdb子进程
         } else if (pid == server.rdb_child_pid) {
+            // 当子进程完成任务后 触发一些逻辑
             backgroundSaveDoneHandler(exitcode,bysignal);
+            // 统计本次跨进程传输 消耗的内存
             if (!bysignal && exitcode == 0) receiveChildInfo();
             // 关闭aof子进程 会做一些资源清理
         } else if (pid == server.aof_child_pid) {
@@ -1989,7 +1993,7 @@ void checkChildrenDone(void) {
     }
 }
 
-/* This is our timer interrupt, called server.hz times per second.
+/* This is our timer interrupt, called server.hz timxes per second.
  * Here is where we do a number of things that need to be done asynchronously.
  * For instance:
  *
@@ -4453,6 +4457,8 @@ int writeCommandsDeniedByDiskError(void) {
 /* The PING command. It works in a different way if the client is in
  * in Pub/Sub mode.
  * 处理ping命令
+ * slave 会每隔一段时间向master发送一条ping命令
+ * 还有当slave首次连接上master时 也会发送一条ping命令
  * */
 void pingCommand(client *c) {
     /* The command takes zero or one arguments. */
