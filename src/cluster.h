@@ -139,6 +139,9 @@ typedef struct clusterNode {
     list *fail_reports;         /* List of nodes signaling this as failing */
 } clusterNode;
 
+/**
+ * 描述集群状态的结构体
+ */
 typedef struct clusterState {
     /**
      * 在集群中本节点信息

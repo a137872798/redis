@@ -796,7 +796,7 @@ int startBgsaveForReplication(int mincapa) {
      * that we don't set the flag to 1 if the feature is disabled, otherwise
      * it would never be cleared: the file is not deleted. This way if
      * the user enables it later with CONFIG SET, we are fine.
-     * 当本次rdb存储目标是rdb_filename 并且 rdb_del_sync_files 为true 也就是不需要存储文件 这里会打上一个标记
+     * 本次会先生成rdb文件 并且设置了在同步数据完成后 需要删除rdb文件 就会将该flag标记成1
      * */
     if (retval == C_OK && !socket_target && server.rdb_del_sync_files)
         RDBGeneratedByReplication = 1;
@@ -1075,8 +1075,7 @@ void replconfCommand(client *c) {
                 c->slave_capa |= SLAVE_CAPA_EOF;
             else if (!strcasecmp(c->argv[j+1]->ptr,"psync2"))
                 c->slave_capa |= SLAVE_CAPA_PSYNC2;
-
-            // 在slave上线后 会发送一个ack信息给master并更新repl_ack_off
+            // 每个slave完成连接上master后 在repliaCron中都会及时的上报 此时的数据同步偏移量 以及上报时间 这样master就可以清楚每个slave的数据同步状态
         } else if (!strcasecmp(c->argv[j]->ptr,"ack")) {
             /* REPLCONF ACK is used by slave to inform the master the amount
              * of replication stream that it processed so far. It is an
@@ -1154,7 +1153,7 @@ void putSlaveOnline(client *slave) {
  * without any persistence. We don't want instances without persistence
  * to take RDB files around, this violates certain policies in certain
  * environments.
- *
+ * 判断在完成数据同步后是否需要删除rdb文件
  * */
 void removeRDBUsedToSyncReplicas(void) {
     /* If the feature is disabled, return ASAP but also clear the
@@ -1162,17 +1161,21 @@ void removeRDBUsedToSyncReplicas(void) {
      * feature was enabled, but gets disabled later with CONFIG SET, the
      * flag may remain set to one: then next time the feature is re-enabled
      * via CONFIG SET we have have it set even if no RDB was generated
-     * because of replication recently. */
+     * because of replication recently.
+     * 不需要删除rdb文件 不做处理
+     * */
     if (!server.rdb_del_sync_files) {
         RDBGeneratedByReplication = 0;
         return;
     }
 
+    // 代表此时redis不支持 aof/rdb的持久化 并且此时已经存在了一个rdb文件
     if (allPersistenceDisabled() && RDBGeneratedByReplication) {
         client *slave;
         listNode *ln;
         listIter li;
 
+        // 下面是检测是否还有slave的数据同步未完成
         int delrdb = 1;
         listRewind(server.slaves,&li);
         while((ln = listNext(&li))) {
@@ -3603,8 +3606,7 @@ void replicationCron(void) {
     /* Send ACK to master from time to time.
      * Note that we do not send periodic acks to masters that don't
      * support PSYNC and replication offsets.
-     * 本方法是在server中定时轮询的 也就是每隔多少时间就会将偏移量发送到master上
-     * 这个偏移量怎么使用
+     * 作为slave节点 每轮都会将自己的数据同步偏移量上报给master 便于让master监控slave状态
      * */
     if (server.masterhost && server.master &&
         !(server.master->flags & CLIENT_PRE_PSYNC))
@@ -3616,7 +3618,7 @@ void replicationCron(void) {
      * will not actually go down. */
     listIter li;
     listNode *ln;
-    robj *pirng_argv[1];
+    robj *ping_argv[1];
 
     /* First, send PING according to ping_slave_period.
      * 每当轮询了多少秒后 会发送一个ping
@@ -3627,12 +3629,16 @@ void replicationCron(void) {
         /* Note that we don't send the PING if the clients are paused during
          * a Redis Cluster manual failover: the PING we send will otherwise
          * alter the replication offsets of master and slave, and will no longer
-         * match the one stored into 'mf_master_offset' state. */
+         * match the one stored into 'mf_master_offset' state.
+         * 在集群模式下且client处于暂停状态且 mf_end为true?
+         * */
         int manual_failover_in_progress =
             server.cluster_enabled &&
+            // TODO
             server.cluster->mf_end &&
             clientsArePaused();
 
+        // 当条件满足时 将ping命令发送到所有slave上  这代表集群状态不正常么 需要探测每个节点
         if (!manual_failover_in_progress) {
             ping_argv[0] = createStringObject("PING",4);
             replicationFeedSlaves(server.slaves, server.slaveseldb,
@@ -3659,6 +3665,7 @@ void replicationCron(void) {
     while((ln = listNext(&li))) {
         client *slave = ln->value;
 
+        // 针对此时还处于数据同步阶段的节点 发送一个\n  TODO 哪里有处理这个换行符的逻辑
         int is_presync =
             (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_START ||
             (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_END &&
@@ -3669,7 +3676,9 @@ void replicationCron(void) {
         }
     }
 
-    /* Disconnect timedout slaves. */
+    /* Disconnect timedout slaves.
+     * 因为每个slave节点都会定时上报自己的偏移量 在这过程中会更新repl_ack_time
+     * */
     if (listLength(server.slaves)) {
         listIter li;
         listNode *ln;
@@ -3680,6 +3689,7 @@ void replicationCron(void) {
 
             if (slave->replstate != SLAVE_STATE_ONLINE) continue;
             if (slave->flags & CLIENT_PRE_PSYNC) continue;
+            // 代表该slave长时间未更新ack时间戳 认为已经断开连接了
             if ((server.unixtime - slave->repl_ack_time) > server.repl_timeout)
             {
                 serverLog(LL_WARNING, "Disconnecting timedout replica: %s",
@@ -3694,12 +3704,16 @@ void replicationCron(void) {
      * (configured) time. Note that this cannot be done for slaves: slaves
      * without sub-slaves attached should still accumulate data into the
      * backlog, in order to reply to PSYNC queries if they are turned into
-     * masters after a failover. */
+     * masters after a failover.
+     * 此时没有slave节点了 并且为backlog数据设置了超时时间
+     * */
     if (listLength(server.slaves) == 0 && server.repl_backlog_time_limit &&
         server.repl_backlog && server.masterhost == NULL)
     {
+        // 代表从没有slave到现在过了多久
         time_t idle = server.unixtime - server.repl_no_slaves_since;
 
+        // 当时间间隔超过了要保留积压数据的时间 就可以清理这些数据了
         if (idle > server.repl_backlog_time_limit) {
             /* When we free the backlog, we always use a new
              * replication ID and clear the ID2. This is needed
@@ -3715,9 +3729,12 @@ void replicationCron(void) {
              * 4. Later we are turned into a slave, connect to the new
              *    master that will accept our PSYNC request by second
              *    replication ID, but there will be data inconsistency
-             *    because we received writes. */
+             *    because we received writes.
+             *    因为长时间没有slave 认为replica已经发生了变化所以要重新分配一个id
+             *    */
             changeReplicationId();
             clearReplicationId2();
+            // 清理积压数据
             freeReplicationBacklog();
             serverLog(LL_NOTICE,
                 "Replication backlog freed after %d seconds "
@@ -3728,7 +3745,9 @@ void replicationCron(void) {
 
     /* If AOF is disabled and we no longer have attached slaves, we can
      * free our Replication Script Cache as there is no need to propagate
-     * EVALSHA at all. */
+     * EVALSHA at all.
+     * TODO 忽略脚本数据
+     * */
     if (listLength(server.slaves) == 0 &&
         server.aof_state == AOF_OFF &&
         listLength(server.repl_scriptcache_fifo) != 0)
@@ -3741,10 +3760,14 @@ void replicationCron(void) {
      *
      * In case of diskless replication, we make sure to wait the specified
      * number of seconds (according to configuration) so that other slaves
-     * have the time to arrive before we start streaming. */
+     * have the time to arrive before we start streaming.
+     * 此时没有运行的子进程
+     * */
     if (!hasActiveChildProcess()) {
         time_t idle, max_idle = 0;
+        // 此时有多少slave在等待同步数据
         int slaves_waiting = 0;
+        // 所有子节点的功能交集
         int mincapa = -1;
         listNode *ln;
         listIter li;
@@ -3761,19 +3784,24 @@ void replicationCron(void) {
             }
         }
 
+        // 此时有slave在等待同步数据(本次采用的方式是先生成rdb文件 再读取rdb数据发送到slave节点) 并且等待时间已经超过了一个限制值
         if (slaves_waiting &&
             (!server.repl_diskless_sync ||
              max_idle > server.repl_diskless_sync_delay))
         {
             /* Start the BGSAVE. The called function may start a
              * BGSAVE with socket target or disk target depending on the
-             * configuration and slaves capabilities. */
+             * configuration and slaves capabilities.
+             * 这里尝试重新生成rdb文件 并发送数据流
+             * */
             startBgsaveForReplication(mincapa);
         }
     }
 
     /* Remove the RDB file used for replication if Redis is not running
-     * with any persistence. */
+     * with any persistence.
+     * 可能redis会设置不对rdb进行持久化 所以这里根据需要删除文件
+     * */
     removeRDBUsedToSyncReplicas();
 
     /* Refresh the number of slaves with lag <= min-slaves-max-lag. */

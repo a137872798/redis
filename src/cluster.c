@@ -388,7 +388,9 @@ void clusterSaveConfigOrDie(int do_fsync) {
  * the length with ftruncate()).
  *
  * On success C_OK is returned, otherwise an error is logged and
- * the function returns C_ERR to signal a lock was not acquired. */
+ * the function returns C_ERR to signal a lock was not acquired.
+ * 对某个集群配置文件上锁
+ * */
 int clusterLockConfig(char *filename) {
 /* flock() does not exist on Solaris
  * and a fcntl-based solution won't help, as we constantly re-open that file,
@@ -406,6 +408,7 @@ int clusterLockConfig(char *filename) {
         return C_ERR;
     }
 
+    // 主要就是调用内核函数 flock
     if (flock(fd,LOCK_EX|LOCK_NB) == -1) {
         if (errno == EWOULDBLOCK) {
             serverLog(LL_WARNING,
@@ -428,7 +431,9 @@ int clusterLockConfig(char *filename) {
      * it will be closed in the child process.
      * If it is not closed, when the main process is killed -9, but the child process
      * (redis-aof-rewrite) is still alive, the fd(lock) will still be held by the
-     * child process, and the main process will fail to get lock, means fail to start. */
+     * child process, and the main process will fail to get lock, means fail to start.
+     * 返回配置文件句柄
+     * */
     server.cluster_config_file_lock_fd = fd;
 #endif /* __sun */
 
@@ -451,34 +456,49 @@ void clusterUpdateMyselfFlags(void) {
     }
 }
 
+/**
+ * 在redisServer启动时 如果发现本次在集群模式下启动 会初始化cluster
+ */
 void clusterInit(void) {
     int saveconf = 0;
 
     server.cluster = zmalloc(sizeof(clusterState));
+    // 在初始阶段 还无法设置myself
     server.cluster->myself = NULL;
+    // 集群中每次选举出一个master时 epoch就会更新 该值从0开始更新
     server.cluster->currentEpoch = 0;
+    // 在初始阶段 集群还处于无法工作的状态
     server.cluster->state = CLUSTER_FAIL;
+    // 在未探测到集群中的其他节点时 认为集群中仅存在一个节点
     server.cluster->size = 1;
     server.cluster->todo_before_sleep = 0;
     server.cluster->nodes = dictCreate(&clusterNodesDictType,NULL);
+
+    // 这里可以为集群设置一个黑名单
     server.cluster->nodes_black_list =
         dictCreate(&clusterNodesBlackListDictType,NULL);
+    // 一些默认属性的设置
     server.cluster->failover_auth_time = 0;
     server.cluster->failover_auth_count = 0;
     server.cluster->failover_auth_rank = 0;
     server.cluster->failover_auth_epoch = 0;
     server.cluster->cant_failover_reason = CLUSTER_CANT_FAILOVER_NONE;
     server.cluster->lastVoteEpoch = 0;
+    // 统计每种消息出现的次数
     for (int i = 0; i < CLUSTERMSG_TYPE_COUNT; i++) {
         server.cluster->stats_bus_messages_sent[i] = 0;
         server.cluster->stats_bus_messages_received[i] = 0;
     }
     server.cluster->stats_pfail_nodes = 0;
-    memset(server.cluster->slots,0, sizeof(server.cluster->slots));
+    // 集群的slot大小为16384 是什么意思
+    memset(server.cluster->slots,0, sizeof(server.cluster->slots))
+    // 清空有关数据迁移的信息
     clusterCloseAllSlots();
 
     /* Lock the cluster config file to make sure every node uses
-     * its own nodes.conf. */
+     * its own nodes.conf.
+     * 这里要对集群配置文件上锁
+     * */
     server.cluster_config_file_lock_fd = -1;
     if (clusterLockConfig(server.cluster_configfile) == C_ERR)
         exit(1);
@@ -3874,7 +3894,9 @@ int clusterDelNodeSlots(clusterNode *node) {
 }
 
 /* Clear the migrating / importing state for all the slots.
- * This is useful at initialization and when turning a master into slave. */
+ * This is useful at initialization and when turning a master into slave.
+ * 这里记录的数据的迁移 将有关迁移的信息清空
+ * */
 void clusterCloseAllSlots(void) {
     memset(server.cluster->migrating_slots_to,0,
         sizeof(server.cluster->migrating_slots_to));

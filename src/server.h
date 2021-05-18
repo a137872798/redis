@@ -863,9 +863,11 @@ typedef struct client {
     off_t repldbsize;       /* Replication DB file size. */
     sds replpreamble;       /* Replication DB preamble. */
     long long read_reploff; /* Read replication offset if this is a master. */
+    // 作为slave节点此时数据同步的偏移量
     long long reploff;      /* Applied replication offset if this is a master. */
     // 在进行主副本数据同步时使用 表示数据同步的进度
     long long repl_ack_off; /* Replication ack offset, if this is a slave. */
+    // 某个slave最后一次上报进度的时间戳
     long long repl_ack_time;/* Replication ack time, if this is a slave. */
     long long psync_initial_offset; /* FULLRESYNC reply offset other slaves
                                        copying this slave output buffer
@@ -1509,6 +1511,7 @@ struct redisServer {
                                       REDISMODULE_CLUSTER_FLAG_*. */
     int cluster_allow_reads_when_down; /* Are reads allowed when the cluster
                                         is down? */
+    // 集群配置文件句柄
     int cluster_config_file_lock_fd;   /* cluster config fd, will be flock */
     /* Scripting */
     lua_State *lua; /* The Lua interpreter. We use just one for all clients */
