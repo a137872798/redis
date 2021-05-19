@@ -2938,7 +2938,9 @@ void replicationSetMaster(char *ip, int port) {
     server.repl_state = REPL_STATE_CONNECT;
 }
 
-/* Cancel replication, setting the instance as a master itself. */
+/* Cancel replication, setting the instance as a master itself.
+ * 因为master节点发生了替换 清理原来的数据
+ * */
 void replicationUnsetMaster(void) {
     if (server.masterhost == NULL) return; /* Nothing to do. */
 
@@ -2950,6 +2952,7 @@ void replicationUnsetMaster(void) {
 
     sdsfree(server.masterhost);
     server.masterhost = NULL;
+    // 释放连接
     if (server.master) freeClient(server.master);
     replicationDiscardCachedMaster();
     cancelReplicationHandshake();
@@ -2960,19 +2963,25 @@ void replicationUnsetMaster(void) {
      *
      * NOTE: this function MUST be called after we call
      * freeClient(server.master), since there we adjust the replication
-     * offset trimming the final PINGs. See Github issue #7320. */
+     * offset trimming the final PINGs. See Github issue #7320.
+     * TODO 切换 replicaid 切换了会怎么样呢 ???
+     * */
     shiftReplicationId();
     /* Disconnecting all the slaves is required: we need to inform slaves
      * of the replication ID change (see shiftReplicationId() call). However
      * the slaves will be able to partially resync with us, so it will be
-     * a very fast reconnection. */
+     * a very fast reconnection.
+     * 释放所有的slave连接 为什么 应该不会有影响啊 切换master会影响到该节点之前维护的slave么 如果本节点晋升成master呢
+     * */
     disconnectSlaves();
     server.repl_state = REPL_STATE_NONE;
 
     /* We need to make sure the new master will start the replication stream
      * with a SELECT statement. This is forced after a full resync, but
      * with PSYNC version 2, there is no need for full resync after a
-     * master switch. */
+     * master switch.
+     * 此时选择的db 也重置了
+     * */
     server.slaveseldb = -1;
 
     /* Update oom_score_adj */
@@ -2981,7 +2990,9 @@ void replicationUnsetMaster(void) {
     /* Once we turn from slave to master, we consider the starting time without
      * slaves (that is used to count the replication backlog time to live) as
      * starting from now. Otherwise the backlog will be freed after a
-     * failover if slaves do not connect immediately. */
+     * failover if slaves do not connect immediately.
+     * 每当某个时刻slave节点被清空时 就会更新该时间戳
+     * */
     server.repl_no_slaves_since = server.unixtime;
 
     /* Fire the role change modules event. */
@@ -2990,7 +3001,9 @@ void replicationUnsetMaster(void) {
                           NULL);
 
     /* Restart the AOF subsystem in case we shut it down during a sync when
-     * we were still a slave. */
+     * we were still a slave.
+     * 重启aof aof和replica是冲突的么 那么在数据同步的时候 aof还能工作么  还能同步新接入的请求么
+     * */
     if (server.aof_enabled && server.aof_state == AOF_OFF) restartAOFAfterSYNC();
 }
 

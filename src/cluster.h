@@ -169,6 +169,8 @@ typedef struct clusterState {
     rax *slots_to_keys;
     /* The following fields are used to take the slave state on elections. */
     mstime_t failover_auth_time; /* Time of previous or next election. */
+
+    // 本节点收到的投票数
     int failover_auth_count;    /* Number of votes received so far. */
     int failover_auth_sent;     /* True if we already asked for votes. */
     int failover_auth_rank;     /* This slave rank for current auth request. */
@@ -178,7 +180,7 @@ typedef struct clusterState {
 
     // 下面这4个属性都是故障转移相关的
     /* Manual failover state in common. */
-    // 故障转移的deadline
+    // 手动触发故障转移的deadline
     mstime_t mf_end;            /* Manual failover time limit (ms unixtime).
                                    It is zero if there is no MF in progress. */
     /* Manual failover state of master. 此时正在进行故障转移的节点 */
