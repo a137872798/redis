@@ -1151,7 +1151,9 @@ struct redisServer {
     int tlsfd[CONFIG_BINDADDR_MAX]; /* TLS socket file descriptors */
     int tlsfd_count;            /* Used slots in tlsfd[] */
     int sofd;                   /* Unix socket file descriptor */
+    // 集群socket句柄
     int cfd[CONFIG_BINDADDR_MAX];/* Cluster bus listening socket */
+    // 总计绑定了多少句柄
     int cfd_count;              /* Used slots in cfd[] */
     list *clients;              /* List of active clients */
 
@@ -1419,6 +1421,8 @@ struct redisServer {
     int repl_serve_stale_data; /* Serve stale data when link is down? */
     int repl_slave_ro;          /* Slave is read only? */
     int repl_slave_ignore_maxmemory;    /* If true slaves do not evict. */
+
+    // 检测到master已经下线的时间
     time_t repl_down_since; /* Unix time at which link with master went down */
     int repl_disable_tcp_nodelay;   /* Disable TCP_NODELAY after SYNC? */
     int slave_priority;             /* Reported in INFO and used by Sentinel. */
@@ -1500,9 +1504,13 @@ struct redisServer {
     int cluster_slave_validity_factor; /* Slave max data age for failover. */
     int cluster_require_full_coverage; /* If true, put the cluster down if
                                           there is at least an uncovered slot.*/
+
+    // 拒绝slave自发的进行故障转移  默认为false 也就是允许故障转移
     int cluster_slave_no_failover;  /* Prevent slave from starting a failover
                                        if the master is in failure state. */
     char *cluster_announce_ip;  /* IP address to announce on cluster bus. */
+
+    // 针对集群开放的特殊端口
     int cluster_announce_port;     /* base port to announce on cluster bus. */
     int cluster_announce_bus_port; /* bus port to announce on cluster bus. */
     int cluster_module_flags;      /* Set of flags that Redis modules are able

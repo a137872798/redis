@@ -2889,27 +2889,36 @@ int cancelReplicationHandshake(void) {
     return 1;
 }
 
-/* Set replication to the specified master address and port. */
+/* Set replication to the specified master address and port.
+ * 设置master的ip/port
+ * */
 void replicationSetMaster(char *ip, int port) {
     int was_master = server.masterhost == NULL;
 
     sdsfree(server.masterhost);
     server.masterhost = sdsnew(ip);
     server.masterport = port;
+    // 如果已经存在master了 对旧的连接进行释放
     if (server.master) {
         freeClient(server.master);
     }
+    // 断开所有处于阻塞状态的client  为什么 什么情况下client会阻塞 等待某个key ???
     disconnectAllBlockedClients(); /* Clients blocked in master, now slave. */
 
     /* Update oom_score_adj */
     setOOMScoreAdj(-1);
 
     /* Force our slaves to resync with us as well. They may hopefully be able
-     * to partially resync with us, but we can notify the replid change. */
+     * to partially resync with us, but we can notify the replid change.
+     * 是因为发现了master节点么 本节点就要放弃所有的slave 也就是cluster中 还是只有一个master节点 ???
+     * */
     disconnectSlaves();
+    // 当发现此时保持着与master的连接 这条连接主要是用于传输数据的
     cancelReplicationHandshake();
     /* Before destroying our master state, create a cached master using
-     * our own parameters, to later PSYNC with the new master. */
+     * our own parameters, to later PSYNC with the new master.
+     * 之前已经有master数据了 这里缓存一份master数据
+     * */
     if (was_master) {
         replicationDiscardCachedMaster();
         replicationCacheMasterUsingMyself();
@@ -2986,7 +2995,9 @@ void replicationUnsetMaster(void) {
 }
 
 /* This function is called when the slave lose the connection with the
- * master into an unexpected way. */
+ * master into an unexpected way.
+ * 当感应到master节点下线时 设置repl_down_since
+ * */
 void replicationHandleMasterDisconnection(void) {
     /* Fire the master link modules event. */
     if (server.repl_state == REPL_STATE_CONNECTED)
@@ -3531,7 +3542,9 @@ void processClientsWaitingReplicas(void) {
 }
 
 /* Return the slave replication offset for this instance, that is
- * the offset for which we already processed the master replication stream. */
+ * the offset for which we already processed the master replication stream.
+ * 当本节点作为slave时 将自己的偏移量上报给master节点
+ * */
 long long replicationGetSlaveOffset(void) {
     long long offset = 0;
 

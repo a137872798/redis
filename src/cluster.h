@@ -66,15 +66,20 @@ typedef struct clusterLink {
 #define nodeFailed(n) ((n)->flags & CLUSTER_NODE_FAIL)
 #define nodeCantFailover(n) ((n)->flags & CLUSTER_NODE_NOFAILOVER)
 
-/* Reasons why a slave is not able to failover. */
-#define CLUSTER_CANT_FAILOVER_NONE 0
+/* Reasons why a slave is not able to failover.
+ * 下面这些属性表示为什么无法进行故障转移的原因
+ * */
+#define CLUSTER_CANT_FAILOVER_NONE 0  // 基本的条件不允许 比如关闭了slave进行故障转移的选项
 #define CLUSTER_CANT_FAILOVER_DATA_AGE 1
 #define CLUSTER_CANT_FAILOVER_WAITING_DELAY 2
 #define CLUSTER_CANT_FAILOVER_EXPIRED 3
 #define CLUSTER_CANT_FAILOVER_WAITING_VOTES 4
 #define CLUSTER_CANT_FAILOVER_RELOG_PERIOD (60*5) /* seconds. */
 
-/* clusterState todo_before_sleep flags. */
+/* clusterState todo_before_sleep flags.
+ * 每次在server的主循环前  会执行before_sleep函数
+ * 这里标注了几种待处理事件 需要进行故障转移/需要更新状态/需要存储cluster_config/需要对cluster_config进行刷盘
+ * */
 #define CLUSTER_TODO_HANDLE_FAILOVER (1<<0)
 #define CLUSTER_TODO_UPDATE_STATE (1<<1)
 #define CLUSTER_TODO_SAVE_CONFIG (1<<2)
@@ -119,7 +124,10 @@ typedef struct clusterNode {
     unsigned char slots[CLUSTER_SLOTS/8]; /* slots handled by this node */
     int numslots;   /* Number of slots handled by this node */
     int numslaves;  /* Number of slave nodes, if this is a master */
+    // 当前节点可以同时是某个master的slave节点 也是其他一个node的master 树型结构
     struct clusterNode **slaves; /* pointers to slave nodes */
+
+    // 当前节点认可的master
     struct clusterNode *slaveof; /* pointer to the master node. Note that it
                                     may be NULL even if the node is a slave
                                     if we don't have the master node in our
@@ -150,10 +158,12 @@ typedef struct clusterState {
     uint64_t currentEpoch;
     int state;            /* CLUSTER_OK, CLUSTER_FAIL, ... */
     int size;             /* Num of master nodes with at least one slot */
+    // 存储所有节点的字典  key是节点名称
     dict *nodes;          /* Hash table of name -> clusterNode structures */
     dict *nodes_black_list; /* Nodes we don't re-add for a few seconds. */
     clusterNode *migrating_slots_to[CLUSTER_SLOTS];
     clusterNode *importing_slots_from[CLUSTER_SLOTS];
+    // 每个slot对应一个node
     clusterNode *slots[CLUSTER_SLOTS];
     uint64_t slots_keys_count[CLUSTER_SLOTS];
     rax *slots_to_keys;
@@ -165,16 +175,21 @@ typedef struct clusterState {
     uint64_t failover_auth_epoch; /* Epoch of the current election. */
     int cant_failover_reason;   /* Why a slave is currently not able to
                                    failover. See the CANT_FAILOVER_* macros. */
+
+    // 下面这4个属性都是故障转移相关的
     /* Manual failover state in common. */
+    // 故障转移的deadline
     mstime_t mf_end;            /* Manual failover time limit (ms unixtime).
                                    It is zero if there is no MF in progress. */
-    /* Manual failover state of master. */
+    /* Manual failover state of master. 此时正在进行故障转移的节点 */
     clusterNode *mf_slave;      /* Slave performing the manual failover. */
     /* Manual failover state of slave. */
     long long mf_master_offset; /* Master offset the slave needs to start MF
                                    or zero if still not received. */
     int mf_can_start;           /* If non-zero signal that the manual failover
                                    can start requesting masters vote. */
+
+
     /* The following fields are used by masters to take state on elections. */
     uint64_t lastVoteEpoch;     /* Epoch of the last vote granted. */
     int todo_before_sleep; /* Things to do in clusterBeforeSleep(). */
