@@ -47,7 +47,9 @@ typedef struct clusterLink {
 /* Cluster node flags and macros. */
 #define CLUSTER_NODE_MASTER 1     /* The node is a master */
 #define CLUSTER_NODE_SLAVE 2      /* The node is a slave */
+// 代表此时节点无法被某些节点感应到 无法确定是否真的脱离集群 还需要通过投票来决定
 #define CLUSTER_NODE_PFAIL 4      /* Failure? Need acknowledge */
+// 通过投票已经确定该节点处于下线状态
 #define CLUSTER_NODE_FAIL 8       /* The node is believed to be malfunctioning */
 #define CLUSTER_NODE_MYSELF 16    /* This node is myself */
 #define CLUSTER_NODE_HANDSHAKE 32 /* We have still to exchange the first ping */
@@ -135,6 +137,7 @@ typedef struct clusterNode {
     mstime_t ping_sent;      /* Unix time we sent latest ping */
     mstime_t pong_received;  /* Unix time we received the pong */
     mstime_t data_received;  /* Unix time we received any data */
+    // 将该节点设置成fail的时间戳
     mstime_t fail_time;      /* Unix time when FAIL flag was set */
     mstime_t voted_time;     /* Last time we voted for a slave of this master */
     mstime_t repl_offset_time;  /* Unix time we received offset for this node */
@@ -228,6 +231,9 @@ typedef struct {
     unsigned char bulk_data[8]; /* 8 bytes just as placeholder. */
 } clusterMsgDataPublish;
 
+/**
+ * 分配到某个node上的slot 以及此时的版本信息
+ */
 typedef struct {
     uint64_t configEpoch; /* Config epoch of the specified instance. */
     char nodename[CLUSTER_NAMELEN]; /* Name of the slots owner. */

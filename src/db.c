@@ -1893,7 +1893,8 @@ unsigned int getKeysInSlot(unsigned int hashslot, robj **keys, unsigned int coun
 }
 
 /* Remove all the keys in the specified hash slot.
- * The number of removed items is returned. */
+ * The number of removed items is returned.
+ * */
 unsigned int delKeysInSlot(unsigned int hashslot) {
     raxIterator iter;
     int j = 0;
