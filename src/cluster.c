@@ -668,27 +668,41 @@ void clusterInit(void) {
  * 4) Only for hard reset: a new Node ID is generated.
  * 5) Only for hard reset: currentEpoch and configEpoch are set to 0.
  * 6) The new configuration is saved and the cluster state updated.
- * 7) If the node was a slave, the whole data set is flushed away. */
+ * 7) If the node was a slave, the whole data set is flushed away.
+ * 重置某个节点
+ * @param hard 软重置/硬重置
+ * */
 void clusterReset(int hard) {
     dictIterator *di;
     dictEntry *de;
     int j;
 
-    /* Turn into master. */
+    /* Turn into master.
+     * 如果当前节点是slave 重置后它会变成master节点
+     * */
     if (nodeIsSlave(myself)) {
         clusterSetNodeAsMaster(myself);
+        // 因为master节点发生了更新 清理replica之前的master
         replicationUnsetMaster();
+        // 清空该节点下所有db的数据
         emptyDb(-1, EMPTYDB_NO_FLAGS, NULL);
     }
 
-    /* Close slots, reset manual failover state. */
+    /* Close slots, reset manual failover state.
+     * 清理所有有关slot数据迁移的记录
+     * */
     clusterCloseAllSlots();
+    // 将故障转移相关的参数也重置
     resetManualFailover();
 
-    /* Unassign all the slots. */
+    /* Unassign all the slots.
+     * 释放该节点下所有slot的分配信息
+     * */
     for (j = 0; j < CLUSTER_SLOTS; j++) clusterDelSlot(j);
 
-    /* Forget all the nodes, but myself. */
+    /* Forget all the nodes, but myself.
+     * 将其他节点从cluster中移除
+     * */
     di = dictGetSafeIterator(server.cluster->nodes);
     while ((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
@@ -698,7 +712,9 @@ void clusterReset(int hard) {
     }
     dictReleaseIterator(di);
 
-    /* Hard reset only: set epochs to 0, change node ID. */
+    /* Hard reset only: set epochs to 0, change node ID.
+     * 如果是硬重置 连同epoch 一起重置
+     * */
     if (hard) {
         sds oldname;
 
@@ -708,7 +724,9 @@ void clusterReset(int hard) {
         serverLog(LL_WARNING, "configEpoch set to 0 via CLUSTER RESET HARD");
 
         /* To change the Node ID we need to remove the old name from the
-         * nodes table, change the ID, and re-add back with new name. */
+         * nodes table, change the ID, and re-add back with new name.
+         * 为本节点生成新的 node->name
+         * */
         oldname = sdsnewlen(myself->name, CLUSTER_NAMELEN);
         dictDelete(server.cluster->nodes, oldname);
         sdsfree(oldname);
@@ -878,7 +896,9 @@ unsigned long getClusterConnectionsCount(void) {
  *
  * However if the key contains the {...} pattern, only the part between
  * { and } is hashed. This may be useful in the future to force certain
- * keys to be in the same node (assuming no resharding is in progress). */
+ * keys to be in the same node (assuming no resharding is in progress).
+ * 将key转换成slot的下标
+ * */
 unsigned int keyHashSlot(char *key, int keylen) {
     int s, e; /* start-end indexes of { and } */
 
@@ -1285,10 +1305,14 @@ uint64_t clusterGetMaxEpoch(void) {
  * configuration epoch unilaterally, because the config epoch conflict
  * resolution algorithm will eventually move colliding nodes to different
  * config epochs. However using this function may violate the "last failover
- * wins" rule, so should only be used with care. */
+ * wins" rule, so should only be used with care.
+ * 当集群中epoch发生了碰撞 通过该方法进行处理
+ * */
 int clusterBumpConfigEpochWithoutConsensus(void) {
+    // 获取本节点记录的集群中最大的epoch
     uint64_t maxEpoch = clusterGetMaxEpoch();
 
+    // 只要本节点与预期值不一致 就会增加集群epoch
     if (myself->configEpoch == 0 ||
         myself->configEpoch != maxEpoch) {
         server.cluster->currentEpoch++;
@@ -1422,11 +1446,14 @@ void clusterBlacklistCleanup(void) {
     dictReleaseIterator(di);
 }
 
-/* Cleanup the blacklist and add a new node ID to the black list. */
+/* Cleanup the blacklist and add a new node ID to the black list.
+ * 将某个节点加入到黑名单中
+ * */
 void clusterBlacklistAddNode(clusterNode *node) {
     dictEntry *de;
     sds id = sdsnewlen(node->name, CLUSTER_NAMELEN);
 
+    // 黑名单中的节点有一个时限 这里是惰性检测
     clusterBlacklistCleanup();
     if (dictAdd(server.cluster->nodes_black_list, id, NULL) == DICT_OK) {
         /* If the key was added, duplicate the sds string representation of
@@ -1559,7 +1586,9 @@ void clearNodeFailureIfNeeded(clusterNode *node) {
 
 /* Return true if we already have a node in HANDSHAKE state matching the
  * specified ip address and port number. This function is used in order to
- * avoid adding a new handshake node for the same address multiple times. */
+ * avoid adding a new handshake node for the same address multiple times.
+ * 是否已经存在该节点
+ * */
 int clusterHandshakeInProgress(char *ip, int port, int cport) {
     dictIterator *di;
     dictEntry *de;
@@ -1584,7 +1613,9 @@ int clusterHandshakeInProgress(char *ip, int port, int cport) {
  * following values:
  *
  * EAGAIN - There is already a handshake in progress for this address.
- * EINVAL - IP or port are not valid. */
+ * EINVAL - IP or port are not valid.
+ * 只是将 ip port信息包装成node后 填充到 cluster->nodes中 之后在clusterCron中会进行真正的连接
+ * */
 int clusterStartHandshake(char *ip, int port, int cport) {
     clusterNode *n;
     char norm_ip[NET_IP_STR_LEN];
@@ -1620,6 +1651,7 @@ int clusterStartHandshake(char *ip, int port, int cport) {
                   (void *) &(((struct sockaddr_in6 *) &sa)->sin6_addr),
                   norm_ip, NET_IP_STR_LEN);
 
+    // 如果当前已经存在该节点  不需要添加新节点
     if (clusterHandshakeInProgress(norm_ip, port, cport)) {
         errno = EAGAIN;
         return 0;
@@ -1627,7 +1659,9 @@ int clusterStartHandshake(char *ip, int port, int cport) {
 
     /* Add the node with a random address (NULL as first argument to
      * createClusterNode()). Everything will be fixed during the
-     * handshake. */
+     * handshake.
+     * 握手成功后 填充node信息并加入到 nodes列表中
+     * */
     n = createClusterNode(NULL, CLUSTER_NODE_HANDSHAKE | CLUSTER_NODE_MEET);
     memcpy(n->ip, norm_ip, sizeof(n->ip));
     n->port = port;
@@ -2499,15 +2533,24 @@ int clusterProcessPacket(clusterLink *link) {
              * we check ASAP. */
             clusterDoBeforeSleep(CLUSTER_TODO_HANDLE_FAILOVER);
         }
+
+        // 代表本次是某个slave 在执行非强制故障转移 先获取master的同意 如果是强制会直接设置start标识为true
     } else if (type == CLUSTERMSG_TYPE_MFSTART) {
         /* This message is acceptable only if I'm a master and the sender
-         * is one of my slaves. */
+         * is one of my slaves.
+         * 如果在本地请求节点的信息对不上 默认处理完成了
+         * */
         if (!sender || sender->slaveof != myself) return 1;
         /* Manual failover requested from slaves. Initialize the state
-         * accordingly. */
+         * accordingly.
+         * 重置本节点故障转移相关的信息
+         * */
         resetManualFailover();
+        // 设置选举时间上限
         server.cluster->mf_end = now + CLUSTER_MF_TIMEOUT;
+        // 设置发起节点
         server.cluster->mf_slave = sender;
+        // 在这个时间内会暂停其他所有client TODO 如果是强制的呢 不会通知master 也就不会暂停这些client  副作用是什么???
         pauseClients(now + (CLUSTER_MF_TIMEOUT * CLUSTER_MF_PAUSE_MULT));
         serverLog(LL_WARNING, "Manual failover requested by replica %.40s.",
                   sender->name);
@@ -3304,13 +3347,17 @@ void clusterSendFailoverAuth(clusterNode *node) {
     clusterSendMessage(node->link, (unsigned char *) buf, totlen);
 }
 
-/* Send a MFSTART message to the specified node. */
+/* Send a MFSTART message to the specified node.
+ * 非强制性的故障转移 会先向master节点发送一个通知  这样master会暂停所有的client
+ * */
 void clusterSendMFStart(clusterNode *node) {
     clusterMsg buf[1];
     clusterMsg *hdr = (clusterMsg *) buf;
     uint32_t totlen;
 
+    // 如果还未与该节点建立连接 直接返回 也就是非强制故障转移在这一步就终止了
     if (!node->link) return;
+    // 填充数据包
     clusterBuildMessageHdr(hdr, CLUSTERMSG_TYPE_MFSTART);
     totlen = sizeof(clusterMsg) - sizeof(union clusterMsgData);
     hdr->totlen = htonl(totlen);
@@ -3532,13 +3579,13 @@ void clusterLogCantFailover(int reason) {
  *
  * Note that it's up to the caller to be sure that the node got a new
  * configuration epoch already.
- * 本节点通过选举晋升成master
+ * 本节点替代原来的master 成为新的master
  * */
 void clusterFailoverReplaceYourMaster(void) {
     int j;
     clusterNode *oldmaster = myself->slaveof;
 
-    // TODO 后半个条件是什么意思
+    // 因为是替代关系 所以oldmaster不能为空
     if (nodeIsMaster(myself) || oldmaster == NULL) return;
 
     /* 1) Turn this node into a master. 将本节点设置成master 这里还没有通知其他节点 */
@@ -4766,6 +4813,7 @@ void clusterSetMaster(clusterNode *n) {
     // 将本节点设置到 目标节点下 最新的集群节点状态会在什么时候通知到其他节点呢
     myself->slaveof = n;
     clusterNodeAddSlave(n, myself);
+    // 数据同步/复制应该是监听某种事件 比如master变更事件 之后自动发送数据同步的请求
     replicationSetMaster(n->ip, n->port);
     // 重置有关手动故障转移的配置
     resetManualFailover();
@@ -4959,6 +5007,10 @@ int getSlotOrReply(client *c, robj *o) {
     return (int) slot;
 }
 
+/**
+ * 将所有slots信息返回
+ * @param c
+ */
 void clusterReplyMultiBulkSlots(client *c) {
     /* Format: 1) 1) start slot
      *            2) end slot
@@ -4976,33 +5028,46 @@ void clusterReplyMultiBulkSlots(client *c) {
 
     dictEntry *de;
     dictIterator *di = dictGetSafeIterator(server.cluster->nodes);
+
+    // 遍历所有节点
     while ((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
         int j = 0, start = -1;
         int i, nested_elements = 0;
 
         /* Skip slaves (that are iterated when producing the output of their
-         * master) and  masters not serving any slot. */
+         * master) and  masters not serving any slot.
+         * 集群中同时存在 slave 和master节点 并且master节点应该有多个  或者当前节点没有被分配到slot slot应该是由master分配给多个slave的 master到底是几个呢
+         * */
         if (!nodeIsMaster(node) || node->numslots == 0) continue;
 
+        // 跳过此时不可用的节点  长时间脱离集群的节点被标记成fail
+        // nested_elements 是记录所有有效的节点么 ???
         for (i = 0; i < node->numslaves; i++) {
             if (nodeFailed(node->slaves[i])) continue;
             nested_elements++;
         }
 
+        // 遍历 获取所有slot的信息
         for (j = 0; j < CLUSTER_SLOTS; j++) {
             int bit, i;
 
+            // 每当确认完一个范围后 就会重置start 然后当首次发现该slot属于本节点时 又会设置start
             if ((bit = clusterNodeGetSlotBit(node, j)) != 0) {
                 if (start == -1) start = j;
             }
+
+            // 看来slot是连续分配的 从slot开始匹配上该节点到slot不属于node的这个范围内 所有slot的信息都需要返回 或者此时已经读取到最后一个slot了 也需要生成数据
             if (start != -1 && (!bit || j == CLUSTER_SLOTS - 1)) {
                 addReplyArrayLen(c, nested_elements + 3); /* slots (2) + master addr (1). */
 
+                // 由于第二个原因发送数据 需要对j+1
                 if (bit && j == CLUSTER_SLOTS - 1) j++;
 
                 /* If slot exists in output map, add to it's list.
-                 * else, create a new output map for this slot */
+                 * else, create a new output map for this slot
+                 * 代表分配到该node下的slot只有一个 这里是将slot的起始下标和终止下标发送过去
+                 * */
                 if (start == j - 1) {
                     addReplyLongLong(c, start); /* only one slot; low==high */
                     addReplyLongLong(c, start);
@@ -5010,14 +5075,19 @@ void clusterReplyMultiBulkSlots(client *c) {
                     addReplyLongLong(c, start); /* low */
                     addReplyLongLong(c, j - 1);   /* high */
                 }
+
+                // 本次范围已经确认 重置start
                 start = -1;
 
-                /* First node reply position is always the master */
+                /* First node reply position is always the master
+                 * 先写入node的相关信息 这是不变的
+                 * */
                 addReplyArrayLen(c, 3);
                 addReplyBulkCString(c, node->ip);
                 addReplyLongLong(c, node->port);
                 addReplyBulkCBuffer(c, node->name, CLUSTER_NAMELEN);
 
+                // 将该节点下所有的slave信息也写进去
                 /* Remaining nodes in reply are replicas for slot range */
                 for (i = 0; i < node->numslaves; i++) {
                     /* This loop is copy/pasted from clusterGenNodeDescription()
@@ -5037,7 +5107,7 @@ void clusterReplyMultiBulkSlots(client *c) {
 }
 
 /**
- * 执行集群命令
+ * 所有集群相关的command都在里面 通过阅读内部逻辑可以大体知道cluster是做什么的
  */
 void clusterCommand(client *c) {
     if (server.cluster_enabled == 0) {
@@ -5073,8 +5143,11 @@ void clusterCommand(client *c) {
                 NULL
         };
         addReplyHelp(c, help);
+        // 执行meet命令
     } else if (!strcasecmp(c->argv[1]->ptr, "meet") && (c->argc == 4 || c->argc == 5)) {
-        /* CLUSTER MEET <ip> <port> [cport] */
+        /* CLUSTER MEET <ip> <port> [cport]
+         * 4,5号参数 分别代表 port cport  cport是redis集群内节点通信使用的端口
+         * */
         long long port, cport;
 
         if (getLongLongFromObject(c->argv[3], &port) != C_OK) {
@@ -5093,6 +5166,7 @@ void clusterCommand(client *c) {
             cport = port + CLUSTER_PORT_INCR;
         }
 
+        // 尝试与指定的地址进行连接
         if (clusterStartHandshake(c->argv[2]->ptr, port, cport) == 0 &&
             errno == EINVAL) {
             addReplyErrorFormat(c, "Invalid node address specified: %s:%s",
@@ -5100,51 +5174,69 @@ void clusterCommand(client *c) {
         } else {
             addReply(c, shared.ok);
         }
+        // 查看本节点观测到的所有node信息 并转换成文本后返回
     } else if (!strcasecmp(c->argv[1]->ptr, "nodes") && c->argc == 2) {
         /* CLUSTER NODES */
         sds nodes = clusterGenNodesDescription(0);
         addReplyVerbatim(c, nodes, sdslen(nodes), "txt");
         sdsfree(nodes);
+        // 将本节点的id返回
     } else if (!strcasecmp(c->argv[1]->ptr, "myid") && c->argc == 2) {
         /* CLUSTER MYID */
         addReplyBulkCBuffer(c, myself->name, CLUSTER_NAMELEN);
+        // 将所有slots信息返回  slot是连续分配的
     } else if (!strcasecmp(c->argv[1]->ptr, "slots") && c->argc == 2) {
         /* CLUSTER SLOTS */
         clusterReplyMultiBulkSlots(c);
+        // 将分配到本节点上的所有slot都flush
     } else if (!strcasecmp(c->argv[1]->ptr, "flushslots") && c->argc == 2) {
-        /* CLUSTER FLUSHSLOTS */
+        /* CLUSTER FLUSHSLOTS
+         * 为什么只检查第一个db呢
+         * */
         if (dictSize(server.db[0].dict) != 0) {
             addReplyError(c, "DB must be empty to perform CLUSTER FLUSHSLOTS.");
             return;
         }
+        // 当清理后,该slot就变成了自由状态  TODO 并没有看到flush的逻辑啊
         clusterDelNodeSlots(myself);
         clusterDoBeforeSleep(CLUSTER_TODO_UPDATE_STATE | CLUSTER_TODO_SAVE_CONFIG);
         addReply(c, shared.ok);
+        // 增加或删除某个slot
     } else if ((!strcasecmp(c->argv[1]->ptr, "addslots") ||
                 !strcasecmp(c->argv[1]->ptr, "delslots")) && c->argc >= 3) {
         /* CLUSTER ADDSLOTS <slot> [slot] ... */
         /* CLUSTER DELSLOTS <slot> [slot] ... */
         int j, slot;
         unsigned char *slots = zmalloc(CLUSTER_SLOTS);
+        // 代表是删除操作
         int del = !strcasecmp(c->argv[1]->ptr, "delslots");
 
+        // 将这个新的slots内所有元素置零
         memset(slots, 0, CLUSTER_SLOTS);
         /* Check that all the arguments are parseable and that all the
-         * slots are not already busy. */
+         * slots are not already busy.
+         * 第一个参数是 clusterCommand
+         * 第二个参数是 addslots/delslots
+         * */
         for (j = 2; j < c->argc; j++) {
+
+            // 没有解析到 slot信息 本次操作终止
             if ((slot = getSlotOrReply(c, c->argv[j])) == -1) {
                 zfree(slots);
                 return;
             }
+            // 当指定的slot已经被删除时 直接返回
             if (del && server.cluster->slots[slot] == NULL) {
                 addReplyErrorFormat(c, "Slot %d is already unassigned", slot);
                 zfree(slots);
                 return;
+                // 当要添加的slot已经存在时 直接返回
             } else if (!del && server.cluster->slots[slot]) {
                 addReplyErrorFormat(c, "Slot %d is already busy", slot);
                 zfree(slots);
                 return;
             }
+            // 这里主要是判断本次command操作的slot是否有重复
             if (slots[slot]++ == 1) {
                 addReplyErrorFormat(c, "Slot %d specified multiple times",
                                     (int) slot);
@@ -5152,23 +5244,32 @@ void clusterCommand(client *c) {
                 return;
             }
         }
+
+        // 现在才是真正处理 cluster.slots 上面的逻辑只是做一些校验
         for (j = 0; j < CLUSTER_SLOTS; j++) {
+            // 代表对该slot进行了某种操作
             if (slots[j]) {
                 int retval;
 
                 /* If this slot was set as importing we can clear this
-                 * state as now we are the real owner of the slot. */
+                 * state as now we are the real owner of the slot.
+                 * 这个标记什么时候会设置???
+                 * */
                 if (server.cluster->importing_slots_from[j])
                     server.cluster->importing_slots_from[j] = NULL;
 
+                // 将操作作用到cluster->nodes上
                 retval = del ? clusterDelSlot(j) :
                          clusterAddSlot(myself, j);
                 serverAssertWithInfo(c, NULL, retval == C_OK);
             }
         }
+
+        // 操作完毕后释放slots
         zfree(slots);
         clusterDoBeforeSleep(CLUSTER_TODO_UPDATE_STATE | CLUSTER_TODO_SAVE_CONFIG);
         addReply(c, shared.ok);
+        // 本次是一次分配slot的命令 应该不是用户分配才对 谁在分配 基于什么原则
     } else if (!strcasecmp(c->argv[1]->ptr, "setslot") && c->argc >= 4) {
         /* SETSLOT 10 MIGRATING <node ID> */
         /* SETSLOT 10 IMPORTING <node ID> */
@@ -5177,25 +5278,32 @@ void clusterCommand(client *c) {
         int slot;
         clusterNode *n;
 
+        // slave节点无法分配slot
         if (nodeIsSlave(myself)) {
             addReplyError(c, "Please use SETSLOT only with masters.");
             return;
         }
 
+        // 本次要设置的是哪个slot
         if ((slot = getSlotOrReply(c, c->argv[2])) == -1) return;
 
+        // 这个应该是迁出吧 那么要求此时该slot必然属于本节点
         if (!strcasecmp(c->argv[3]->ptr, "migrating") && c->argc == 5) {
             if (server.cluster->slots[slot] != myself) {
                 addReplyErrorFormat(c, "I'm not the owner of hash slot %u", slot);
                 return;
             }
+            // 找到要迁入的目标节点 如果当前节点未观测到该节点 无法执行本次命令 TODO 这里并没有看到数据的迁移 只要修改slot的位置就好了么 应该是先记录迁移方向 之后才进行真正的数据迁移
             if ((n = clusterLookupNode(c->argv[4]->ptr)) == NULL) {
                 addReplyErrorFormat(c, "I don't know about node %s",
                                     (char *) c->argv[4]->ptr);
                 return;
             }
+            // 设置数据迁出的记录
             server.cluster->migrating_slots_to[slot] = n;
+            // 记录从哪个slot中迁入数据
         } else if (!strcasecmp(c->argv[3]->ptr, "importing") && c->argc == 5) {
+            // 条件与之前相反 要求该slot必须不属于myself
             if (server.cluster->slots[slot] == myself) {
                 addReplyErrorFormat(c,
                                     "I'm already the owner of hash slot %u", slot);
@@ -5207,12 +5315,15 @@ void clusterCommand(client *c) {
                 return;
             }
             server.cluster->importing_slots_from[slot] = n;
+            // 代表数据已经完成迁移 清理之前的迁移标记
         } else if (!strcasecmp(c->argv[3]->ptr, "stable") && c->argc == 4) {
             /* CLUSTER SETSLOT <SLOT> STABLE */
             server.cluster->importing_slots_from[slot] = NULL;
             server.cluster->migrating_slots_to[slot] = NULL;
         } else if (!strcasecmp(c->argv[3]->ptr, "node") && c->argc == 5) {
-            /* CLUSTER SETSLOT <SLOT> NODE <NODE ID> */
+            /* CLUSTER SETSLOT <SLOT> NODE <NODE ID>
+             * 获取相关的节点
+             * */
             clusterNode *n = clusterLookupNode(c->argv[4]->ptr);
 
             if (!n) {
@@ -5221,7 +5332,9 @@ void clusterCommand(client *c) {
                 return;
             }
             /* If this hash slot was served by 'myself' before to switch
-             * make sure there are no longer local keys for this hash slot. */
+             * make sure there are no longer local keys for this hash slot.
+             * 当slot被分配到本节点 并且本节点不是n时 如果slot内部有数据就返回错误
+             * */
             if (server.cluster->slots[slot] == myself && n != myself) {
                 if (countKeysInSlot(slot) != 0) {
                     addReplyErrorFormat(c,
@@ -5232,13 +5345,17 @@ void clusterCommand(client *c) {
             }
             /* If this slot is in migrating status but we have no keys
              * for it assigning the slot to another node will clear
-             * the migrating status. */
+             * the migrating status.
+             * TODO
+             * */
             if (countKeysInSlot(slot) == 0 &&
                 server.cluster->migrating_slots_to[slot])
                 server.cluster->migrating_slots_to[slot] = NULL;
 
             /* If this node was importing this slot, assigning the slot to
-             * itself also clears the importing status. */
+             * itself also clears the importing status.
+             * 这里是清理importing_slots_from
+             * */
             if (n == myself &&
                 server.cluster->importing_slots_from[slot]) {
                 /* This slot was manually migrated, set this node configEpoch
@@ -5249,22 +5366,30 @@ void clusterCommand(client *c) {
                  * node getting the same configEpoch, for example because a
                  * failover happens at the same time we close the slot, the
                  * configEpoch collision resolution will fix it assigning
-                 * a different epoch to each node. */
+                 * a different epoch to each node.
+                 * 增加 epoch epoch相当于是整个集群的版本号
+                 * */
                 if (clusterBumpConfigEpochWithoutConsensus() == C_OK) {
                     serverLog(LL_WARNING,
                               "configEpoch updated after importing slot %d", slot);
                 }
                 server.cluster->importing_slots_from[slot] = NULL;
             }
+
+            // 可以看到 "setslots","node" 最后就是将该slot分配给该node 但是省去了设置importing_slots_from/migrating_slots_to 区别是什么 这2个临时数组又是做什么的???
             clusterDelSlot(slot);
             clusterAddSlot(n, slot);
         } else {
+
+            // 剩余的命令无法被识别 代表异常情况
             addReplyError(c,
                           "Invalid CLUSTER SETSLOT action or number of arguments. Try CLUSTER HELP");
             return;
         }
+        // 因为执行命令都会修改slots 所以这里要更新config
         clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG | CLUSTER_TODO_UPDATE_STATE);
         addReply(c, shared.ok);
+        // 如果epoch发生了碰撞 需要增加epoch
     } else if (!strcasecmp(c->argv[1]->ptr, "bumpepoch") && c->argc == 2) {
         /* CLUSTER BUMPEPOCH */
         int retval = clusterBumpConfigEpochWithoutConsensus();
@@ -5272,6 +5397,7 @@ void clusterCommand(client *c) {
                                  (retval == C_OK) ? "BUMPED" : "STILL",
                                  (unsigned long long) myself->configEpoch);
         addReplySds(c, reply);
+        // 获取集群信息
     } else if (!strcasecmp(c->argv[1]->ptr, "info") && c->argc == 2) {
         /* CLUSTER INFO */
         char *statestr[] = {"ok", "fail", "needhelp"};
@@ -5279,6 +5405,7 @@ void clusterCommand(client *c) {
         uint64_t myepoch;
         int j;
 
+        // 查看所有已经被分配的slot相关的node此时是否处于可用状态
         for (j = 0; j < CLUSTER_SLOTS; j++) {
             clusterNode *n = server.cluster->slots[j];
 
@@ -5293,6 +5420,7 @@ void clusterCommand(client *c) {
             }
         }
 
+        // 获取当前节点的epoch
         myepoch = (nodeIsSlave(myself) && myself->slaveof) ?
                   myself->slaveof->configEpoch : myself->configEpoch;
 
@@ -5345,6 +5473,7 @@ void clusterCommand(client *c) {
         /* Produce the reply protocol. */
         addReplyVerbatim(c, info, sdslen(info), "txt");
         sdsfree(info);
+        // 立即进行配置文件的持久化
     } else if (!strcasecmp(c->argv[1]->ptr, "saveconfig") && c->argc == 2) {
         int retval = clusterSaveConfig(1);
 
@@ -5353,11 +5482,14 @@ void clusterCommand(client *c) {
         else
             addReplyErrorFormat(c, "error saving the cluster node config: %s",
                                 strerror(errno));
+        // 根据传入的key 计算对应的slot 就是通过一致性hash算法
     } else if (!strcasecmp(c->argv[1]->ptr, "keyslot") && c->argc == 3) {
         /* CLUSTER KEYSLOT <key> */
         sds key = c->argv[2]->ptr;
 
         addReplyLongLong(c, keyHashSlot(key, sdslen(key)));
+
+        // 返回某个slot下的key数量
     } else if (!strcasecmp(c->argv[1]->ptr, "countkeysinslot") && c->argc == 3) {
         /* CLUSTER COUNTKEYSINSLOT <slot> */
         long long slot;
@@ -5369,6 +5501,7 @@ void clusterCommand(client *c) {
             return;
         }
         addReplyLongLong(c, countKeysInSlot(slot));
+        // 返回某个slot下的key 有一个数量限制
     } else if (!strcasecmp(c->argv[1]->ptr, "getkeysinslot") && c->argc == 4) {
         /* CLUSTER GETKEYSINSLOT <slot> <count> */
         long long maxkeys, slot;
@@ -5391,15 +5524,19 @@ void clusterCommand(client *c) {
         if (maxkeys > keys_in_slot) maxkeys = keys_in_slot;
 
         keys = zmalloc(sizeof(robj *) * maxkeys);
+        // 获取某个slot下maxKeys数量的key 将指针keys指向这些数据
         numkeys = getKeysInSlot(slot, keys, maxkeys);
+        // 将这些数据返回给client
         addReplyArrayLen(c, numkeys);
         for (j = 0; j < numkeys; j++) {
             addReplyBulk(c, keys[j]);
             decrRefCount(keys[j]);
         }
         zfree(keys);
+        // 将某个节点从集群中移除 并加入到黑名单
     } else if (!strcasecmp(c->argv[1]->ptr, "forget") && c->argc == 3) {
         /* CLUSTER FORGET <NODE ID> */
+        // 找到目标节点
         clusterNode *n = clusterLookupNode(c->argv[2]->ptr);
 
         if (!n) {
@@ -5417,6 +5554,8 @@ void clusterCommand(client *c) {
         clusterDoBeforeSleep(CLUSTER_TODO_UPDATE_STATE |
                              CLUSTER_TODO_SAVE_CONFIG);
         addReply(c, shared.ok);
+
+        // 发起一次数据拷贝工作
     } else if (!strcasecmp(c->argv[1]->ptr, "replicate") && c->argc == 3) {
         /* CLUSTER REPLICATE <NODE ID> */
         clusterNode *n = clusterLookupNode(c->argv[2]->ptr);
@@ -5427,13 +5566,17 @@ void clusterCommand(client *c) {
             return;
         }
 
-        /* I can't replicate myself. */
+        /* I can't replicate myself.
+         * 本节点不能作为拷贝的数据源
+         * */
         if (n == myself) {
             addReplyError(c, "Can't replicate myself");
             return;
         }
 
-        /* Can't replicate a slave. */
+        /* Can't replicate a slave.
+         * 数据源不能是一个slave节点
+         * */
         if (nodeIsSlave(n)) {
             addReplyError(c, "I can only replicate a master, not a replica.");
             return;
@@ -5441,7 +5584,10 @@ void clusterCommand(client *c) {
 
         /* If the instance is currently a master, it should have no assigned
          * slots nor keys to accept to replicate some other node.
-         * Slaves can switch to another master without issues. */
+         * Slaves can switch to another master without issues.
+         * 当本节点作为master节点 并且内部的slot不为0 或者内部已经有数据 无法进行数据拷贝
+         * 也就是作为一个空的master允许从其他master拷贝数据 也暗示了redis是多master  应该是数据先按照slot分配到多个master上 然后每个master有多个slave 作为只读节点
+         * */
         if (nodeIsMaster(myself) &&
             (myself->numslots != 0 || dictSize(server.db[0].dict) != 0)) {
             addReplyError(c,
@@ -5450,13 +5596,18 @@ void clusterCommand(client *c) {
             return;
         }
 
-        /* Set the master. */
+        /* Set the master.
+         * 将n作为myself的新的master节点
+         * */
         clusterSetMaster(n);
         clusterDoBeforeSleep(CLUSTER_TODO_UPDATE_STATE | CLUSTER_TODO_SAVE_CONFIG);
         addReply(c, shared.ok);
+        // 代表本次操作是获取slave 或者副本信息
     } else if ((!strcasecmp(c->argv[1]->ptr, "slaves") ||
                 !strcasecmp(c->argv[1]->ptr, "replicas")) && c->argc == 3) {
-        /* CLUSTER SLAVES <NODE ID> */
+        /* CLUSTER SLAVES <NODE ID>
+         * 本次要处理的源节点
+         * */
         clusterNode *n = clusterLookupNode(c->argv[2]->ptr);
         int j;
 
@@ -5466,17 +5617,20 @@ void clusterCommand(client *c) {
             return;
         }
 
+        // 该节点必须是master节点
         if (nodeIsSlave(n)) {
             addReplyError(c, "The specified node is not a master");
             return;
         }
 
         addReplyArrayLen(c, n->numslaves);
+        // 将节点的描述信息返回给client
         for (j = 0; j < n->numslaves; j++) {
             sds ni = clusterGenNodeDescription(n->slaves[j]);
             addReplyBulkCString(c, ni);
             sdsfree(ni);
         }
+        // 判断此时有多少节点认为某个节点此时已经下线
     } else if (!strcasecmp(c->argv[1]->ptr, "count-failure-reports") &&
                c->argc == 3) {
         /* CLUSTER COUNT-FAILURE-REPORTS <NODE ID> */
@@ -5488,14 +5642,17 @@ void clusterCommand(client *c) {
         } else {
             addReplyLongLong(c, clusterNodeFailureReportsCount(n));
         }
+        // 手动触发故障转移 也就是手动触发选举
     } else if (!strcasecmp(c->argv[1]->ptr, "failover") &&
                (c->argc == 2 || c->argc == 3)) {
         /* CLUSTER FAILOVER [FORCE|TAKEOVER] */
         int force = 0, takeover = 0;
 
+        // 获取一些故障转移相关的选项
         if (c->argc == 3) {
             if (!strcasecmp(c->argv[2]->ptr, "force")) {
                 force = 1;
+                // 接管模式就是直接将本节点作为新的master
             } else if (!strcasecmp(c->argv[2]->ptr, "takeover")) {
                 takeover = 1;
                 force = 1; /* Takeover also implies force. */
@@ -5505,13 +5662,18 @@ void clusterCommand(client *c) {
             }
         }
 
-        /* Check preconditions. */
+        /* Check preconditions.
+         * 进行一些先决条件的检查
+         * */
+        // 故障转移 应该发给一个slave节点  促使其选举新的master节点
         if (nodeIsMaster(myself)) {
             addReplyError(c, "You should send CLUSTER FAILOVER to a replica");
             return;
+            // 如果一个游离的slave不能发起选举  为什么
         } else if (myself->slaveof == NULL) {
             addReplyError(c, "I'm a replica but my master is unknown to me");
             return;
+            // 非强制模式下  此时还未连接到master 无法进行故障转移
         } else if (!force &&
                    (nodeFailed(myself->slaveof) ||
                     myself->slaveof->link == NULL)) {
@@ -5519,17 +5681,24 @@ void clusterCommand(client *c) {
                              "please use CLUSTER FAILOVER FORCE");
             return;
         }
+
+        // 因为本次是手动发起故障转移 需要先进行重置一些参数
         resetManualFailover();
+        // 手动故障转移有一个时间限制
         server.cluster->mf_end = mstime() + CLUSTER_MF_TIMEOUT;
 
+        // 如果是接管模式 就是强制故障转移+跳过选举
         if (takeover) {
             /* A takeover does not perform any initial check. It just
              * generates a new configuration epoch for this node without
              * consensus, claims the master's slots, and broadcast the new
              * configuration. */
             serverLog(LL_WARNING, "Taking over the master (user request).");
+            // 增加cluster.currentEpoch
             clusterBumpConfigEpochWithoutConsensus();
+            // 接管模式就是直接将该节点晋升成master
             clusterFailoverReplaceYourMaster();
+            // 如果是强制执行会设置一个标记 并且不需要通过master的同意
         } else if (force) {
             /* If this is a forced failover, we don't need to talk with our
              * master to agree about the offset. We just failover taking over
@@ -5537,10 +5706,12 @@ void clusterCommand(client *c) {
             serverLog(LL_WARNING, "Forced failover user request accepted.");
             server.cluster->mf_can_start = 1;
         } else {
+            // 如果是非强制的故障转移  会先向master节点发送一个通知 这样master会暂停所有的client TODO 这里看到通知master后的流程就断掉了 后面是哪里在处理呢 ???
             serverLog(LL_WARNING, "Manual failover user request accepted.");
             clusterSendMFStart(myself->slaveof);
         }
         addReply(c, shared.ok);
+        // 如果发起的是强制指定 epoch的命令
     } else if (!strcasecmp(c->argv[1]->ptr, "set-config-epoch") && c->argc == 3) {
         /* CLUSTER SET-CONFIG-EPOCH <epoch>
          *
@@ -5556,9 +5727,11 @@ void clusterCommand(client *c) {
 
         if (epoch < 0) {
             addReplyErrorFormat(c, "Invalid config epoch specified: %lld", epoch);
+            // 只有当本节点还没有加入到集群时 才能手动设置epoch
         } else if (dictSize(server.cluster->nodes) > 1) {
             addReplyError(c, "The user can assign a config epoch only when the "
                              "node does not know any other node.");
+            // 如果已经存在 configEpoch 无法手动设置epoch
         } else if (myself->configEpoch != 0) {
             addReplyError(c, "Node config epoch is already non-zero");
         } else {
@@ -5576,12 +5749,15 @@ void clusterCommand(client *c) {
                                  CLUSTER_TODO_SAVE_CONFIG);
             addReply(c, shared.ok);
         }
+        // 执行的是reset
     } else if (!strcasecmp(c->argv[1]->ptr, "reset") &&
                (c->argc == 2 || c->argc == 3)) {
         /* CLUSTER RESET [SOFT|HARD] */
         int hard = 0;
 
-        /* Parse soft/hard argument. Default is soft. */
+        /* Parse soft/hard argument. Default is soft.
+         * 读取软重置/硬重置
+         * */
         if (c->argc == 3) {
             if (!strcasecmp(c->argv[2]->ptr, "hard")) {
                 hard = 1;
@@ -5594,7 +5770,9 @@ void clusterCommand(client *c) {
         }
 
         /* Slaves can be reset while containing data, but not master nodes
-         * that must be empty. */
+         * that must be empty.
+         * 不能手动重置master
+         * */
         if (nodeIsMaster(myself) && dictSize(c->db->dict) != 0) {
             addReplyError(c, "CLUSTER RESET can't be called with "
                              "master nodes containing keys");
@@ -5603,6 +5781,7 @@ void clusterCommand(client *c) {
         clusterReset(hard);
         addReply(c, shared.ok);
     } else {
+        // 不支持其他命令
         addReplySubcommandSyntaxError(c);
         return;
     }
@@ -5613,14 +5792,21 @@ void clusterCommand(client *c) {
  * -------------------------------------------------------------------------- */
 
 /* Generates a DUMP-format representation of the object 'o', adding it to the
- * io stream pointed by 'rio'. This function can't fail. */
+ * io stream pointed by 'rio'. This function can't fail.
+ * @param payload 存储结果
+ * @param o 在某个db中通过key 定位到的redisObject
+ * @param key 该对象对应的key
+ * */
 void createDumpPayload(rio *payload, robj *o, robj *key) {
     unsigned char buf[2];
     uint64_t crc;
 
     /* Serialize the object in an RDB-like format. It consist of an object type
-     * byte followed by the serialized object. This is understood by RESTORE. */
+     * byte followed by the serialized object. This is understood by RESTORE.
+     * 该rio流 底层是一个redisString
+     * */
     rioInitWithBuffer(payload, sdsempty());
+    // 先存储redisObject的类型  在将redisObject按照rdb的方式存储
     serverAssert(rdbSaveObjectType(payload, o));
     serverAssert(rdbSaveObject(payload, o, key));
 
@@ -5631,7 +5817,7 @@ void createDumpPayload(rio *payload, robj *o, robj *key) {
      * RDB version and CRC are both in little endian.
      */
 
-    /* RDB version */
+    /* RDB version 头2个数据存储的是rdb版本 */
     buf[0] = RDB_VERSION & 0xff;
     buf[1] = (RDB_VERSION >> 8) & 0xff;
     payload->io.buffer.ptr = sdscatlen(payload->io.buffer.ptr, buf, 2);
@@ -5646,7 +5832,9 @@ void createDumpPayload(rio *payload, robj *o, robj *key) {
 /* Verify that the RDB version of the dump payload matches the one of this Redis
  * instance and that the checksum is ok.
  * If the DUMP payload looks valid C_OK is returned, otherwise C_ERR
- * is returned. */
+ * is returned.
+ * 进行数据校验
+ * */
 int verifyDumpPayload(unsigned char *p, size_t len) {
     unsigned char *footer;
     uint16_t rdbver;
@@ -5654,6 +5842,7 @@ int verifyDumpPayload(unsigned char *p, size_t len) {
 
     /* At least 2 bytes of RDB version and 8 of CRC64 should be present. */
     if (len < 10) return C_ERR;
+    // 只需要校验最后10个字节 2个是rdb版本号 8个是crc
     footer = p + (len - 10);
 
     /* Verify RDB version */
@@ -5668,44 +5857,58 @@ int verifyDumpPayload(unsigned char *p, size_t len) {
 
 /* DUMP keyname
  * DUMP is actually not used by Redis Cluster but it is the obvious
- * complement of RESTORE and can be useful for different applications. */
+ * complement of RESTORE and can be useful for different applications.
+ * 转储命令
+ * */
 void dumpCommand(client *c) {
     robj *o;
     rio payload;
 
-    /* Check if the key is here. */
+    /* Check if the key is here.
+     * 先根据相关参数找到 redisObject
+     * */
     if ((o = lookupKeyRead(c->db, c->argv[1])) == NULL) {
         addReplyNull(c);
         return;
     }
 
-    /* Create the DUMP encoded representation. */
+    /* Create the DUMP encoded representation.
+     * 基于该redisObject 生成转储数据
+     * */
     createDumpPayload(&payload, o, c->argv[1]);
 
-    /* Transfer to the client */
+    /* Transfer to the client 将数据返回 */
     addReplyBulkSds(c, payload.io.buffer.ptr);
     return;
 }
 
-/* RESTORE key ttl serialized-value [REPLACE] */
+/* RESTORE key ttl serialized-value [REPLACE]
+ * 执行恢复命令
+ * */
 void restoreCommand(client *c) {
     long long ttl, lfu_freq = -1, lru_idle = -1, lru_clock = -1;
     rio payload;
     int j, type, replace = 0, absttl = 0;
     robj *obj;
 
-    /* Parse additional options */
+    /* Parse additional options
+     * 解析参数信息  应该是要存储哪些信息
+     * */
     for (j = 4; j < c->argc; j++) {
+        // 代表还有多少参数未解析
         int additional = c->argc - j - 1;
         if (!strcasecmp(c->argv[j]->ptr, "replace")) {
             replace = 1;
         } else if (!strcasecmp(c->argv[j]->ptr, "absttl")) {
             absttl = 1;
+            // 看来idletime和freq是互斥的关系  分别代表该对象是使用lru/lfu算法进行清理的 内存淘汰策略则是内存不足时触发
         } else if (!strcasecmp(c->argv[j]->ptr, "idletime") && additional >= 1 &&
                    lfu_freq == -1) {
+            // 读取额外参数
             if (getLongLongFromObjectOrReply(c, c->argv[j + 1], &lru_idle, NULL)
                 != C_OK)
                 return;
+            // 如果idle数据不合法 直接返回
             if (lru_idle < 0) {
                 addReplyError(c, "Invalid IDLETIME value, must be >= 0");
                 return;
@@ -5728,14 +5931,16 @@ void restoreCommand(client *c) {
         }
     }
 
-    /* Make sure this key does not already exist here... */
+    /* Make sure this key does not already exist here...
+     * */
     robj *key = c->argv[1];
+    // 非替换模式 必须要求原数据不存在
     if (!replace && lookupKeyWrite(c->db, key) != NULL) {
         addReply(c, shared.busykeyerr);
         return;
     }
 
-    /* Check if the TTL value makes sense */
+    /* Check if the TTL value makes sense 第二个参数是ttl */
     if (getLongLongFromObjectOrReply(c, c->argv[2], &ttl, NULL) != C_OK) {
         return;
     } else if (ttl < 0) {
@@ -5743,28 +5948,35 @@ void restoreCommand(client *c) {
         return;
     }
 
+    // 应该是通过client携带的某些数据 进行恢复操作 上面是解析一些额外参数 从dumpCommand中可以看出 存储的只是某个redisObject的数据
     /* Verify RDB version and data checksum. */
     if (verifyDumpPayload(c->argv[3]->ptr, sdslen(c->argv[3]->ptr)) == C_ERR) {
         addReplyError(c, "DUMP payload version or checksum are wrong");
         return;
     }
 
+    // 初始化rio数据流
     rioInitWithBuffer(&payload, c->argv[3]->ptr);
+    // 还原redisObject
     if (((type = rdbLoadObjectType(&payload)) == -1) ||
         ((obj = rdbLoadObject(type, &payload, key->ptr)) == NULL)) {
         addReplyError(c, "Bad data format");
         return;
     }
 
-    /* Remove the old key if needed. */
+    /* Remove the old key if needed. 替换模式 先删除旧数据 */
     int deleted = 0;
     if (replace)
         deleted = dbDelete(c->db, key);
 
+    // 如果传入的ttl不是绝对时间 需要自己计算
     if (ttl && !absttl) ttl += mstime();
+    // 如果该robj 一开始就是过期的 就不需要插入了
     if (ttl && checkAlreadyExpired(ttl)) {
         if (deleted) {
+            // 将命令修改成del 可以简化之后其他node的处理逻辑
             rewriteClientCommandVector(c, 2, shared.del, key);
+            // 尝试唤醒阻塞在该key上的client   什么情况下client会被阻塞在某个client上呢
             signalModifiedKey(c, c->db, key);
             notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, c->db->id);
             server.dirty++;
@@ -5776,9 +5988,11 @@ void restoreCommand(client *c) {
 
     /* Create the key and set the TTL if any */
     dbAdd(c->db, key, obj);
+    // 设置该redisObject的超时时间
     if (ttl) {
         setExpire(c, c->db, key, ttl);
     }
+    // 设置lru lfu 信息
     objectSetLRUOrLFU(obj, lfu_freq, lru_idle, lru_clock, 1000);
     signalModifiedKey(c, c->db, key);
     notifyKeyspaceEvent(NOTIFY_GENERIC, "restore", key, c->db->id);
@@ -5907,7 +6121,9 @@ void migrateCloseTimedoutSockets(void) {
  * On in the multiple keys form:
  *
  * MIGRATE host port "" dbid timeout [COPY | REPLACE | AUTH password |
- *         AUTH2 username password] KEYS key1 key2 ... keyN */
+ *         AUTH2 username password] KEYS key1 key2 ... keyN
+ *         执行数据迁移的command
+ *         */
 void migrateCommand(client *c) {
     migrateCachedSocket *cs;
     int copy = 0, replace = 0, j;

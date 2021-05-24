@@ -1874,7 +1874,9 @@ void slotToKeyFlush(int async) {
 
 /* Pupulate the specified array of objects with keys in the specified slot.
  * New objects are returned to represent keys, it's up to the caller to
- * decrement the reference count to release the keys names. */
+ * decrement the reference count to release the keys names.
+ * 读取该slot下指定数量的key
+ * */
 unsigned int getKeysInSlot(unsigned int hashslot, robj **keys, unsigned int count) {
     raxIterator iter;
     int j = 0;
@@ -1882,6 +1884,8 @@ unsigned int getKeysInSlot(unsigned int hashslot, robj **keys, unsigned int coun
 
     indexed[0] = (hashslot >> 8) & 0xff;
     indexed[1] = hashslot & 0xff;
+
+    // 该slots_to_keys rax树  key是slot+redisObject.key
     raxStart(&iter,server.cluster->slots_to_keys);
     raxSeek(&iter,">=",indexed,2);
     while(count-- && raxNext(&iter)) {

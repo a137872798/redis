@@ -632,7 +632,9 @@ int rdbLoadBinaryFloatValue(rio *rdb, float *val) {
     return 0;
 }
 
-/* Save the object type of object "o". */
+/* Save the object type of object "o".
+ * 将redisObject的类型信息写入到rio中
+ * */
 int rdbSaveObjectType(rio *rdb, robj *o) {
     switch (o->type) {
     case OBJ_STRING:
@@ -776,7 +778,9 @@ size_t rdbSaveStreamConsumers(rio *rdb, streamCG *cg) {
 }
 
 /* Save a Redis object.
- * Returns -1 on error, number of bytes written on success. */
+ * Returns -1 on error, number of bytes written on success.
+ * 将某个redis键值对转换成格式化数据后存储到rio中  这里是基于rdb的生成规则
+ * */
 ssize_t rdbSaveObject(rio *rdb, robj *o, robj *key) {
     ssize_t n = 0, nwritten = 0;
 

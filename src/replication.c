@@ -2942,6 +2942,7 @@ void replicationSetMaster(char *ip, int port) {
  * 因为master节点发生了替换 清理原来的数据
  * */
 void replicationUnsetMaster(void) {
+    // 代表之前没有设置master相关信息
     if (server.masterhost == NULL) return; /* Nothing to do. */
 
     /* Fire the master link modules event. */

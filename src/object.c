@@ -1233,15 +1233,20 @@ sds getMemoryDoctorReport(void) {
  * The lfu_freq arg is only relevant if policy is MAXMEMORY_FLAG_LFU.
  * The lru_idle and lru_clock args are only relevant if policy
  * is MAXMEMORY_FLAG_LRU.
- * Either or both of them may be <0, in that case, nothing is set. */
+ * Either or both of them may be <0, in that case, nothing is set.
+ * 为某个redisObject 设置lru/lfu信息
+ * */
 int objectSetLRUOrLFU(robj *val, long long lfu_freq, long long lru_idle,
                        long long lru_clock, int lru_multiplier) {
+    // 代表采用的内存淘汰策略是基于lfu的
     if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
         if (lfu_freq >= 0) {
+            // 这里计算lru的逻辑就不细看了
             serverAssert(lfu_freq <= 255);
             val->lru = (LFUGetTimeInMinutes()<<8) | lfu_freq;
             return 1;
         }
+        // 非lfu淘汰策略 并且lru参数不为空 计算后设置到val->lru
     } else if (lru_idle >= 0) {
         /* Provided LRU idle time is in seconds. Scale
          * according to the LRU clock resolution this Redis

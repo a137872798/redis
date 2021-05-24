@@ -2913,7 +2913,9 @@ void securityWarningCommand(client *c) {
 
 /* Rewrite the command vector of the client. All the new objects ref count
  * is incremented. The old command vector is freed, and the old objects
- * ref count is decremented. */
+ * ref count is decremented.
+ * 对client做转换
+ * */
 void rewriteClientCommandVector(client *c, int argc, ...) {
     va_list ap;
     int j;
@@ -3183,7 +3185,9 @@ void flushSlavesOutputBuffers(void) {
  * In such a case, the pause is extended if the duration is more than the
  * time left for the previous duration. However if the duration is smaller
  * than the time left for the previous pause, no change is made to the
- * left duration. */
+ * left duration.
+ * 设置一个client暂停的标记 直到某个时间点  可以看到当某个slave想要进行故障转移时 就会通知它的master节点 并在此时将client暂停 注意这是非强制转移的情况
+ * */
 void pauseClients(mstime_t end) {
     if (!server.clients_paused || end > server.clients_pause_end_time)
         server.clients_pause_end_time = end;

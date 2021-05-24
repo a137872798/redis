@@ -164,6 +164,7 @@ typedef struct clusterState {
     // 存储所有节点的字典  key是节点名称
     dict *nodes;          /* Hash table of name -> clusterNode structures */
     dict *nodes_black_list; /* Nodes we don't re-add for a few seconds. */
+    // 描述数据迁出的记录 比如哪个节点的数据迁移到哪个节点
     clusterNode *migrating_slots_to[CLUSTER_SLOTS];
     clusterNode *importing_slots_from[CLUSTER_SLOTS];
     // 每个slot对应一个node
