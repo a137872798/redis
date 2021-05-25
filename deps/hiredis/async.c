@@ -99,12 +99,13 @@ static dictType callbackDict = {
 };
 
 /**
- * 基于当前上下文创建一个异步上下文
  * @param c
  * @return
  */
 static redisAsyncContext *redisAsyncInitialize(redisContext *c) {
     redisAsyncContext *ac;
+
+    // 同时需要一个channelDict 和一个 patternDict
     dict *channels = NULL, *patterns = NULL;
 
     channels = dictCreate(&callbackDict,NULL);
@@ -119,6 +120,7 @@ static redisAsyncContext *redisAsyncInitialize(redisContext *c) {
     if (ac == NULL)
         goto oom;
 
+    // 实际上ac->c 就是c 因为是在c的基础上申请更多的内存
     c = &(ac->c);
 
     /* The regular connect functions will always set the flag REDIS_CONNECTED.
@@ -126,6 +128,7 @@ static redisAsyncContext *redisAsyncInitialize(redisContext *c) {
      * received up before setting this flag, so reset it here. */
     c->flags &= ~REDIS_CONNECTED;
 
+    // 这里都是一些属性初始化
     ac->err = 0;
     ac->errstr = NULL;
     ac->data = NULL;
@@ -186,20 +189,22 @@ redisAsyncContext *redisAsyncConnectWithOptions(const redisOptions *options) {
 
     // 追加nonblock标识
     myOptions.options |= REDIS_OPT_NONBLOCK;
-    // 生成上下文对象
+    // 生成上下文对象  这里同时还基于该context进行网络连接
     c = redisConnectWithOptions(&myOptions);
     if (c == NULL) {
         return NULL;
     }
 
-    // 生成一个异步上下文
+    // 生成一个异步上下文 内部包含context  此时ac还没有设置其他属性
     ac = redisAsyncInitialize(c);
     if (ac == NULL) {
         redisFree(c);
         return NULL;
     }
 
-    /* Set any configured async push handler */
+    /* Set any configured async push handler
+     * 根据options设置push回调  先假设没有携带回调函数吧
+     * */
     redisAsyncSetPushCallback(ac, myOptions.async_push_cb);
 
     __redisAsyncCopyError(ac);
@@ -213,7 +218,7 @@ redisAsyncContext *redisAsyncConnect(const char *ip, int port) {
 }
 
 /**
- * 异步连接到该地址
+ * 同步连接到该地址 并返回一个asyncContext对象
  * @param ip
  * @param port
  * @param source_addr
@@ -245,19 +250,33 @@ redisAsyncContext *redisAsyncConnectUnix(const char *path) {
     return redisAsyncConnectWithOptions(&options);
 }
 
+/**
+ * 将连接的回调函数设置到asyncContext上
+ * @param ac
+ * @param fn
+ * @return
+ */
 int redisAsyncSetConnectCallback(redisAsyncContext *ac, redisConnectCallback *fn) {
     if (ac->onConnect == NULL) {
         ac->onConnect = fn;
 
         /* The common way to detect an established connection is to wait for
          * the first write event to be fired. This assumes the related event
-         * library functions are already set. */
+         * library functions are already set.
+         * 这里触发了 addWrite函数
+         * */
         _EL_ADD_WRITE(ac);
         return REDIS_OK;
     }
     return REDIS_ERR;
 }
 
+/**
+ * 设置连接断开时的钩子
+ * @param ac
+ * @param fn
+ * @return
+ */
 int redisAsyncSetDisconnectCallback(redisAsyncContext *ac, redisDisconnectCallback *fn) {
     if (ac->onDisconnect == NULL) {
         ac->onDisconnect = fn;
@@ -888,6 +907,12 @@ int redisAsyncFormattedCommand(redisAsyncContext *ac, redisCallbackFn *fn, void 
     return status;
 }
 
+/**
+ * 为某个asyncContext 设置回调对象
+ * @param ac
+ * @param fn
+ * @return
+ */
 redisAsyncPushFn *redisAsyncSetPushCallback(redisAsyncContext *ac, redisAsyncPushFn *fn) {
     redisAsyncPushFn *old = ac->push_cb;
     ac->push_cb = fn;

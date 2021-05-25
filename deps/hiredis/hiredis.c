@@ -835,7 +835,7 @@ redisContext *redisConnectWithOptions(const redisOptions *options) {
         return c;
     }
 
-    // 代表创建的是tcp连接
+    // 代表创建的是tcp连接   同步连接 还是异步连接???  从代码层面看好像是同步连接
     if (options->type == REDIS_CONN_TCP) {
         redisContextConnectBindTcp(c, options->endpoint.tcp.ip,
                                    options->endpoint.tcp.port, options->connect_timeout,

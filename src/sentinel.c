@@ -322,6 +322,10 @@ static void redisAeDelRead(void *privdata) {
     }
 }
 
+/**
+ * 触发一个添加数据的事件
+ * @param privdata
+ */
 static void redisAeAddWrite(void *privdata) {
     redisAeEvents *e = (redisAeEvents*)privdata;
     aeEventLoop *loop = e->loop;
@@ -347,6 +351,12 @@ static void redisAeCleanup(void *privdata) {
     zfree(e);
 }
 
+/**
+ * 将事件循环 以及一些其他函数设置到ac上
+ * @param loop
+ * @param ac
+ * @return
+ */
 static int redisAeAttach(aeEventLoop *loop, redisAsyncContext *ac) {
     redisContext *c = &(ac->c);
     redisAeEvents *e;
@@ -2125,7 +2135,9 @@ werr:
  *
  * We don't check at all if the command was successfully transmitted
  * to the instance as if it fails Sentinel will detect the instance down,
- * will disconnect and reconnect the link and so forth. */
+ * will disconnect and reconnect the link and so forth.
+ * 根据上下文信息判断连接到某个实例时是否需要进行权限认证
+ * */
 void sentinelSendAuthIfNeeded(sentinelRedisInstance *ri, redisAsyncContext *c) {
     char *auth_pass = NULL;
     char *auth_user = NULL;
@@ -2207,22 +2219,28 @@ void sentinelReconnectInstance(sentinelRedisInstance *ri) {
      * 代表还没有开启异步连接
      * */
     if (link->cc == NULL) {
-        // 开启异步连接
+        // 从代码层面看这应该是同步连接啊  并返回一个asyncContext
         link->cc = redisAsyncConnectBind(ri->addr->ip,ri->addr->port,NET_FIRST_BIND_ADDR);
 
+        // 代表本次发起连接失败  如果是初始化安全层失败  发出相关事件
         if (!link->cc->err && server.tls_replication &&
                 (instanceLinkNegotiateTLS(link->cc) == C_ERR)) {
             sentinelEvent(LL_DEBUG,"-cmd-link-reconnection",ri,"%@ #Failed to initialize TLS");
+            // 对link做一些清理操作
             instanceLinkCloseConnection(link,link->cc);
+            // 非tls层的异常 比如只是简单的连接异常  也发出相关事件
         } else if (link->cc->err) {
             sentinelEvent(LL_DEBUG,"-cmd-link-reconnection",ri,"%@ #%s",
                 link->cc->errstr);
             instanceLinkCloseConnection(link,link->cc);
         } else {
-            link->pending_commands = 0;
-            link->cc_conn_time = mstime();
+            // 重连成功 重置link的一些属性
+            link->pending_commands = 0;  // 此时没有等待返回的数据
+            link->cc_conn_time = mstime();  // 重置连接时间
             link->cc->data = link;
+            // 对asyncContext 做一些属性填充 比如el
             redisAeAttach(server.el,link->cc);
+            // 设置不同时间点触发的钩子函数
             redisAsyncSetConnectCallback(link->cc,
                     sentinelLinkEstablishedCallback);
             redisAsyncSetDisconnectCallback(link->cc,

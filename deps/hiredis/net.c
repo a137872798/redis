@@ -397,6 +397,7 @@ static int _redisContextConnectTcp(redisContext *c, const char *addr, int port,
      * as in the case of the reconnect method.
      *
      * This is a bit ugly, but atleast it works and doesn't leak memory.
+     * 设置上下文的host
      **/
     if (c->tcp.host != addr) {
         hi_free(c->tcp.host);
@@ -406,6 +407,7 @@ static int _redisContextConnectTcp(redisContext *c, const char *addr, int port,
             goto oom;
     }
 
+    // 代表本次连接有时间限制
     if (timeout) {
         if (redisContextUpdateConnectTimeout(c, timeout) == REDIS_ERR)
             goto oom;
@@ -414,6 +416,7 @@ static int _redisContextConnectTcp(redisContext *c, const char *addr, int port,
         c->connect_timeout = NULL;
     }
 
+    // 读取超时时间
     if (redisContextTimeoutMsec(c, &timeout_msec) != REDIS_OK) {
         __redisSetError(c, REDIS_ERR_IO, "Invalid timeout specified");
         goto error;
@@ -436,7 +439,9 @@ static int _redisContextConnectTcp(redisContext *c, const char *addr, int port,
      * in a Redis client you can't afford to test if you have IPv6 connectivity
      * as this would add latency to every connect. Otherwise a more sensible
      * route could be: Use IPv6 if both addresses are available and there is IPv6
-     * connectivity. */
+     * connectivity.
+     * 调用底层函数
+     * */
     if ((rv = getaddrinfo(c->tcp.host,_port,&hints,&servinfo)) != 0) {
          hints.ai_family = AF_INET6;
          if ((rv = getaddrinfo(addr,_port,&hints,&servinfo)) != 0) {
@@ -444,6 +449,7 @@ static int _redisContextConnectTcp(redisContext *c, const char *addr, int port,
             return REDIS_ERR;
         }
     }
+    // 这里会获取一组servinfo 只要有一个能成功包装成socket就可以
     for (p = servinfo; p != NULL; p = p->ai_next) {
 addrretry:
         if ((s = socket(p->ai_family,p->ai_socktype,p->ai_protocol)) == REDIS_INVALID_FD)
@@ -471,6 +477,7 @@ addrretry:
                 }
             }
 
+            // 绑定本地地址
             for (b = bservinfo; b != NULL; b = b->ai_next) {
                 if (bind(s,b->ai_addr,b->ai_addrlen) != -1) {
                     bound = 1;
@@ -495,6 +502,7 @@ addrretry:
         memcpy(c->saddr, p->ai_addr, p->ai_addrlen);
         c->addrlen = p->ai_addrlen;
 
+        // 使用创建的套接字去连接目标地址 这些都是内核级别函数 先不看
         if (connect(s,p->ai_addr,p->ai_addrlen) == -1) {
             if (errno == EHOSTUNREACH) {
                 redisNetClose(c);

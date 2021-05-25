@@ -238,6 +238,7 @@ typedef struct redisContext {
 
     int err; /* Error flags, 0 when there is no error */
     char errstr[128]; /* String representation of error when applicable */
+    // 记录的是套接字句柄
     redisFD fd;
     int flags;
     char *obuf; /* Write buffer */
