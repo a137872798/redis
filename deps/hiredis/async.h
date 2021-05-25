@@ -59,7 +59,9 @@ typedef void (redisDisconnectCallback)(const struct redisAsyncContext*, int stat
 typedef void (redisConnectCallback)(const struct redisAsyncContext*, int status);
 typedef void(redisTimerCallback)(void *timer, void *privdata);
 
-/* Context for an async connection to Redis */
+/* Context for an async connection to Redis
+ * 一个异步连接上下文
+ * */
 typedef struct redisAsyncContext {
     /* Hold the regular context, so it can be realloc'ed. */
     redisContext c;

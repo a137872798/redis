@@ -1091,27 +1091,35 @@ struct rewriteConfigState {
                              written. Currently only used for testing. */
 };
 
-/* Append the new line to the current configuration state. */
+/* Append the new line to the current configuration state.
+ * 配置中的每行数据会被设置到lines中
+ * */
 void rewriteConfigAppendLine(struct rewriteConfigState *state, sds line) {
     state->lines = zrealloc(state->lines, sizeof(char*) * (state->numlines+1));
     state->lines[state->numlines++] = line;
 }
 
-/* Populate the option -> list of line numbers map. */
+/* Populate the option -> list of line numbers map.
+ * 解析本行的参数信息
+ * */
 void rewriteConfigAddLineNumberToOption(struct rewriteConfigState *state, sds option, int linenum) {
+    // 以option作为dict的key
     list *l = dictFetchValue(state->option_to_line,option);
 
     if (l == NULL) {
         l = listCreate();
         dictAdd(state->option_to_line,sdsdup(option),l);
     }
+    // 代表该 option 出现在第几行 同一个option可能出现多次 所以这是一个list结构
     listAddNodeTail(l,(void*)(long)linenum);
 }
 
 /* Add the specified option to the set of processed options.
  * This is useful as only unused lines of processed options will be blanked
  * in the config file, while options the rewrite process does not understand
- * remain untouched. */
+ * remain untouched.
+ * 标记哪些option会被rewrite
+ * */
 void rewriteConfigMarkAsProcessed(struct rewriteConfigState *state, const char *option) {
     sds opt = sdsnew(option);
 
@@ -1122,14 +1130,18 @@ void rewriteConfigMarkAsProcessed(struct rewriteConfigState *state, const char *
  * config rewrite state, and return it to the caller.
  *
  * If it is impossible to read the old file, NULL is returned.
- * If the old file does not exist at all, an empty state is returned. */
+ * If the old file does not exist at all, an empty state is returned.
+ * 先从文件中加载数据到内存中
+ * */
 struct rewriteConfigState *rewriteConfigReadOldFile(char *path) {
+    // 以只读方式打开文件
     FILE *fp = fopen(path,"r");
     if (fp == NULL && errno != ENOENT) return NULL;
 
     char buf[CONFIG_MAX_LINE+1];
     int linenum = -1;
     struct rewriteConfigState *state = zmalloc(sizeof(*state));
+    // 初始化state的相关容器
     state->option_to_line = dictCreate(&optionToLineDictType,NULL);
     state->rewritten = dictCreate(&optionSetDictType,NULL);
     state->numlines = 0;
@@ -1138,18 +1150,22 @@ struct rewriteConfigState *rewriteConfigReadOldFile(char *path) {
     state->force_all = 0;
     if (fp == NULL) return state;
 
-    /* Read the old file line by line, populate the state. */
+    /* Read the old file line by line, populate the state.
+     * 按行读取数据
+     * */
     while(fgets(buf,CONFIG_MAX_LINE+1,fp) != NULL) {
         int argc;
         sds *argv;
+        // 截取换行符
         sds line = sdstrim(sdsnew(buf),"\r\n\t ");
 
         linenum++; /* Zero based, so we init at -1 */
 
-        /* Handle comments and empty lines. */
+        /* Handle comments and empty lines. 跳过注释代码 */
         if (line[0] == '#' || line[0] == '\0') {
             if (!state->has_tail && !strcmp(line,REDIS_CONFIG_REWRITE_SIGNATURE))
                 state->has_tail = 1;
+            // 将本行记录存储到lines中
             rewriteConfigAppendLine(state,line);
             continue;
         }
@@ -1170,21 +1186,26 @@ struct rewriteConfigState *rewriteConfigReadOldFile(char *path) {
         sdstolower(argv[0]); /* We only want lowercase config directives. */
 
         /* Now we populate the state according to the content of this line.
-         * Append the line and populate the option -> line numbers map. */
+         * Append the line and populate the option -> line numbers map.
+         * */
         rewriteConfigAppendLine(state,line);
 
         /* Translate options using the word "slave" to the corresponding name
          * "replica", before adding such option to the config name -> lines
-         * mapping. */
+         * mapping.
+         * 哨兵文件内会记录此时所有的slave信息
+         * */
         char *p = strstr(argv[0],"slave");
         if (p) {
             sds alt = sdsempty();
+            // 就是在  slave之前插入一个 replica字符串
             alt = sdscatlen(alt,argv[0],p-argv[0]);;
             alt = sdscatlen(alt,"replica",7);
             alt = sdscatlen(alt,p+5,strlen(p+5));
             sdsfree(argv[0]);
             argv[0] = alt;
         }
+        // 将本行设置到state结构体中
         rewriteConfigAddLineNumberToOption(state,argv[0],linenum);
         sdsfreesplitres(argv,argc);
     }
@@ -1207,13 +1228,17 @@ struct rewriteConfigState *rewriteConfigReadOldFile(char *path) {
  * by CONFIG REWRITE.
  *
  * "line" is either used, or freed, so the caller does not need to free it
- * in any way. */
+ * in any way.
+ * 使用line替代原本的option
+ * */
 void rewriteConfigRewriteLine(struct rewriteConfigState *state, const char *option, sds line, int force) {
     sds o = sdsnew(option);
     list *l = dictFetchValue(state->option_to_line,o);
 
+    // 记录该option已经被修改过
     rewriteConfigMarkAsProcessed(state,option);
 
+    // 如果此时option已经不存在与state中了 且非force模式 忽略本次请求
     if (!l && !force && !state->force_all) {
         /* Option not used previously, and we are not forced to use it. */
         sdsfree(line);
@@ -1228,16 +1253,21 @@ void rewriteConfigRewriteLine(struct rewriteConfigState *state, const char *opti
         /* There are still lines in the old configuration file we can reuse
          * for this option. Replace the line with the new one. */
         listDelNode(l,ln);
+        // 代表每条option 都已经被使用过 可以从option_to_line中移除数据
         if (listLength(l) == 0) dictDelete(state->option_to_line,o);
+        // 使用line去替换option (原本lines中存储的是option)
         sdsfree(state->lines[linenum]);
         state->lines[linenum] = line;
     } else {
-        /* Append a new line. */
+        /* Append a new line. 无法替换option 在force情况下会增加新行 用于存储line
+         * has_tail 相当于一个增加了新行的标记 REDIS_CONFIG_REWRITE_SIGNATURE 是用于标记下一行是通过rewrite产生的
+         * */
         if (!state->has_tail) {
             rewriteConfigAppendLine(state,
                 sdsnew(REDIS_CONFIG_REWRITE_SIGNATURE));
             state->has_tail = 1;
         }
+        // 将line加入到lines中
         rewriteConfigAppendLine(state,line);
     }
     sdsfree(o);
@@ -1331,7 +1361,7 @@ void rewriteConfigEnumOption(struct rewriteConfigState *state, const char *optio
     rewriteConfigRewriteLine(state,option,line,force);
 }
 
-/* Rewrite the save option. */
+/* Rewrite the save option. 读取此时server.saveparams并替换sentinel中的"save" */
 void rewriteConfigSaveOption(struct rewriteConfigState *state) {
     int j;
     sds line;
@@ -1354,7 +1384,9 @@ void rewriteConfigSaveOption(struct rewriteConfigState *state) {
     rewriteConfigMarkAsProcessed(state,"save");
 }
 
-/* Rewrite the user option. */
+/* Rewrite the user option.
+ * 获取server的用户信息 并替换"user"
+ * */
 void rewriteConfigUserOption(struct rewriteConfigState *state) {
     /* If there is a user file defined we just mark this configuration
      * directive as processed, so that all the lines containing users
@@ -1370,6 +1402,7 @@ void rewriteConfigUserOption(struct rewriteConfigState *state) {
     raxIterator ri;
     raxStart(&ri,Users);
     raxSeek(&ri,"^",NULL,0);
+    // 将所有用户信息格式化后 设置到state中
     while(raxNext(&ri)) {
         user *u = ri.data;
         sds line = sdsnew("user ");
@@ -1382,7 +1415,9 @@ void rewriteConfigUserOption(struct rewriteConfigState *state) {
     }
     raxStop(&ri);
 
-    /* Mark "user" as processed in case there are no defined users. */
+    /* Mark "user" as processed in case there are no defined users.
+     * 此时所有user都已经使用完了 加入到rewritten队列中
+     * */
     rewriteConfigMarkAsProcessed(state,"user");
 }
 
@@ -1476,25 +1511,30 @@ void rewriteConfigOOMScoreAdjValuesOption(struct rewriteConfigState *state) {
     rewriteConfigRewriteLine(state,option,line,force);
 }
 
-/* Rewrite the bind option. */
+/* Rewrite the bind option. 基于当前server的bind配置 替换option的数据 */
 void rewriteConfigBindOption(struct rewriteConfigState *state) {
     int force = 1;
     sds line, addresses;
+
+    // 如果sentinel配置文件中包含bind 尝试使用server的配置进行替换
     char *option = "bind";
 
-    /* Nothing to rewrite if we don't have bind addresses. */
+    /* Nothing to rewrite if we don't have bind addresses.
+     * 没有声明bindAddress的话 就不需要rewritten了 将该option加入到state.rewritten容器中
+     * */
     if (server.bindaddr_count == 0) {
         rewriteConfigMarkAsProcessed(state,option);
         return;
     }
 
-    /* Rewrite as bind <addr1> <addr2> ... <addrN> */
+    /* Rewrite as bind <addr1> <addr2> ... <addrN> 将地址信息连接起来 */
     addresses = sdsjoin(server.bindaddr,server.bindaddr_count," ");
     line = sdsnew(option);
     line = sdscatlen(line, " ", 1);
     line = sdscatsds(line, addresses);
     sdsfree(addresses);
 
+    // 使用line替换option的数据
     rewriteConfigRewriteLine(state,option,line,force);
 }
 
@@ -1519,7 +1559,9 @@ void rewriteConfigRequirepassOption(struct rewriteConfigState *state, char *opti
 }
 
 /* Glue together the configuration lines in the current configuration
- * rewrite state into a single string, stripping multiple empty lines. */
+ * rewrite state into a single string, stripping multiple empty lines.
+ * 将state转换成文本
+ * */
 sds rewriteConfigGetContentFromState(struct rewriteConfigState *state) {
     sds content = sdsempty();
     int j, was_empty = 0;
@@ -1553,7 +1595,9 @@ void rewriteConfigReleaseState(struct rewriteConfigState *state) {
  * should be replaced by empty lines.
  *
  * This function does just this, iterating all the option names and
- * blanking all the lines still associated. */
+ * blanking all the lines still associated.
+ * 移除孤儿配置
+ * */
 void rewriteConfigRemoveOrphaned(struct rewriteConfigState *state) {
     dictIterator *di = dictGetIterator(state->option_to_line);
     dictEntry *de;
@@ -1585,7 +1629,10 @@ void rewriteConfigRemoveOrphaned(struct rewriteConfigState *state) {
  * in an atomic manner.
  *
  * The function returns 0 on success, otherwise -1 is returned and errno
- * is set accordingly. */
+ * is set accordingly.
+ * @param configfile 本次数据写入的目标文件
+ * @param content 本次写入的数据体
+ * */
 int rewriteConfigOverwriteFile(char *configfile, sds content) {
     int fd = -1;
     int retval = -1;
@@ -1594,6 +1641,7 @@ int rewriteConfigOverwriteFile(char *configfile, sds content) {
     size_t offset = 0;
     ssize_t written_bytes = 0;
 
+    // 配置文件路径不能太长
     int tmp_path_len = snprintf(tmp_conffile, sizeof(tmp_conffile), "%s%s", configfile, tmp_suffix);
     if (tmp_path_len <= 0 || (unsigned int)tmp_path_len >= sizeof(tmp_conffile)) {
         serverLog(LL_WARNING, "Config file full path is too long");
@@ -1604,7 +1652,9 @@ int rewriteConfigOverwriteFile(char *configfile, sds content) {
 #ifdef _GNU_SOURCE
     fd = mkostemp(tmp_conffile, O_CLOEXEC);
 #else
-    /* There's a theoretical chance here to leak the FD if a module thread forks & execv in the middle */
+    /* There's a theoretical chance here to leak the FD if a module thread forks & execv in the middle
+     * 创建临时文件
+     * */
     fd = mkstemp(tmp_conffile);
 #endif
 
@@ -1613,6 +1663,7 @@ int rewriteConfigOverwriteFile(char *configfile, sds content) {
         return retval;
     }
 
+    // 循环直到所有数据写入到文件中
     while (offset < sdslen(content)) {
          written_bytes = write(fd, content + offset, sdslen(content) - offset);
          if (written_bytes <= 0) {
@@ -1649,49 +1700,69 @@ cleanup:
  * The force_all flag overrides this behavior and forces everything to be
  * written. This is currently only used for testing purposes.
  *
- * On error -1 is returned and errno is set accordingly, otherwise 0. */
+ * On error -1 is returned and errno is set accordingly, otherwise 0.
+ * 将此时哨兵相关的所有信息写入到配置文件中
+ * */
 int rewriteConfig(char *path, int force_all) {
     struct rewriteConfigState *state;
     sds newcontent;
     int retval;
 
-    /* Step 1: read the old config into our rewrite state. */
+    /* Step 1: read the old config into our rewrite state. 先从配置文件中读取旧数据 */
     if ((state = rewriteConfigReadOldFile(path)) == NULL) return -1;
     if (force_all) state->force_all = 1;
 
     /* Step 2: rewrite every single option, replacing or appending it inside
      * the rewrite state. */
 
-    /* Iterate the configs that are standard */
+    /* Iterate the configs that are standard
+     * 此时的state会影响到之前的标准配置
+     * */
     for (standardConfig *config = configs; config->name != NULL; config++) {
         config->interface.rewrite(config->data, config->name, state);
     }
 
+    // 这里对一些特殊的配置项进行rewrite
     rewriteConfigBindOption(state);
+    // 读取 unixsocket参数 并替换 unixsocketperm
     rewriteConfigOctalOption(state,"unixsocketperm",server.unixsocketperm,CONFIG_DEFAULT_UNIX_SOCKET_PERM);
+    // 替换string类型的配置
     rewriteConfigStringOption(state,"logfile",server.logfile,CONFIG_DEFAULT_LOGFILE);
+    // 使用server.saveparam 替换sentinel配置中的"save"参数
     rewriteConfigSaveOption(state);
+    // 获取用户信息
     rewriteConfigUserOption(state);
+    // 获取当前主目录 并替换 "dir"
     rewriteConfigDirOption(state);
+    // 获取本节点认可的master节点
     rewriteConfigSlaveofOption(state,"replicaof");
+    // 读取 requirepass
     rewriteConfigRequirepassOption(state,"requirepass");
     rewriteConfigBytesOption(state,"client-query-buffer-limit",server.client_max_querybuf_len,PROTO_MAX_QUERYBUF_LEN);
     rewriteConfigStringOption(state,"cluster-config-file",server.cluster_configfile,CONFIG_DEFAULT_CLUSTER_CONFIG_FILE);
+    // 也是获取配置项 并修改成字符串
     rewriteConfigNotifykeyspaceeventsOption(state);
     rewriteConfigClientoutputbufferlimitOption(state);
     rewriteConfigOOMScoreAdjValuesOption(state);
 
-    /* Rewrite Sentinel config if in Sentinel mode. */
+    /* Rewrite Sentinel config if in Sentinel mode.
+     * 根据哨兵相关配置填充rewriteConfigState
+     * */
     if (server.sentinel_mode) rewriteConfigSentinelOption(state);
 
     /* Step 3: remove all the orphaned lines in the old file, that is, lines
      * that were used by a config option and are no longer used, like in case
-     * of multiple "save" options or duplicated options. */
+     * of multiple "save" options or duplicated options.
+     * 移除一些孤儿配置
+     * */
     rewriteConfigRemoveOrphaned(state);
 
     /* Step 4: generate a new configuration file from the modified state
-     * and write it into the original file. */
+     * and write it into the original file.
+     * 将state转换成配置文件文本
+     * */
     newcontent = rewriteConfigGetContentFromState(state);
+    // 更新配置文件数据
     retval = rewriteConfigOverwriteFile(server.configfile,newcontent);
 
     sdsfree(newcontent);

@@ -207,6 +207,7 @@ typedef struct {
 
 /**
  * Helper macros to initialize options to their specified fields.
+ * 将ip/port/type填充到opts上
  */
 #define REDIS_OPTIONS_SET_TCP(opts, ip_, port_) \
     (opts)->type = REDIS_CONN_TCP; \
@@ -231,6 +232,8 @@ typedef struct redisContextFuncs {
 
 /* Context for a connection to Redis */
 typedef struct redisContext {
+
+    // 存储了context可能会用到的一组函数
     const redisContextFuncs *funcs;   /* Function table */
 
     int err; /* Error flags, 0 when there is no error */

@@ -98,6 +98,11 @@ static dictType callbackDict = {
     callbackValDestructor
 };
 
+/**
+ * 基于当前上下文创建一个异步上下文
+ * @param c
+ * @return
+ */
 static redisAsyncContext *redisAsyncInitialize(redisContext *c) {
     redisAsyncContext *ac;
     dict *channels = NULL, *patterns = NULL;
@@ -162,22 +167,32 @@ static void __redisAsyncCopyError(redisAsyncContext *ac) {
     ac->errstr = c->errstr;
 }
 
+/**
+ * 基于options 建立异步连接
+ * @param options
+ * @return
+ */
 redisAsyncContext *redisAsyncConnectWithOptions(const redisOptions *options) {
     redisOptions myOptions = *options;
     redisContext *c;
     redisAsyncContext *ac;
 
     /* Clear any erroneously set sync callback and flag that we don't want to
-     * use freeReplyObject by default. */
+     * use freeReplyObject by default.
+     * 设置成no_push
+     * */
     myOptions.push_cb = NULL;
     myOptions.options |= REDIS_OPT_NO_PUSH_AUTOFREE;
 
+    // 追加nonblock标识
     myOptions.options |= REDIS_OPT_NONBLOCK;
+    // 生成上下文对象
     c = redisConnectWithOptions(&myOptions);
     if (c == NULL) {
         return NULL;
     }
 
+    // 生成一个异步上下文
     ac = redisAsyncInitialize(c);
     if (ac == NULL) {
         redisFree(c);
@@ -197,11 +212,21 @@ redisAsyncContext *redisAsyncConnect(const char *ip, int port) {
     return redisAsyncConnectWithOptions(&options);
 }
 
+/**
+ * 异步连接到该地址
+ * @param ip
+ * @param port
+ * @param source_addr
+ * @return
+ */
 redisAsyncContext *redisAsyncConnectBind(const char *ip, int port,
                                          const char *source_addr) {
     redisOptions options = {0};
+    // 填充options的 ip/port/type
     REDIS_OPTIONS_SET_TCP(&options, ip, port);
+    // 本机绑定的地址
     options.endpoint.tcp.source_addr = source_addr;
+    // 基于options创建异步连接
     return redisAsyncConnectWithOptions(&options);
 }
 
@@ -359,7 +384,9 @@ static void __redisAsyncFree(redisAsyncContext *ac) {
 /* Free the async context. When this function is called from a callback,
  * control needs to be returned to redisProcessCallbacks() before actual
  * free'ing. To do so, a flag is set on the context which is picked up by
- * redisProcessCallbacks(). Otherwise, the context is immediately free'd. */
+ * redisProcessCallbacks(). Otherwise, the context is immediately free'd.
+ * 释放某个异步上下文对象
+ * */
 void redisAsyncFree(redisAsyncContext *ac) {
     redisContext *c = &(ac->c);
     c->flags |= REDIS_FREEING;

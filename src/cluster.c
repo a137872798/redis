@@ -6592,7 +6592,7 @@ void readwriteCommand(client *c) {
  *
  * CLUSTER_REDIR_DOWN_STATE and CLUSTER_REDIR_DOWN_RO_STATE if the cluster is
  * down but the user attempts to execute a command that addresses one or more keys.
- * 通过条件信息查询某个node
+ * 确定本次command会在集群中的哪个节点执行
  * */
 clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, int argc, int *hashslot, int *error_code) {
     clusterNode *n = NULL;
@@ -6721,7 +6721,9 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
                 }
             }
 
-            /* Migrating / Importing slot? Count keys we don't have. */
+            /* Migrating / Importing slot? Count keys we don't have.
+             * 虽然数据记录在slot中 但是发现已经从db中被移除了
+             * */
             if ((migrating_slot || importing_slot) &&
                 lookupKeyRead(&server.db[0], thiskey) == NULL) {
                 missing_keys++;
@@ -6731,17 +6733,23 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
     }
 
     /* No key at all in command? then we can serve the request
-     * without redirections or errors in all the cases. */
+     * without redirections or errors in all the cases.
+     * 本次command中没有key 默认在本节点直接处理
+     * */
     if (n == NULL) return myself;
 
     /* Cluster is globally down but we got keys? We only serve the request
-     * if it is a read command and when allow_reads_when_down is enabled. */
-    if (server.cluster->state != CLUSTER_OK) {
+     * if it is a read command and when allow_reads_when_down is enabled.
+     * 检查此时集群是否处于可用状态
+     * */
+    if (server.cluster->state != CLUSTER_OK){
+        // 如果当集群处于down时 无法读取数据 本次不会返回合适的节点
         if (!server.cluster_allow_reads_when_down) {
             /* The cluster is configured to block commands when the
              * cluster is down. */
             if (error_code) *error_code = CLUSTER_REDIR_DOWN_STATE;
             return NULL;
+            // 非只读操作 也就是写入操作 那么在集群不可用时 无法执行
         } else if (!(cmd->flags & CMD_READONLY) && !(cmd->proc == evalCommand)
                    && !(cmd->proc == evalShaCommand)) {
             /* The cluster is configured to allow read only commands
@@ -6756,17 +6764,21 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
         }
     }
 
-    /* Return the hashslot by reference. */
+    /* Return the hashslot by reference. 设置本次路由到的slot */
     if (hashslot) *hashslot = slot;
 
     /* MIGRATE always works in the context of the local node if the slot
      * is open (migrating or importing state). We need to be able to freely
-     * move keys among instances in this case. */
+     * move keys among instances in this case.
+     * 当migrating_slot/importing_slot 不为空时 迁移命令总是在本节点执行 什么意思 为什么 ???
+     * */
     if ((migrating_slot || importing_slot) && cmd->proc == migrateCommand)
         return myself;
 
     /* If we don't have all the keys and we are migrating the slot, send
-     * an ASK redirection. */
+     * an ASK redirection.
+     * 只要本次请求中的任意一个key丢失 会需要获取redisObject被转移的目标节点
+     * */
     if (migrating_slot && missing_keys) {
         if (error_code) *error_code = CLUSTER_REDIR_ASK;
         return server.cluster->migrating_slots_to[slot];
@@ -6775,7 +6787,9 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
     /* If we are receiving the slot, and the client correctly flagged the
      * request as "ASKING", we can serve the request. However if the request
      * involves multiple keys and we don't have them all, the only option is
-     * to send a TRYAGAIN error. */
+     * to send a TRYAGAIN error.
+     * 接收到了其他节点的数据 应该是检测本次请求的key是否在本节点 对应上面的逻辑
+     * */
     if (importing_slot &&
         (c->flags & CLIENT_ASKING || cmd->flags & CMD_ASKING)) {
         if (multiple_keys && missing_keys) {
@@ -6788,7 +6802,9 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
 
     /* Handle the read-only client case reading from a slave: if this
      * node is a slave and the request is about a hash slot our master
-     * is serving, we can reply without redirection. */
+     * is serving, we can reply without redirection.
+     * 如果是只读指令 且本节点作为目标节点的slave节点 可以帮忙处理请求 也就是起到负载的作用
+     * */
     int is_readonly_command = (c->cmd->flags & CMD_READONLY) ||
                               (c->cmd->proc == execCommand && !(c->mstate.cmd_inv_flags & CMD_READONLY));
     if (c->flags & CLIENT_READONLY &&
@@ -6800,7 +6816,9 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
     }
 
     /* Base case: just return the right node. However if this node is not
-     * myself, set error_code to MOVED since we need to issue a redirection. */
+     * myself, set error_code to MOVED since we need to issue a redirection.
+     * 否则将路由到的节点返回
+     * */
     if (n != myself && error_code) *error_code = CLUSTER_REDIR_MOVED;
     return n;
 }
@@ -6811,7 +6829,9 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
  * If CLUSTER_REDIR_ASK or CLUSTER_REDIR_MOVED error codes
  * are used, then the node 'n' should not be NULL, but should be the
  * node we want to mention in the redirection. Moreover hashslot should
- * be set to the hash slot that caused the redirection. */
+ * be set to the hash slot that caused the redirection.
+ * 将错误信息返回给client
+ * */
 void clusterRedirectClient(client *c, clusterNode *n, int hashslot, int error_code) {
     if (error_code == CLUSTER_REDIR_CROSS_SLOT) {
         addReplySds(c, sdsnew("-CROSSSLOT Keys in request don't hash to the same slot\r\n"));
@@ -6820,6 +6840,8 @@ void clusterRedirectClient(client *c, clusterNode *n, int hashslot, int error_co
          * but the slot is not "stable" currently as there is
          * a migration or import in progress. */
         addReplySds(c, sdsnew("-TRYAGAIN Multiple keys request during rehashing of slot\r\n"));
+
+        // 将集群处于不可用状态的信息返回给client
     } else if (error_code == CLUSTER_REDIR_DOWN_STATE) {
         addReplySds(c, sdsnew("-CLUSTERDOWN The cluster is down\r\n"));
     } else if (error_code == CLUSTER_REDIR_DOWN_RO_STATE) {
@@ -6851,6 +6873,7 @@ void clusterRedirectClient(client *c, clusterNode *n, int hashslot, int error_co
  * 判断此时client是否还有阻塞的必要
  * */
 int clusterRedirectBlockedClientIfNeeded(client *c) {
+    // 代表由于这3种类型导致的阻塞
     if (c->flags & CLIENT_BLOCKED &&
         (c->btype == BLOCKED_LIST ||
          c->btype == BLOCKED_ZSET ||
@@ -6861,21 +6884,28 @@ int clusterRedirectBlockedClientIfNeeded(client *c) {
         /* If the cluster is down, unblock the client with the right error.
          * If the cluster is configured to allow reads on cluster down, we
          * still want to emit this error since a write will be required
-         * to unblock them which may never come.  */
+         * to unblock them which may never come.
+         * 因为此时集群处于不可用状态 将错误信息返回给client
+         * */
         if (server.cluster->state == CLUSTER_FAIL) {
             clusterRedirectClient(c, NULL, 0, CLUSTER_REDIR_DOWN_STATE);
             return 1;
         }
 
-        /* All keys must belong to the same slot, so check first key only. */
+        /* All keys must belong to the same slot, so check first key only.
+         * 此时client上还有多少待执行的block操作
+         * */
         di = dictGetIterator(c->bpop.keys);
         if ((de = dictNext(di)) != NULL) {
             robj *key = dictGetKey(de);
+            // 获取每个block操作要处理的key所在的slot
             int slot = keyHashSlot((char *) key->ptr, sdslen(key->ptr));
             clusterNode *node = server.cluster->slots[slot];
 
             /* if the client is read-only and attempting to access key that our
-             * replica can handle, allow it. */
+             * replica can handle, allow it.
+             * 如果当前节点是目标节点的slave节点 那么本次请求可以由本节点处理
+             * */
             if ((c->flags & CLIENT_READONLY) &&
                 (c->lastcmd->flags & CMD_READONLY) &&
                 nodeIsSlave(myself) && myself->slaveof == node) {
@@ -6884,7 +6914,9 @@ int clusterRedirectBlockedClientIfNeeded(client *c) {
 
             /* We send an error and unblock the client if:
              * 1) The slot is unassigned, emitting a cluster down error.
-             * 2) The slot is not handled by this node, nor being imported. */
+             * 2) The slot is not handled by this node, nor being imported.
+             * 将节点已经被移动的信息返回给client
+             * */
             if (node != myself &&
                 server.cluster->importing_slots_from[slot] == NULL) {
                 if (node == NULL) {

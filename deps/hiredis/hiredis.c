@@ -680,6 +680,10 @@ void __redisSetError(redisContext *c, int type, const char *str) {
     }
 }
 
+/**
+ * 生成reader对象 专门负责读取context->buf的数据
+ * @return
+ */
 redisReader *redisReaderCreate(void) {
     return redisReaderCreateWithFunctions(&defaultFunctions);
 }
@@ -689,16 +693,23 @@ static void redisPushAutoFree(void *privdata, void *reply) {
     freeReplyObject(reply);
 }
 
+/**
+ * 初始化context
+ * @return
+ */
 static redisContext *redisContextInit(void) {
     redisContext *c;
 
+    // 为context对象分配内存
     c = hi_calloc(1, sizeof(*c));
     if (c == NULL)
         return NULL;
 
     c->funcs = &redisContextDefaultFuncs;
 
+    // 上下文对象内部也需要一个缓冲区
     c->obuf = hi_sdsempty();
+    // 初始化reader对象
     c->reader = redisReaderCreate();
     c->fd = REDIS_INVALID_FD;
 
@@ -783,7 +794,13 @@ int redisReconnect(redisContext *c) {
     return ret;
 }
 
+/**
+ * 基于options生成上下文对象
+ * @param options
+ * @return
+ */
 redisContext *redisConnectWithOptions(const redisOptions *options) {
+    // 初始化上下文对象 内部有一个缓冲区一些函数和一个reader对象
     redisContext *c = redisContextInit();
     if (c == NULL) {
         return NULL;
@@ -799,25 +816,32 @@ redisContext *redisConnectWithOptions(const redisOptions *options) {
     }
 
     /* Set any user supplied RESP3 PUSH handler or use freeReplyObject
-     * as a default unless specifically flagged that we don't want one. */
+     * as a default unless specifically flagged that we don't want one.
+     * 先忽略设置push回调的情况  在异步建立连接时 不会设置push相关的参数
+     * */
     if (options->push_cb != NULL)
         redisSetPushCallback(c, options->push_cb);
     else if (!(options->options & REDIS_OPT_NO_PUSH_AUTOFREE))
         redisSetPushCallback(c, redisPushAutoFree);
 
+    // 将私有数据转移到context上
     c->privdata = options->privdata;
     c->free_privdata = options->free_privdata;
 
+    // 使用options 配置context
     if (redisContextUpdateConnectTimeout(c, options->connect_timeout) != REDIS_OK ||
         redisContextUpdateCommandTimeout(c, options->command_timeout) != REDIS_OK) {
         __redisSetError(c, REDIS_ERR_OOM, "Out of memory");
         return c;
     }
 
+    // 代表创建的是tcp连接
     if (options->type == REDIS_CONN_TCP) {
         redisContextConnectBindTcp(c, options->endpoint.tcp.ip,
                                    options->endpoint.tcp.port, options->connect_timeout,
                                    options->endpoint.tcp.source_addr);
+
+        // 忽略其他情况
     } else if (options->type == REDIS_CONN_UNIX) {
         redisContextConnectUnix(c, options->endpoint.unix_socket,
                                 options->connect_timeout);
@@ -829,6 +853,7 @@ redisContext *redisConnectWithOptions(const redisOptions *options) {
         return NULL;
     }
 
+    // 设置tcp层数据收发的超时时间  超时会丢弃数据么 ???
     if (options->command_timeout != NULL && (c->flags & REDIS_BLOCK) && c->fd != REDIS_INVALID_FD) {
         redisContextSetTimeout(c, *options->command_timeout);
     }

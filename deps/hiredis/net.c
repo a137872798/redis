@@ -328,6 +328,12 @@ int redisContextSetTimeout(redisContext *c, const struct timeval tv) {
     return REDIS_OK;
 }
 
+/**
+ * 配置context的超时时间
+ * @param c
+ * @param timeout
+ * @return
+ */
 int redisContextUpdateConnectTimeout(redisContext *c, const struct timeval *timeout) {
     /* Same timeval struct, short circuit */
     if (c->connect_timeout == timeout)
@@ -360,6 +366,15 @@ int redisContextUpdateCommandTimeout(redisContext *c, const struct timeval *time
     return REDIS_OK;
 }
 
+/**
+ *
+ * @param c
+ * @param addr
+ * @param port
+ * @param timeout
+ * @param source_addr
+ * @return
+ */
 static int _redisContextConnectTcp(redisContext *c, const char *addr, int port,
                                    const struct timeval *timeout,
                                    const char *source_addr) {
@@ -538,6 +553,15 @@ int redisContextConnectTcp(redisContext *c, const char *addr, int port,
     return _redisContextConnectTcp(c, addr, port, timeout, NULL);
 }
 
+/**
+ * 基于某个上下文对象 建立与某个ip/port的连接    source_addr代表绑定在本机的地址
+ * @param c
+ * @param addr
+ * @param port
+ * @param timeout
+ * @param source_addr
+ * @return
+ */
 int redisContextConnectBindTcp(redisContext *c, const char *addr, int port,
                                const struct timeval *timeout,
                                const char *source_addr) {

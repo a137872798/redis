@@ -602,6 +602,11 @@ static int processItem(redisReader *r) {
     }
 }
 
+/**
+ * 生成reader对象 某些函数逻辑由外部传入
+ * @param fn
+ * @return
+ */
 redisReader *redisReaderCreateWithFunctions(redisReplyObjectFunctions *fn) {
     redisReader *r;
 
@@ -609,10 +614,12 @@ redisReader *redisReaderCreateWithFunctions(redisReplyObjectFunctions *fn) {
     if (r == NULL)
         return NULL;
 
+    // reader内部也有一个缓冲区
     r->buf = hi_sdsempty();
     if (r->buf == NULL)
         goto oom;
 
+    // 在reader对象被创建时 就会默认分配task/tasks的内存
     r->task = hi_calloc(REDIS_READER_STACK_SIZE, sizeof(*r->task));
     if (r->task == NULL)
         goto oom;

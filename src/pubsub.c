@@ -39,7 +39,9 @@ int clientSubscriptionsCount(client *c);
  * Normally 'msg' is a Redis object containing the string to send as
  * message. However if the caller sets 'msg' as NULL, it will be able
  * to send a special message (for instance an Array type) by using the
- * addReply*() API family. */
+ * addReply*() API family.
+ * 将消息写入到缓冲区中
+ * */
 void addReplyPubsubMessage(client *c, robj *channel, robj *msg) {
     if (c->resp == 2)
         addReply(c,shared.mbulkhdr[3]);
@@ -308,15 +310,23 @@ int pubsubUnsubscribeAllPatterns(client *c, int notify) {
     return count;
 }
 
-/* Publish a message */
+/* Publish a message
+ * 通过消息总线发布一条消息
+ * @param channel 消息通道 比如sentinel_event的类型
+ * @param message 推送的消息体
+ * */
 int pubsubPublishMessage(robj *channel, robj *message) {
+
+    // 记录预期会有多少个消息接收人
     int receivers = 0;
     dictEntry *de;
     dictIterator *di;
     listNode *ln;
     listIter li;
 
-    /* Send to clients listening for that channel */
+    /* Send to clients listening for that channel
+     * 在集群中 某些client会监听哨兵节点发出的事件 按照channel 来选择监听类型
+     * */
     de = dictFind(server.pubsub_channels,channel);
     if (de) {
         list *list = dictGetVal(de);
@@ -324,17 +334,21 @@ int pubsubPublishMessage(robj *channel, robj *message) {
         listIter li;
 
         listRewind(list,&li);
+        // 遍历监听该节点该事件(channel)的所有client 并推送消息
         while ((ln = listNext(&li)) != NULL) {
             client *c = ln->value;
             addReplyPubsubMessage(c,channel,message);
             receivers++;
         }
     }
-    /* Send to clients listening to matching channels */
+    /* Send to clients listening to matching channels
+     * 有些可能以正则方式匹配channel  节点可能会同时存在与2个监听容器中么???
+     * */
     di = dictGetIterator(server.pubsub_patterns_dict);
     if (di) {
         channel = getDecodedObject(channel);
         while((de = dictNext(di)) != NULL) {
+            // key 代表监听的正则 value代表监听该正则的所有client
             robj *pattern = dictGetKey(de);
             list *clients = dictGetVal(de);
             if (!stringmatchlen((char*)pattern->ptr,
