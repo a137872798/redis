@@ -347,11 +347,11 @@ static size_t bulklen(size_t len) {
 }
 
 /**
- * 生成格式化数据
+ * 将所有参数按特定的格式输出
  * @param target
  * @param format
  * @param ap
- * @return
+ * @return 总计生成了多少长度的文本信息
  */
 int redisvFormatCommand(char **target, const char *format, va_list ap) {
     const char *c = format;
@@ -380,19 +380,25 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
     while(*c != '\0') {
         // 第一个字符不是 % 或者 第二个字符为终止符   如果格式化数据以占位符作为开头 比如%s 那么进入第二个分支
         if (*c != '%' || c[1] == '\0') {
+            // 这时候已经解析完 %s 下面会遇到一个空格
             if (*c == ' ') {
+                // 空格代表已经解析完一个参数
                 if (touched) {
                     newargv = hi_realloc(curargv,sizeof(char*)*(argc+1));
                     if (newargv == NULL) goto memory_err;
                     curargv = newargv;
+                    // 将第一个参数填充到数组中
                     curargv[argc++] = curarg;
                     totlen += bulklen(hi_sdslen(curarg));
 
-                    /* curarg is put in argv so it can be overwritten. */
+                    /* curarg is put in argv so it can be overwritten.
+                     * 重置当前参数 并准备解析下一个参数
+                     * */
                     curarg = hi_sdsempty();
                     if (curarg == NULL) goto memory_err;
                     touched = 0;
                 }
+                // 这里解析到普通字符串 就是不断拼接后 原封不动的写入
             } else {
                 newarg = hi_sdscatlen(curarg,c,1);
                 if (newarg == NULL) goto memory_err;
@@ -534,7 +540,9 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
         c++;
     }
 
-    /* Add the last argument if needed */
+    /* Add the last argument if needed
+     * 如果还有参数没有设置到数组中 进行设置
+     * */
     if (touched) {
         newargv = hi_realloc(curargv,sizeof(char*)*(argc+1));
         if (newargv == NULL) goto memory_err;
@@ -548,7 +556,9 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
     /* Clear curarg because it was put in curargv or was free'd. */
     curarg = NULL;
 
-    /* Add bytes needed to hold multi bulk count */
+    /* Add bytes needed to hold multi bulk count
+     * 计算总长度时 还需要加上一个特殊值
+     * */
     totlen += 1+countDigits(argc)+2;
 
     /* Build the command at protocol level */
@@ -557,14 +567,17 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
 
     pos = sprintf(cmd,"*%d\r\n",argc);
     for (j = 0; j < argc; j++) {
+        // 将每个参数填充到格式化字符串中
         pos += sprintf(cmd+pos,"$%zu\r\n",hi_sdslen(curargv[j]));
         memcpy(cmd+pos,curargv[j],hi_sdslen(curargv[j]));
         pos += hi_sdslen(curargv[j]);
         hi_sdsfree(curargv[j]);
+        // 每写入一行就插入一个换行符
         cmd[pos++] = '\r';
         cmd[pos++] = '\n';
     }
     assert(pos == totlen);
+    // 在最后插入终止符
     cmd[pos] = '\0';
 
     hi_free(curargv);
@@ -1164,6 +1177,7 @@ int redisGetReply(redisContext *c, void **reply) {
  * Write a formatted command to the output buffer. When this family
  * is used, you need to call redisGetReply yourself to retrieve
  * the reply (or replies in pub/sub).
+ * 将数据写入到buf中
  */
 int __redisAppendCommand(redisContext *c, const char *cmd, size_t len) {
     hisds newbuf;

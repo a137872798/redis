@@ -285,7 +285,9 @@ int redisAsyncSetDisconnectCallback(redisAsyncContext *ac, redisDisconnectCallba
     return REDIS_ERR;
 }
 
-/* Helper functions to push/shift callbacks */
+/* Helper functions to push/shift callbacks
+ * 将某个回调对象追加到回调列表
+ * */
 static int __redisPushCallback(redisCallbackList *list, redisCallback *source) {
     redisCallback *cb;
 
@@ -299,7 +301,9 @@ static int __redisPushCallback(redisCallbackList *list, redisCallback *source) {
         cb->next = NULL;
     }
 
-    /* Store callback in list */
+    /* Store callback in list
+     * 链表操作
+     * */
     if (list->head == NULL)
         list->head = cb;
     if (list->tail != NULL)
@@ -853,24 +857,35 @@ void redisAsyncHandleTimeout(redisAsyncContext *ac) {
 }
 
 /* Sets a pointer to the first argument and its length starting at p. Returns
- * the number of bytes to skip to get to the following argument. */
+ * the number of bytes to skip to get to the following argument.
+ * 这里的解析逻辑对应redisvFormatCommand的写入逻辑
+ * 返回的字符串是下一个参数的起始位置
+ * */
 static const char *nextArgument(const char *start, const char **str, size_t *len) {
     const char *p = start;
+
+    // 在字符串中匹配 $ 应该是某个参数的开头
     if (p[0] != '$') {
         p = strchr(p,'$');
         if (p == NULL) return NULL;
     }
 
+    // $ 之后是一个长度信息
     *len = (int)strtol(p+1,NULL,10);
     p = strchr(p,'\r');
     assert(p);
+    // 对应参数的起始位置
     *str = p+2;
     return p+2+(*len)+2;
 }
 
 /* Helper function for the redisAsyncCommand* family of functions. Writes a
  * formatted command to the output buffer and registers the provided callback
- * function with the context. */
+ * function with the context.
+ * 异步执行某个command
+ * @param cmd 本次执行命令的参数流
+ * @param len cmd的长度
+ * */
 static int __redisAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void *privdata, const char *cmd, size_t len) {
     redisContext *c = &(ac->c);
     redisCallback cb;
@@ -884,22 +899,31 @@ static int __redisAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void 
     hisds sname;
     int ret;
 
-    /* Don't accept new commands when the connection is about to be closed. */
+    /* Don't accept new commands when the connection is about to be closed.
+     * 此时该连接已经断开 或者已经释放 无法执行任务
+     * */
     if (c->flags & (REDIS_DISCONNECTING | REDIS_FREEING)) return REDIS_ERR;
 
-    /* Setup callback */
+    /* Setup callback
+     * 这里生成一个回调对象专门用来处理接收到的reply对象
+     * */
     cb.fn = fn;
     cb.privdata = privdata;
     cb.pending_subs = 1;
 
-    /* Find out which command will be appended. */
+    /* Find out which command will be appended.
+     * 解析首个参数的起始位置 长度 返回的是下一个参数的起始位置
+     * */
     p = nextArgument(cmd,&cstr,&clen);
     assert(p != NULL);
+    // 判断是否存在下一个参数
     hasnext = (p[0] == '$');
+    // 该参数是否以 p 开头 如果以p开头 那么有效的参数长度要变小
     pvariant = (tolower(cstr[0]) == 'p') ? 1 : 0;
     cstr += pvariant;
     clen -= pvariant;
 
+    // 此时有下一个参数 并且本次执行的是一个subscribe命令
     if (hasnext && strncasecmp(cstr,"subscribe\r\n",11) == 0) {
         c->flags |= REDIS_SUBSCRIBED;
 
@@ -937,18 +961,23 @@ static int __redisAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void 
          /* Set monitor flag and push callback */
          c->flags |= REDIS_MONITORING;
          __redisPushCallback(&ac->replies,&cb);
+         // 此时执行的是一个其他的命令 比如auth  这些命令没有拆分数据 直接一股脑写入到buf中
     } else {
         if (c->flags & REDIS_SUBSCRIBED)
             /* This will likely result in an error reply, but it needs to be
              * received and passed to the callback. */
             __redisPushCallback(&ac->sub.invalid,&cb);
         else
+            // 处理正常命令时 就将回调对象加入到列表中 等待对端的reply
             __redisPushCallback(&ac->replies,&cb);
     }
 
+    // 将数据写入到buf中
     __redisAppendCommand(c,cmd,len);
 
-    /* Always schedule a write when the write buffer is non-empty */
+    /* Always schedule a write when the write buffer is non-empty
+     * 在el上注册写事件
+     * */
     _EL_ADD_WRITE(ac);
 
     return REDIS_OK;
@@ -970,12 +999,15 @@ int redisvAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void *privdat
     char *cmd;
     int len;
     int status;
+
+    // 将参数转换成格式化文本 len代表文本总长度
     len = redisvFormatCommand(&cmd,format,ap);
 
     /* We don't want to pass -1 or -2 to future functions as a length. */
     if (len < 0)
         return REDIS_ERR;
 
+    // 这里开始执行command
     status = __redisAsyncCommand(ac,fn,privdata,cmd,len);
     hi_free(cmd);
     return status;
