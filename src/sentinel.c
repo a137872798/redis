@@ -147,6 +147,7 @@ typedef struct sentinelAddr {
 typedef struct instanceLink {
     int refcount;          /* Number of sentinelRedisInstance owners. */
     int disconnected;      /* Non-zero if we need to reconnect cc or pc. */
+    // 此时待执行的所有command  因为command是支持异步执行的   应该是在连接还没建立的时候 就可以先指定稍后要执行的command
     int pending_commands;  /* Number of commands sent waiting for a reply. */
     redisAsyncContext *cc; /* Hiredis context for commands. */
     redisAsyncContext *pc; /* Hiredis context for Pub / Sub. */
@@ -290,6 +291,13 @@ typedef struct redisAeEvents {
     int reading, writing;
 } redisAeEvents;
 
+/**
+ * 当el发现读事件准备完毕后 触发相关函数  为什么要单独用一个async.c呢 原本使用选择器模型应该就是异步的啊
+ * @param el
+ * @param fd
+ * @param privdata
+ * @param mask
+ */
 static void redisAeReadEvent(aeEventLoop *el, int fd, void *privdata, int mask) {
     ((void)el); ((void)fd); ((void)mask);
 
@@ -297,6 +305,13 @@ static void redisAeReadEvent(aeEventLoop *el, int fd, void *privdata, int mask) 
     redisAsyncHandleRead(e->context);
 }
 
+/**
+ * 当轮询的事件准备完成时触发
+ * @param el
+ * @param fd
+ * @param privdata
+ * @param mask
+ */
 static void redisAeWriteEvent(aeEventLoop *el, int fd, void *privdata, int mask) {
     ((void)el); ((void)fd); ((void)mask);
 
@@ -304,6 +319,10 @@ static void redisAeWriteEvent(aeEventLoop *el, int fd, void *privdata, int mask)
     redisAsyncHandleWrite(e->context);
 }
 
+/**
+ * 每当执行写入操作时 就会在el上注册读事件
+ * @param privdata
+ */
 static void redisAeAddRead(void *privdata) {
     redisAeEvents *e = (redisAeEvents*)privdata;
     aeEventLoop *loop = e->loop;
@@ -329,12 +348,17 @@ static void redisAeDelRead(void *privdata) {
 static void redisAeAddWrite(void *privdata) {
     redisAeEvents *e = (redisAeEvents*)privdata;
     aeEventLoop *loop = e->loop;
+    // 应该是代表此时event不代表写入事件 这里修改事件后 设置到el上
     if (!e->writing) {
         e->writing = 1;
         aeCreateFileEvent(loop,e->fd,AE_WRITABLE,redisAeWriteEvent,e);
     }
 }
 
+/**
+ * 当context缓冲区内的数据发送完毕后 不再注册write事件
+ * @param privdata
+ */
 static void redisAeDelWrite(void *privdata) {
     redisAeEvents *e = (redisAeEvents*)privdata;
     aeEventLoop *loop = e->loop;
@@ -1747,9 +1771,14 @@ char *sentinelGetInstanceTypeString(sentinelRedisInstance *ri) {
  * case we check the ri->renamed_command table (or if the instance is a slave,
  * we check the one of the master), and map the command that we should send
  * to the set of renamed commads. However, if the command was not renamed,
- * we just return "command" itself. */
+ * we just return "command" itself.
+ * 在执行某个command时  可能传入的是一个别名 这里尝试映射成正确的command
+ * @param ri 代表本次从哪个实例获取参数
+ * @param command 别名
+ * */
 char *sentinelInstanceMapCommand(sentinelRedisInstance *ri, char *command) {
     sds sc = sdsnew(command);
+    // 总是转成master实例
     if (ri->master) ri = ri->master;
     char *retval = dictFetchValue(ri->renamed_commands, sc);
     sdsfree(sc);
@@ -2142,6 +2171,7 @@ void sentinelSendAuthIfNeeded(sentinelRedisInstance *ri, redisAsyncContext *c) {
     char *auth_pass = NULL;
     char *auth_user = NULL;
 
+    // 根据不同的实例角色 获取用户名/密码  实例信息是什么时候填上去的 用户名密码会直接暴露出来么???
     if (ri->flags & SRI_MASTER) {
         auth_pass = ri->auth_pass;
         auth_user = ri->auth_user;
@@ -2153,6 +2183,7 @@ void sentinelSendAuthIfNeeded(sentinelRedisInstance *ri, redisAsyncContext *c) {
         auth_user = NULL;
     }
 
+    // 只需要密码的场景
     if (auth_pass && auth_user == NULL) {
         if (redisAsyncCommand(c, sentinelDiscardReplyCallback, ri, "%s %s",
             sentinelInstanceMapCommand(ri,"AUTH"),
@@ -2164,6 +2195,7 @@ void sentinelSendAuthIfNeeded(sentinelRedisInstance *ri, redisAsyncContext *c) {
             sentinelInstanceMapCommand(ri,"AUTH"),
             auth_user, auth_pass) == C_OK) ri->link->pending_commands++;
     }
+    // 既没有用户名也没有密码的时候 代表不需要进行权限校验
 }
 
 /* Use CLIENT SETNAME to name the connection in the Redis instance as
@@ -2219,7 +2251,7 @@ void sentinelReconnectInstance(sentinelRedisInstance *ri) {
      * 代表还没有开启异步连接
      * */
     if (link->cc == NULL) {
-        // 从代码层面看这应该是同步连接啊  并返回一个asyncContext
+        // 这里发起了一个非阻塞式连接 可能直接成功 也可能还未成功 需要把socket句柄注册到选择器上
         link->cc = redisAsyncConnectBind(ri->addr->ip,ri->addr->port,NET_FIRST_BIND_ADDR);
 
         // 代表本次发起连接失败  如果是初始化安全层失败  发出相关事件
@@ -2234,17 +2266,19 @@ void sentinelReconnectInstance(sentinelRedisInstance *ri) {
                 link->cc->errstr);
             instanceLinkCloseConnection(link,link->cc);
         } else {
-            // 重连成功 重置link的一些属性
+            // 代表在重连阶段没有直接抛出异常
             link->pending_commands = 0;  // 此时没有等待返回的数据
             link->cc_conn_time = mstime();  // 重置连接时间
             link->cc->data = link;
-            // 对asyncContext 做一些属性填充 比如el
+            // 对asyncContext 做一些属性填充 比如el  这里同时会设置ac->ev.data data中包含了上下文等信息
             redisAeAttach(server.el,link->cc);
-            // 设置不同时间点触发的钩子函数
+            // 设置不同时间点触发的钩子函数  当设置onConnect时 会触发addWrite函数
             redisAsyncSetConnectCallback(link->cc,
                     sentinelLinkEstablishedCallback);
+            // 设置断开连接时的回调对象
             redisAsyncSetDisconnectCallback(link->cc,
                     sentinelDisconnectCallback);
+            // 如果连接到对应的实例 需要认证 执行相关命令
             sentinelSendAuthIfNeeded(ri,link->cc);
             sentinelSetClientName(ri,link->cc,"cmd");
 

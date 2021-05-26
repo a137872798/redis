@@ -57,6 +57,13 @@ void redisNetClose(redisContext *c) {
     }
 }
 
+/**
+ * 在hiredis中使用  将socket缓冲区的数据转移到buf中
+ * @param c
+ * @param buf
+ * @param bufcap
+ * @return
+ */
 ssize_t redisNetRead(redisContext *c, char *buf, size_t bufcap) {
     ssize_t nread = recv(c->fd, buf, bufcap, 0);
     if (nread == -1) {
@@ -79,6 +86,11 @@ ssize_t redisNetRead(redisContext *c, char *buf, size_t bufcap) {
     }
 }
 
+/**
+ * 将context中的数据写入到socket缓冲区
+ * @param c
+ * @return
+ */
 ssize_t redisNetWrite(redisContext *c) {
     ssize_t nwritten = send(c->fd, c->obuf, hi_sdslen(c->obuf), 0);
     if (nwritten < 0) {
@@ -271,6 +283,12 @@ static int redisContextWaitReady(redisContext *c, long msec) {
     return REDIS_ERR;
 }
 
+/**
+ * 代表连接事件准备完成
+ * @param c
+ * @param completed
+ * @return
+ */
 int redisCheckConnectDone(redisContext *c, int *completed) {
     int rc = connect(c->fd, (const struct sockaddr *)c->saddr, c->addrlen);
     if (rc == 0) {
@@ -291,6 +309,11 @@ int redisCheckConnectDone(redisContext *c, int *completed) {
     }
 }
 
+/**
+ * 检测socket的异常情况
+ * @param c
+ * @return
+ */
 int redisCheckSocketError(redisContext *c) {
     int err = 0, errno_saved = errno;
     socklen_t errlen = sizeof(err);
@@ -507,6 +530,7 @@ addrretry:
             if (errno == EHOSTUNREACH) {
                 redisNetClose(c);
                 continue;
+                // 代表采用的是异步连接 (非阻塞模式)
             } else if (errno == EINPROGRESS) {
                 if (blocking) {
                     goto wait_for_ready;
@@ -533,6 +557,7 @@ addrretry:
         if (blocking && redisSetBlocking(c,1) != REDIS_OK)
             goto error;
 
+        // 如果采用异步连接会打上 connected标记
         c->flags |= REDIS_CONNECTED;
         rv = REDIS_OK;
         goto end;

@@ -75,7 +75,9 @@ static redisReplyObjectFunctions defaultFunctions = {
     freeReplyObject
 };
 
-/* Create a reply object */
+/* Create a reply object
+ * 在解决粘包拆包后 得到的一份完整的数据会被包装成一个reply对象
+ * */
 static redisReply *createReplyObject(int type) {
     redisReply *r = hi_calloc(1,sizeof(*r));
 
@@ -118,6 +120,13 @@ void freeReplyObject(void *reply) {
     hi_free(r);
 }
 
+/**
+ * 生成string类型的数据
+ * @param task
+ * @param str
+ * @param len
+ * @return
+ */
 static void *createStringObject(const redisReadTask *task, char *str, size_t len) {
     redisReply *r, *parent;
     char *buf;
@@ -131,17 +140,23 @@ static void *createStringObject(const redisReadTask *task, char *str, size_t len
            task->type == REDIS_REPLY_STRING ||
            task->type == REDIS_REPLY_VERB);
 
-    /* Copy string value */
+    /* Copy string value
+     * 如果本次数据类型是 REDIS_REPLY_VERB 会有一个头部 这部分数据是不包含在内的
+     * */
     if (task->type == REDIS_REPLY_VERB) {
         buf = hi_malloc(len-4+1); /* Skip 4 bytes of verbatim type header. */
         if (buf == NULL) goto oom;
 
+        // 头部信息被存放在vtype数组中
         memcpy(r->vtype,str,3);
         r->vtype[3] = '\0';
+        // 剩余数据存放在buf中
         memcpy(buf,str+4,len-4);
         buf[len-4] = '\0';
+        // 这里只记录有效长度
         r->len = len - 4;
     } else {
+        // 如果是string类型 相对简单 直接将数据存储在buf中
         buf = hi_malloc(len+1);
         if (buf == NULL) goto oom;
 
@@ -151,6 +166,7 @@ static void *createStringObject(const redisReadTask *task, char *str, size_t len
     }
     r->str = buf;
 
+    // TODO task->parent是做什么的
     if (task->parent) {
         parent = task->parent->obj;
         assert(parent->type == REDIS_REPLY_ARRAY ||
@@ -166,6 +182,12 @@ oom:
     return NULL;
 }
 
+/**
+ * 解析task内部的数据 转换成等量的ele
+ * @param task
+ * @param elements
+ * @return
+ */
 static void *createArrayObject(const redisReadTask *task, size_t elements) {
     redisReply *r, *parent;
 
@@ -183,6 +205,7 @@ static void *createArrayObject(const redisReadTask *task, size_t elements) {
 
     r->elements = elements;
 
+    // TODO parent是什么时候设置的 ???
     if (task->parent) {
         parent = task->parent->obj;
         assert(parent->type == REDIS_REPLY_ARRAY ||
@@ -194,15 +217,23 @@ static void *createArrayObject(const redisReadTask *task, size_t elements) {
     return r;
 }
 
+/**
+ * 创建一个integer类型的obj
+ * @param task
+ * @param value
+ * @return
+ */
 static void *createIntegerObject(const redisReadTask *task, long long value) {
     redisReply *r, *parent;
 
+    // 声明reply对象的类型
     r = createReplyObject(REDIS_REPLY_INTEGER);
     if (r == NULL)
         return NULL;
 
     r->integer = value;
 
+    // TODO
     if (task->parent) {
         parent = task->parent->obj;
         assert(parent->type == REDIS_REPLY_ARRAY ||
@@ -214,6 +245,14 @@ static void *createIntegerObject(const redisReadTask *task, long long value) {
     return r;
 }
 
+/**
+ * 代表本次创建的是一个double对象
+ * @param task
+ * @param value
+ * @param str
+ * @param len
+ * @return
+ */
 static void *createDoubleObject(const redisReadTask *task, double value, char *str, size_t len) {
     redisReply *r, *parent;
 
@@ -246,6 +285,11 @@ static void *createDoubleObject(const redisReadTask *task, double value, char *s
     return r;
 }
 
+/**
+ * 将task包装成nil类型的obj对象后返回
+ * @param task
+ * @return
+ */
 static void *createNilObject(const redisReadTask *task) {
     redisReply *r, *parent;
 
@@ -302,6 +346,13 @@ static size_t bulklen(size_t len) {
     return 1+countDigits(len)+2+len+2;
 }
 
+/**
+ * 生成格式化数据
+ * @param target
+ * @param format
+ * @param ap
+ * @return
+ */
 int redisvFormatCommand(char **target, const char *format, va_list ap) {
     const char *c = format;
     char *cmd = NULL; /* final command */
@@ -314,7 +365,9 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
     int error_type = 0; /* 0 = no error; -1 = memory error; -2 = format error */
     int j;
 
-    /* Abort if there is not target to set */
+    /* Abort if there is not target to set
+     * target不能为null
+     * */
     if (target == NULL)
         return -1;
 
@@ -323,7 +376,9 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
     if (curarg == NULL)
         return -1;
 
+    // 代表本次格式化文本还没有读取到末尾
     while(*c != '\0') {
+        // 第一个字符不是 % 或者 第二个字符为终止符   如果格式化数据以占位符作为开头 比如%s 那么进入第二个分支
         if (*c != '%' || c[1] == '\0') {
             if (*c == ' ') {
                 if (touched) {
@@ -345,6 +400,7 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
                 touched = 1;
             }
         } else {
+            // 此时fmt以占位符开头
             char *arg;
             size_t size;
 
@@ -352,10 +408,13 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
             newarg = curarg;
 
             switch(c[1]) {
+                // 代表第一个参数应该是一个字符串
             case 's':
+                // 以char解析第一个参数
                 arg = va_arg(ap,char*);
                 size = strlen(arg);
                 if (size > 0)
+                    // 将参数追加到newarg上
                     newarg = hi_sdscatlen(curarg,arg,size);
                 break;
             case 'b':
@@ -468,6 +527,7 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
             if (newarg == NULL) goto memory_err;
             curarg = newarg;
 
+            // 代表此时已经解析了某种格式化数据
             touched = 1;
             c++;
         }
@@ -721,6 +781,10 @@ static redisContext *redisContextInit(void) {
     return c;
 }
 
+/**
+ * 进行内存清理
+ * @param c
+ */
 void redisFree(redisContext *c) {
     if (c == NULL)
         return;
@@ -835,7 +899,7 @@ redisContext *redisConnectWithOptions(const redisOptions *options) {
         return c;
     }
 
-    // 代表创建的是tcp连接   同步连接 还是异步连接???  从代码层面看好像是同步连接
+    // 代表创建的是tcp连接   进行异步连接
     if (options->type == REDIS_CONN_TCP) {
         redisContextConnectBindTcp(c, options->endpoint.tcp.ip,
                                    options->endpoint.tcp.port, options->connect_timeout,
@@ -954,7 +1018,8 @@ redisPushFn *redisSetPushCallback(redisContext *c, redisPushFn *fn) {
  * and read some bytes from the socket and feed them to the reply parser.
  *
  * After this function is called, you may use redisGetReplyFromReader to
- * see if there is a reply available. */
+ * see if there is a reply available.
+ * */
 int redisBufferRead(redisContext *c) {
     char buf[1024*16];
     int nread;
@@ -964,6 +1029,7 @@ int redisBufferRead(redisContext *c) {
         return REDIS_ERR;
 
     nread = c->funcs->read(c, buf, sizeof(buf));
+    // reader对象也只是进行简单的数据拷贝 没有做粘包拆包处理
     if (nread > 0) {
         if (redisReaderFeed(c->reader, buf, nread) != REDIS_OK) {
             __redisSetError(c, c->reader->err, c->reader->errstr);
@@ -987,11 +1053,15 @@ int redisBufferRead(redisContext *c) {
  */
 int redisBufferWrite(redisContext *c, int *done) {
 
-    /* Return early when the context has seen an error. */
+    /* Return early when the context has seen an error.
+     * 此时已经存在异常信息了 无法将数据写入到缓冲区
+     * */
     if (c->err)
         return REDIS_ERR;
 
+    // 首先要求数据已经在缓冲区中了
     if (hi_sdslen(c->obuf) > 0) {
+        // 实际上就是将obuf中的数据写入到socket缓冲区
         ssize_t nwritten = c->funcs->write(c);
         if (nwritten < 0) {
             return REDIS_ERR;
@@ -1015,8 +1085,10 @@ oom:
 }
 
 /* Internal helper function to try and get a reply from the reader,
- * or set an error in the context otherwise. */
+ * or set an error in the context otherwise.
+ * */
 int redisGetReplyFromReader(redisContext *c, void **reply) {
+    // 解析reader内部的数据 生成reply对象
     if (redisReaderGetReply(c->reader,reply) == REDIS_ERR) {
         __redisSetError(c,c->reader->err,c->reader->errstr);
         return REDIS_ERR;
@@ -1036,15 +1108,25 @@ static int redisHandledPushReply(redisContext *c, void *reply) {
     return 0;
 }
 
+/**
+ * 解析reader数据
+ * @param c
+ * @param reply
+ * @return
+ */
 int redisGetReply(redisContext *c, void **reply) {
     int wdone = 0;
     void *aux = NULL;
 
-    /* Try to read pending replies */
+    /* Try to read pending replies
+     * 根据reader内部的task 解析reader->buf的数据 aux指向root对象(redisReply)
+     * */
     if (redisGetReplyFromReader(c,&aux) == REDIS_ERR)
         return REDIS_ERR;
 
-    /* For the blocking context, flush output buffer and read reply */
+    /* For the blocking context, flush output buffer and read reply
+     * TODO 先忽略阻塞式
+     * */
     if (aux == NULL && c->flags & REDIS_BLOCK) {
         /* Write until done */
         do {

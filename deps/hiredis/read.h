@@ -73,6 +73,9 @@
 extern "C" {
 #endif
 
+/**
+ * 每个task内部有一组子元素 多个task在逻辑上形成一个大的task 而这个idx就是在所有task上的偏移量
+ */
 typedef struct redisReadTask {
     int type;
     long long elements; /* number of elements in multibulk container */
@@ -92,6 +95,9 @@ typedef struct redisReplyObjectFunctions {
     void (*freeObject)(void*);
 } redisReplyObjectFunctions;
 
+/**
+ * 这个对象是在redisContext中 用于解析读取到的数据的
+ */
 typedef struct redisReader {
     int err; /* Error flags, 0 when there is no error */
     char errstr[128]; /* String representation of error when applicable */
@@ -102,9 +108,11 @@ typedef struct redisReader {
     size_t maxbuf; /* Max length of unused buffer */
     long long maxelements; /* Max multi-bulk elements */
 
+    // 一个task数组
     redisReadTask **task;
     int tasks;
 
+    // 当前读取到了第几个任务
     int ridx; /* Index of current read task */
     void *reply; /* Temporary reply pointer */
 

@@ -190,6 +190,12 @@ int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
     return AE_OK;
 }
 
+/**
+ * 将某个句柄的某种事件从el上注销
+ * @param eventLoop
+ * @param fd
+ * @param mask
+ */
 void aeDeleteFileEvent(aeEventLoop *eventLoop, int fd, int mask)
 {
     if (fd >= eventLoop->setsize) return;
