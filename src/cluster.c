@@ -3161,7 +3161,9 @@ void clusterBroadcastPong(int target) {
 
 /* Send a PUBLISH message.
  *
- * If link is NULL, then the message is broadcasted to the whole cluster. */
+ * If link is NULL, then the message is broadcasted to the whole cluster.
+ * @param link 当link为null时 代表本次消息需要广播到集群的所有节点
+ * */
 void clusterSendPublish(clusterLink *link, robj *channel, robj *message) {
     unsigned char *payload;
     clusterMsg buf[1];
@@ -3301,6 +3303,7 @@ int clusterSendModuleMessageToTarget(const char *target, uint64_t module_id, uin
  * cluster. In the future we'll try to get smarter and avoiding propagating those
  * messages to hosts without receives for a given channel.
  * -------------------------------------------------------------------------- */
+// 本节点作为集群中的一个节点 收到一条需要推送到channel的消息时 会传播其他节点
 void clusterPropagatePublish(robj *channel, robj *message) {
     clusterSendPublish(NULL, channel, message);
 }
