@@ -819,7 +819,7 @@ int loadAppendOnlyFile(char *filename) {
     server.aof_state = AOF_OFF;
 
     fakeClient = createAOFClient();
-    // 发出一个开始加载aof数据的事件
+    // 发出一个开始加载aof数据的事件  现在redis还没有使用事件功能
     startLoadingFile(fp, filename, RDBFLAGS_AOF_PREAMBLE);
 
     /* Check if this AOF file has an RDB preamble. In that case we need to
@@ -836,6 +836,7 @@ int loadAppendOnlyFile(char *filename) {
 
         serverLog(LL_NOTICE,"Reading RDB preamble from AOF file...");
         if (fseek(fp,0,SEEK_SET) == -1) goto readerr;
+        // 将rdb文件包装成rio流
         rioInitWithFile(&rdb,fp);
         // 通过rdb进行数据重做
         if (rdbLoadRio(&rdb,RDBFLAGS_AOF_PREAMBLE,NULL) != C_OK) {
@@ -861,7 +862,9 @@ int loadAppendOnlyFile(char *filename) {
         if (!(loops++ % 1000)) {
             // 刷新此时的加载进度
             loadingProgress(ftello(fp));
+            // 每当在恢复数据上消耗了一定的时间后 就要执行一部分之前囤积的事件
             processEventsWhileBlocked();
+            // 每当恢复一部分数据后 就会更新此时的处理进度 并发出事件触发监听器
             processModuleLoadingProgressEvent(1);
         }
 
@@ -873,7 +876,7 @@ int loadAppendOnlyFile(char *filename) {
         }
         if (buf[0] != '*') goto fmterr;
         if (buf[1] == '\0') goto readerr;
-        // 读取参数长度信息
+        // 新的command 第一行代表后面的参数行数
         argc = atoi(buf+1);
         if (argc < 1) goto fmterr;
 
@@ -883,9 +886,11 @@ int loadAppendOnlyFile(char *filename) {
         fakeClient->argc = argc;
         fakeClient->argv = argv;
 
+        // 根据获取到的数量读取对应的行数 每行都只作为一个参数
         for (j = 0; j < argc; j++) {
             /* Parse the argument len. */
             char *readres = fgets(buf,sizeof(buf),fp);
+            // 参数必须以$开头 这是它的解析规则
             if (readres == NULL || buf[0] != '$') {
                 fakeClient->argc = j; /* Free up to j-1. */
                 freeFakeClientArgv(fakeClient);
@@ -896,18 +901,21 @@ int loadAppendOnlyFile(char *filename) {
             }
             len = strtol(buf+1,NULL,10);
 
-            /* Read it into a string object. */
+            /* Read it into a string object.
+             * 根据要求创建等长的sds
+             * */
             argsds = sdsnewlen(SDS_NOINIT,len);
-            // 根据参数数量 挨个读取
+            // 按照要求读取参数
             if (len && fread(argsds,len,1,fp) == 0) {
                 sdsfree(argsds);
                 fakeClient->argc = j; /* Free up to j-1. */
                 freeFakeClientArgv(fakeClient);
                 goto readerr;
             }
+            // 将sds转换成 redisObject
             argv[j] = createObject(OBJ_STRING,argsds);
 
-            /* Discard CRLF. */
+            /* Discard CRLF. 跳过换行符 */
             if (fread(buf,2,1,fp) == 0) {
                 fakeClient->argc = j+1; /* Free up to j. */
                 freeFakeClientArgv(fakeClient);
@@ -926,17 +934,21 @@ int loadAppendOnlyFile(char *filename) {
             exit(1);
         }
 
+        // 记录执行multi前文件的偏移量 如果文件不完整 就不会执行这个multiCommand
         if (cmd == server.multiCommand) valid_before_multi = valid_up_to;
 
-        /* Run the command in the context of a fake client */
+        /* Run the command in the context of a fake client
+         * 记录此时正在执行的command
+         * */
         fakeClient->cmd = fakeClient->lastcmd = cmd;
+        // 当执行multiCommand后 flags会追加CLIENT_MULTI标记 之后的command 都会存放到queue中  当遇到execCommand时 就会批量执行之前所有的任务
         if (fakeClient->flags & CLIENT_MULTI &&
             fakeClient->cmd->proc != execCommand)
         {
             // execCommand是用于执行之前所有囤积的批任务  这里表明command是一个批任务 加入到队列中
             queueMultiCommand(fakeClient);
         } else {
-            // 这里已经在执行任务了
+            // 这里会根据command的参数执行任务
             cmd->proc(fakeClient);
         }
 
@@ -948,10 +960,14 @@ int loadAppendOnlyFile(char *filename) {
         serverAssert((fakeClient->flags & CLIENT_BLOCKED) == 0);
 
         /* Clean up. Command code may have changed argv/argc so we use the
-         * argv/argc of the client instead of the local variables. */
+         * argv/argc of the client instead of the local variables.
+         * 每当执行完一个command后 就需要清理之前的参数
+         * */
         freeFakeClientArgv(fakeClient);
         fakeClient->cmd = NULL;
+        // aof_load_truncated 默认为true   这里类似于记录文件的偏移量
         if (server.aof_load_truncated) valid_up_to = ftello(fp);
+        // 默认为false
         if (server.key_load_delay)
             usleep(server.key_load_delay);
     }
@@ -959,18 +975,24 @@ int loadAppendOnlyFile(char *filename) {
     /* This point can only be reached when EOF is reached without errors.
      * If the client is in the middle of a MULTI/EXEC, handle it as it was
      * a short read, even if technically the protocol is correct: we want
-     * to remove the unprocessed tail and continue. */
+     * to remove the unprocessed tail and continue.
+     * 代表aof中最后某个multi命令没有对应的exec
+     * */
     if (fakeClient->flags & CLIENT_MULTI) {
         serverLog(LL_WARNING,
             "Revert incomplete MULTI/EXEC transaction in AOF file");
+        // 回到最后一个multiCommand执行前的偏移量
         valid_up_to = valid_before_multi;
         goto uxeof;
     }
 
+    // 数据正常恢复
 loaded_ok: /* DB loaded, cleanup and return C_OK to the caller. */
     // aof数据正常加载
     fclose(fp);
+    // 释放fakeClient
     freeFakeClient(fakeClient);
+    // 恢复aof
     server.aof_state = old_aof_state;
     stopLoading(1);
     aofUpdateCurrentSize();
@@ -986,11 +1008,13 @@ readerr: /* Read error. If feof(fp) is true, fall through to unexpected EOF. */
         exit(1);
     }
 
+    // 代表aof记录的数据有缺失
 uxeof: /* Unexpected AOF end of file. */
     if (server.aof_load_truncated) {
         serverLog(LL_WARNING,"!!! Warning: short read while loading the AOF file !!!");
         serverLog(LL_WARNING,"!!! Truncating the AOF at offset %llu !!!",
             (unsigned long long) valid_up_to);
+        // 裁剪文件
         if (valid_up_to == -1 || truncate(filename,valid_up_to) == -1) {
             if (valid_up_to == -1) {
                 serverLog(LL_WARNING,"Last valid command offset is invalid");

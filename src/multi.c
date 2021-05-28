@@ -87,13 +87,15 @@ void queueMultiCommand(client *c) {
 }
 
 /**
- * 放弃本次执行的事务
+ * 丢弃囤积的批任务
  * @param c
  */
 void discardTransaction(client *c) {
     freeClientMultiState(c);
     initClientMultiState(c);
+    // 清理multi相关的所有标记
     c->flags &= ~(CLIENT_MULTI|CLIENT_DIRTY_CAS|CLIENT_DIRTY_EXEC);
+    // 取消对这些key的监控
     unwatchAllKeys(c);
 }
 
@@ -106,6 +108,10 @@ void flagTransaction(client *c) {
         c->flags |= CLIENT_DIRTY_EXEC;
 }
 
+/**
+ * 代表需要开启事务
+ * @param c
+ */
 void multiCommand(client *c) {
     if (c->flags & CLIENT_MULTI) {
         addReplyError(c,"MULTI calls can not be nested");
@@ -125,7 +131,9 @@ void discardCommand(client *c) {
 }
 
 /* Send a MULTI command to all the slaves and AOF file. Check the execCommand
- * implementation for more information. */
+ * implementation for more information.
+ * 代表需要传播一个multi命令
+ * */
 void execCommandPropagateMulti(client *c) {
     propagate(server.multiCommand,c->db->id,&shared.multi,1,
               PROPAGATE_AOF|PROPAGATE_REPL);
@@ -159,6 +167,10 @@ void execCommandAbort(client *c, sds error) {
         replicationFeedMonitors(c,server.monitors,c->db->id,c->argv,c->argc);
 }
 
+/**
+ * 批量执行之前囤积的所有任务
+ * @param c
+ */
 void execCommand(client *c) {
     int j;
     robj **orig_argv;
@@ -167,6 +179,7 @@ void execCommand(client *c) {
     int must_propagate = 0; /* Need to propagate MULTI/EXEC to AOF / slaves? */
     int was_master = server.masterhost == NULL;
 
+    // 必须先执行multiCommand之后才能执行execCommand
     if (!(c->flags & CLIENT_MULTI)) {
         addReplyError(c,"EXEC without MULTI");
         return;
@@ -177,7 +190,9 @@ void execCommand(client *c) {
      * 2) There was a previous error while queueing commands.
      * A failed EXEC in the first case returns a multi bulk nil object
      * (technically it is not an error but a special behavior), while
-     * in the second an EXECABORT error is returned. */
+     * in the second an EXECABORT error is returned.
+     * 本次事务命令数据已经发生了变化 无法按照预期的情况运行了 丢弃本次所有命令
+     * */
     if (c->flags & (CLIENT_DIRTY_CAS|CLIENT_DIRTY_EXEC)) {
         addReply(c, c->flags & CLIENT_DIRTY_EXEC ? shared.execaborterr :
                                                    shared.nullarray[c->resp]);
@@ -185,12 +200,17 @@ void execCommand(client *c) {
         goto handle_monitor;
     }
 
-    /* Exec all the queued commands */
+    /* Exec all the queued commands
+     * 这个时候可以取消对所有key的监控了 */
     unwatchAllKeys(c); /* Unwatch ASAP otherwise we'll waste CPU cycles */
+
+    // 记录此时所有参数信息
     orig_argv = c->argv;
     orig_argc = c->argc;
     orig_cmd = c->cmd;
     addReplyArrayLen(c,c->mstate.count);
+
+    // 当执行队列中的每个任务时  恢复参数信息
     for (j = 0; j < c->mstate.count; j++) {
         c->argc = c->mstate.commands[j].argc;
         c->argv = c->mstate.commands[j].argv;
@@ -200,16 +220,21 @@ void execCommand(client *c) {
          * is not readonly nor an administrative one.
          * This way we'll deliver the MULTI/..../EXEC block as a whole and
          * both the AOF and the replication link will have the same consistency
-         * and atomicity guarantees. */
+         * and atomicity guarantees.
+         * 在非数据恢复阶段 并且本次操作不是只读操作或者系统级别操作(admin)  一般的命令在执行时如果发现是非只读命令 会自动的触发传播逻辑 而当这个command在multi中 为了不丢失事务的语义 要在command外包装一个multiCommand
+         * TODO 有关传播的逻辑需要梳理
+         * */
         if (!must_propagate &&
             !server.loading &&
             !(c->cmd->flags & (CMD_READONLY|CMD_ADMIN)))
         {
             execCommandPropagateMulti(c);
+            // 在一个事务中该标识只需要设置一次
             must_propagate = 1;
         }
 
         int acl_keypos;
+        // 在执行命令前 需要校验是否有足够的权限  还可以在参数级设置权限校验
         int acl_retval = ACLCheckCommandPerm(c,&acl_keypos);
         if (acl_retval != ACL_OK) {
             addACLLogEntry(c,acl_retval,acl_keypos,NULL);
@@ -222,21 +247,29 @@ void execCommand(client *c) {
                 "no permission to execute the command or subcommand" :
                 "no permission to touch the specified keys");
         } else {
+            // 执行command 非readonly/admin命令会触发传播逻辑
+            // TODO 有关执行command 以及传播的整套逻辑在之后整理
             call(c,server.loading ? CMD_CALL_NONE : CMD_CALL_FULL);
         }
 
-        /* Commands may alter argc/argv, restore mstate. */
+        /* Commands may alter argc/argv, restore mstate.
+         * 在执行过程中参数可能会被篡改 这里要进行恢复
+         * */
         c->mstate.commands[j].argc = c->argc;
         c->mstate.commands[j].argv = c->argv;
         c->mstate.commands[j].cmd = c->cmd;
     }
+    // 恢复执行exec命令前的参数
     c->argv = orig_argv;
     c->argc = orig_argc;
     c->cmd = orig_cmd;
+    // 清理mstate 以及取消对key的监控
     discardTransaction(c);
 
     /* Make sure the EXEC command will be propagated as well if MULTI
-     * was already propagated. */
+     * was already propagated.
+     * 如果本次事务任务传播到了其他地方  那么应该还要传播一个exec命令来执行他们
+     * */
     if (must_propagate) {
         int is_master = server.masterhost == NULL;
         server.dirty++;
@@ -244,9 +277,13 @@ void execCommand(client *c) {
          * switched from master to slave (using the SLAVEOF command), the
          * initial MULTI was propagated into the replication backlog, but the
          * rest was not. We need to make sure to at least terminate the
-         * backlog with the final EXEC. */
+         * backlog with the final EXEC.
+         * TODO 在执行command的过程中会发生角色的变换么
+         * */
         if (server.repl_backlog && was_master && !is_master) {
+            // 这个参数格式就是command的格式 第一个代表本command需要的参数总数 第二个4 代表第一个参数的长度 exec就是参数信息 与aof数据恢复时采用的解析逻辑一致
             char *execcmd = "*1\r\n$4\r\nEXEC\r\n";
+            // 将exec命令存储到repl_backlog中
             feedReplicationBacklog(execcmd,strlen(execcmd));
         }
     }
@@ -256,7 +293,9 @@ handle_monitor:
      * since the natural order of commands execution is actually:
      * MUTLI, EXEC, ... commands inside transaction ...
      * Instead EXEC is flagged as CMD_SKIP_MONITOR in the command
-     * table, and we do it here with correct ordering. */
+     * table, and we do it here with correct ordering.
+     * TODO 每当执行exec命令时 需要发往monitor模块
+     * */
     if (listLength(server.monitors) && !server.loading)
         replicationFeedMonitors(c,server.monitors,c->db->id,c->argv,c->argc);
 }
@@ -309,7 +348,10 @@ void watchForKey(client *c, robj *key) {
 }
 
 /* Unwatch all the keys watched by this client. To clean the EXEC dirty
- * flag is up to the caller. */
+ * flag is up to the caller.
+ * 在执行事务命令时 会检测这些key在中途是否被其他client修改过 如果修改了 那么这次要执行的数据可能与开始执行前预期的不一致 所以要丢弃本次事务的所有命令
+ * 这里是解除映射关系
+ * */
 void unwatchAllKeys(client *c) {
     listIter li;
     listNode *ln;
@@ -318,11 +360,15 @@ void unwatchAllKeys(client *c) {
     listRewind(c->watched_keys,&li);
     while((ln = listNext(&li))) {
         list *clients;
+
+        // 该结构体封装了被监控的key的信息
         watchedKey *wk;
 
         /* Lookup the watched key -> clients list and remove the client
          * from the list */
         wk = listNodeValue(ln);
+
+        // 每个db会记录此时有多少client监控了哪些key  这里是清除他们的关联关系
         clients = dictFetchValue(wk->db->watched_keys, wk->key);
         serverAssertWithInfo(c,NULL,clients != NULL);
         listDelNode(clients,listSearchKey(clients,c));

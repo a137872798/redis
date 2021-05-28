@@ -485,6 +485,7 @@ void publishCommand(client *c) {
     if (server.cluster_enabled)
         clusterPropagatePublish(c->argv[1],c->argv[2]);
     else
+        // 否则打上一个传播到副本的标记
         forceCommandPropagation(c,PROPAGATE_REPL);
     addReplyLongLong(c,receivers);
 }
@@ -517,6 +518,7 @@ NULL
             robj *cobj = dictGetKey(de);
             sds channel = cobj->ptr;
 
+            // 遍历所有channel 检测是否匹配正则
             if (!pat || stringmatchlen(pat, sdslen(pat),
                                        channel, sdslen(channel),0))
             {
@@ -526,21 +528,26 @@ NULL
         }
         dictReleaseIterator(di);
         setDeferredArrayLen(c,replylen,mblen);
+        // 将订阅了指定channel的订阅者数量返回
     } else if (!strcasecmp(c->argv[1]->ptr,"numsub") && c->argc >= 2) {
         /* PUBSUB NUMSUB [Channel_1 ... Channel_N] */
         int j;
 
+        // 找到所有指定的channel
         addReplyArrayLen(c,(c->argc-2)*2);
         for (j = 2; j < c->argc; j++) {
             list *l = dictFetchValue(server.pubsub_channels,c->argv[j]);
 
             addReplyBulk(c,c->argv[j]);
+            // 将订阅者数量返回
             addReplyLongLong(c,l ? listLength(l) : 0);
         }
+        // 返回所有正则数量
     } else if (!strcasecmp(c->argv[1]->ptr,"numpat") && c->argc == 2) {
         /* PUBSUB NUMPAT */
         addReplyLongLong(c,listLength(server.pubsub_patterns));
     } else {
+        // 其余语法不支持
         addReplySubcommandSyntaxError(c);
     }
 }

@@ -2611,13 +2611,20 @@ void createSharedObjects(void) {
     shared.maxstring = sdsnew("maxstring");
 }
 
+/**
+ * 加载服务器默认配置
+ */
 void initServerConfig(void) {
     int j;
 
+    // 更新redis服务器缓存时间 主要是为了避免频繁调用系统函数
     updateCachedTime(1);
+    // 使用一个随机数作为runid
     getRandomHexChars(server.runid,CONFIG_RUN_ID_SIZE);
     server.runid[CONFIG_RUN_ID_SIZE] = '\0';
+    // 使用一个随机数作为replicaid
     changeReplicationId();
+    // 清理replicaid2 同时会清理它记录的偏移量
     clearReplicationId2();
     server.hz = CONFIG_DEFAULT_HZ; /* Initialize it ASAP, even if it may get
                                       updated later after loading the config.
@@ -2634,9 +2641,12 @@ void initServerConfig(void) {
     server.sofd = -1;
     server.active_expire_enabled = 1;
     server.client_max_querybuf_len = PROTO_MAX_QUERYBUF_LEN;
+    // 初始阶段不会设置触发rdb的相关参数
     server.saveparams = NULL;
+    // 初始阶段认为还未开始加载数据
     server.loading = 0;
     server.logfile = zstrdup(CONFIG_DEFAULT_LOGFILE);
+    // 默认情况下 认为aof处于关闭状态
     server.aof_state = AOF_OFF;
     server.aof_rewrite_base_size = 0;
     server.aof_rewrite_scheduled = 0;
@@ -2647,11 +2657,13 @@ void initServerConfig(void) {
     server.aof_lastbgrewrite_status = C_OK;
     server.aof_delayed_fsync = 0;
     server.aof_fd = -1;
+    // 此时服务器还没有选择某个db
     server.aof_selected_db = -1; /* Make sure the first time will not match */
     server.aof_flush_postponed_start = 0;
     server.pidfile = NULL;
     server.active_defrag_running = 0;
     server.notify_keyspace_events = 0;
+    // 此时还没有阻塞的client
     server.blocked_clients = 0;
     memset(server.blocked_clients_by_type,0,
            sizeof(server.blocked_clients_by_type));
@@ -2663,9 +2675,9 @@ void initServerConfig(void) {
     server.loading_process_events_interval_bytes = (1024*1024*2);
 
     server.lruclock = getLRUClock();
-    resetServerSaveParams();
 
-    // 当满足这些条件时会触发rdb的存储逻辑
+    // 初始化saveparam   当满足这些条件时会触发rdb的存储逻辑
+    resetServerSaveParams();
     appendServerSaveParams(60*60,1);  /* save after 1 hour and 1 change */
     appendServerSaveParams(300,100);  /* save after 5 minutes and 100 changes */
     appendServerSaveParams(60,10000); /* save after 1 minute and 10000 changes */
@@ -2708,9 +2720,12 @@ void initServerConfig(void) {
 
     /* Command table -- we initialize it here as it is part of the
      * initial configuration, since command names may be changed via
-     * redis.conf using the rename-command directive. */
+     * redis.conf using the rename-command directive.
+     * 存储server支持的所有command的字典   因为某些command可能会被改名 所以需要2个容器
+     * */
     server.commands = dictCreate(&commandTableDictType,NULL);
     server.orig_commands = dictCreate(&commandTableDictType,NULL);
+    // 填充内置的command
     populateCommandTable();
     server.delCommand = lookupCommandByCString("del");
     server.multiCommand = lookupCommandByCString("multi");
@@ -2740,6 +2755,7 @@ void initServerConfig(void) {
      * Redis 5. However it is possible to revert it via redis.conf. */
     server.lua_always_replicate_commands = 1;
 
+    // 设置各种默认值
     initConfigValues();
 }
 
@@ -3139,9 +3155,11 @@ void initServer(void) {
     }
 
     /* Initialization after setting defaults from the config system.
+     * 默认情况下aof是关闭的么
      */
     server.aof_state = server.aof_enabled ? AOF_ON : AOF_OFF;
     server.hz = server.config_hz;
+    // 设置进程id
     server.pid = getpid();
     server.in_fork_child = CHILD_TYPE_NONE;
     server.main_thread_id = pthread_self();
@@ -3170,7 +3188,9 @@ void initServer(void) {
         exit(1);
     }
 
+    // 初始化常量池
     createSharedObjects();
+    // 增大句柄上限
     adjustOpenFilesLimit();
 
     // 根据句柄数量创建事件循环组
@@ -3228,8 +3248,9 @@ void initServer(void) {
         server.db[j].defrag_later = listCreate();
         listSetFreeMethod(server.db[j].defrag_later,(void (*)(void*))sdsfree);
     }
-    // 这里只是做初始化工作
+    // 初始化EvictionPoolLRU 该对象是在内存淘汰时使用 为抽样的redisObject排序 以决定要删除哪个对象
     evictionPoolAlloc(); /* Initialize the LRU keys pool. */
+    // 这里是有关消息订阅/推送的 每个redis节点可以向其他节点的channel发送消息 或者监听channel收到的消息
     server.pubsub_channels = dictCreate(&keylistDictType,NULL);
     server.pubsub_patterns = listCreate();
     server.pubsub_patterns_dict = dictCreate(&keylistDictType,NULL);
@@ -3313,8 +3334,7 @@ void initServer(void) {
 
     /* Register a readable event for the pipe used to awake the event loop
      * when a blocked client in a module needs attention.
-     * 某个client原本因为module而被阻塞
-     * 目前 moduleBlockedClientPipeReadable 内没有任何逻辑
+     * 当收到数据时会唤醒module_blocked_pipe
      * */
     if (aeCreateFileEvent(server.el, server.module_blocked_pipe[0], AE_READABLE,
         moduleBlockedClientPipeReadable,NULL) == AE_ERR) {
@@ -3355,8 +3375,11 @@ void initServer(void) {
         server.maxmemory_policy = MAXMEMORY_NO_EVICTION;
     }
 
+    // 如果当前节点在集群模式下打开 还需要初始化集群
     if (server.cluster_enabled) clusterInit();
+    // 初始化副本脚本缓存
     replicationScriptCacheInit();
+    // 忽略lua脚本和日志
     scriptingInit(1);
     slowlogInit();
     latencyMonitorInit();
@@ -3463,6 +3486,7 @@ void populateCommandTable(void) {
         if (populateCommandTableParseFlags(c,c->sflags) == C_ERR)
             serverPanic("Unsupported command flag");
 
+        // 每个command会对应一个id 在acl模块中生成
         c->id = ACLGetCommandID(c->name); /* Assign the ID used for ACL. */
         retval1 = dictAdd(server.commands, sdsnew(c->name), c);
         /* Populate an additional dictionary that will be unaffected
@@ -5474,6 +5498,7 @@ void createPidFile(void) {
 void daemonize(void) {
     int fd;
 
+    // 退出主进程 使用子进程继续执行启动redis
     if (fork() != 0) exit(0); /* parent exits */
     setsid(); /* create a new session */
 
@@ -5909,6 +5934,8 @@ int main(int argc, char **argv) {
     uint8_t hashseed[16];
     getRandomBytes(hashseed,sizeof(hashseed));
     dictSetHashFunctionSeed(hashseed);
+
+    // 检测本节点是否以哨兵模式打开
     server.sentinel_mode = checkForSentinelMode(argc,argv);
     // 加载服务器默认配置项
     initServerConfig();
@@ -5921,7 +5948,9 @@ int main(int argc, char **argv) {
     tlsInit();
 
     /* Store the executable path and arguments in a safe place in order
-     * to be able to restart the server later. */
+     * to be able to restart the server later.
+     * 存储启动时携带的其他参数
+     * */
     server.executable = getAbsolutePath(argv[0]);
     server.exec_argv = zmalloc(sizeof(char*)*(argc+1));
     server.exec_argv[argc] = NULL;
@@ -5929,7 +5958,9 @@ int main(int argc, char **argv) {
 
     /* We need to init sentinel right now as parsing the configuration file
      * in sentinel mode will have the effect of populating the sentinel
-     * data structures with master nodes to monitor. */
+     * data structures with master nodes to monitor.
+     * 如果本节点以哨兵模式启动 还需要进行相关的初始化工作
+     * */
     if (server.sentinel_mode) {
         initSentinelConfig();
         initSentinel();
@@ -5945,7 +5976,7 @@ int main(int argc, char **argv) {
     else if (strstr(argv[0],"redis-check-aof") != NULL)
         redis_check_aof_main(argc,argv);
 
-    // 如果启动命令携带了参数 设置一些配置项
+    // 如果在启动时携带了一些参数 进行解析
     if (argc >= 2) {
         j = 1; /* First option to parse in argv[] */
         sds options = sdsempty();
@@ -5970,6 +6001,7 @@ int main(int argc, char **argv) {
         /* First argument is the config file name? */
         if (argv[j][0] != '-' || argv[j][1] != '-') {
             configfile = argv[j];
+            // 如果文件路径是相对路径 转换成绝对路径
             server.configfile = getAbsolutePath(configfile);
             /* Replace the config file in server.exec_argv with
              * its absolute path. */
@@ -5994,7 +6026,7 @@ int main(int argc, char **argv) {
                 options = sdscat(options,argv[j]+2);
                 options = sdscat(options," ");
             } else {
-                /* Option argument */
+                /* Option argument 一些其他参数会存储在options中 */
                 options = sdscatrepr(options,argv[j],strlen(argv[j]));
                 options = sdscat(options," ");
             }
@@ -6012,12 +6044,14 @@ int main(int argc, char **argv) {
         sdsfree(options);
     }
 
+    // TODO 先忽略指导模式 对主流程无影响
     server.supervised = redisIsSupervised(server.supervised_mode);
 
-    // 如果条件允许 使用后台进程执行redis
+    // 如果条件允许 使用后台进程执行redis  默认情况下为false
     int background = server.daemonize && !server.supervised;
     if (background) daemonize();
 
+    // 在background为true的情况 此时已经切换成子进程了
     serverLog(LL_WARNING, "oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo");
     serverLog(LL_WARNING,
         "Redis version=%s, bits=%d, commit=%s, modified=%d, pid=%d, just started",
@@ -6035,12 +6069,14 @@ int main(int argc, char **argv) {
 
     // 调节可使用的内存量
     readOOMScoreAdj();
+    // 初始化服务器
     initServer();
     if (background || server.pidfile) createPidFile();
     redisSetProcTitle(argv[0]);
     redisAsciiArt();
     checkTcpBacklogSettings();
 
+    // 本节点作为数据节点启动
     if (!server.sentinel_mode) {
         /* Things not needed when running in Sentinel mode. */
         serverLog(LL_WARNING,"Server initialized");

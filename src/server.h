@@ -245,6 +245,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_REPLY_SKIP (1<<24)  /* Don't send just this reply. */
 #define CLIENT_LUA_DEBUG (1<<25)  /* Run EVAL in debug mode. */
 #define CLIENT_LUA_DEBUG_SYNC (1<<26)  /* EVAL debugging without fork() */
+// 代表该client没有实际的conn对象 并且被多个module使用
 #define CLIENT_MODULE (1<<27) /* Non connected client used by some module. */
 #define CLIENT_PROTECTED (1<<28) /* Client should not be freed for now. */
 #define CLIENT_PENDING_READ (1<<29) /* The client has pending reads and was put
@@ -880,6 +881,8 @@ typedef struct client {
     int btype;              /* Type of blocking op if CLIENT_BLOCKED. */
     blockingState bpop;     /* blocking state */
     long long woff;         /* Last write global replication offset. */
+
+    // 当前client监控的所有key 检测这些key在执行事务前后是否被修改 如果被修改就需要回滚事务
     list *watched_keys;     /* Keys WATCHED for MULTI/EXEC CAS */
     dict *pubsub_channels;  /* channels a client is interested in (SUBSCRIBE) */
     list *pubsub_patterns;  /* patterns a client is interested in (SUBSCRIBE) */
@@ -914,6 +917,9 @@ typedef struct client {
     char buf[PROTO_REPLY_CHUNK_BYTES];
 } client;
 
+/**
+ * 当满足在单位时间内数据修改了多少次 就会触发rdb
+ */
 struct saveparam {
     time_t seconds;
     int changes;
@@ -1133,6 +1139,7 @@ struct redisServer {
     dict *moduleapi;            /* Exported core APIs dictionary for modules. */
     dict *sharedapi;            /* Like moduleapi but containing the APIs that
                                    modules share with each other. */
+    // 存储了所有需要额外安装的module路径
     list *loadmodule_queue;     /* List of modules to load at startup. */
     int module_blocked_pipe[2]; /* Pipe used to awake the event loop if a
                                    client blocked on a module command needs

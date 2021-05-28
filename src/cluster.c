@@ -590,7 +590,9 @@ void clusterInit(void) {
      * */
     if (clusterLoadConfig(server.cluster_configfile) == C_ERR) {
         /* No configuration found. We will just use the random name provided
-         * by the createClusterNode() function. */
+         * by the createClusterNode() function.
+         * 当未找到集群配置文件时 认可自己就是master节点
+         * */
         myself = server.cluster->myself =
                 createClusterNode(NULL, CLUSTER_NODE_MYSELF | CLUSTER_NODE_MASTER);
         serverLog(LL_NOTICE, "No cluster configuration found, I'm %.40s",
@@ -2829,7 +2831,7 @@ void clusterBroadcastMessage(void *buf, size_t len) {
 
 /* Build the message header. hdr must point to a buffer at least
  * sizeof(clusterMsg) in bytes.
- * 基于 clusterMsg 构建心跳检测的消息体
+ * 构建一条集群内传递的消息  这里只是填充基础信息 比如消息发送者是谁 ip/port多少
  * */
 void clusterBuildMessageHdr(clusterMsg *hdr, int type) {
     int totlen = 0;
@@ -2843,23 +2845,26 @@ void clusterBuildMessageHdr(clusterMsg *hdr, int type) {
     master = (nodeIsSlave(myself) && myself->slaveof) ?
              myself->slaveof : myself;
 
+    // 先用0填充hdr内存块
     memset(hdr, 0, sizeof(*hdr));
-    // 这是消息体的版本信息
+    // 写入固定的头部
     hdr->ver = htons(CLUSTER_PROTO_VER);
     hdr->sig[0] = 'R';
     hdr->sig[1] = 'C';
     hdr->sig[2] = 'm';
     hdr->sig[3] = 'b';
+    // 设置消息体类型
     hdr->type = htons(type);
-    // 填充本次发送消息的源节点
+    // 设置消息源
     memcpy(hdr->sender, myself->name, CLUSTER_NAMELEN);
 
     /* If cluster-announce-ip option is enabled, force the receivers of our
      * packets to use the specified address for this node. Otherwise if the
      * first byte is zero, they'll do auto discovery.
-     * 只有设置了 announce_ip后 才会在消息体中包含myip
+     * 将本节点的ip内存置空
      * */
     memset(hdr->myip, 0, NET_IP_STR_LEN);
+    // 如果存在cluster_announce_ip 就把该ip设置到myip中
     if (server.cluster_announce_ip) {
         strncpy(hdr->myip, server.cluster_announce_ip, NET_IP_STR_LEN);
         hdr->myip[NET_IP_STR_LEN - 1] = '\0';
@@ -2877,8 +2882,10 @@ void clusterBuildMessageHdr(clusterMsg *hdr, int type) {
 
     memcpy(hdr->myslots, master->slots, sizeof(hdr->myslots));
     memset(hdr->slaveof, 0, CLUSTER_NAMELEN);
+    // 将本节点此时认可的master设置到hdr中
     if (myself->slaveof != NULL)
         memcpy(hdr->slaveof, myself->slaveof->name, CLUSTER_NAMELEN);
+    // 相关属性的填充
     hdr->port = htons(announced_port);
     hdr->cport = htons(announced_cport);
     hdr->flags = htons(myself->flags);
@@ -2889,17 +2896,17 @@ void clusterBuildMessageHdr(clusterMsg *hdr, int type) {
     hdr->configEpoch = htonu64(master->configEpoch);
 
     /* Set the replication offset.
-     * 如果当前节点是slave 顺便将本节点此时的数据偏移量返回
+     * 如果当前节点是slave 将本节点与master的同步偏移量返回
      * */
     if (nodeIsSlave(myself))
         offset = replicationGetSlaveOffset();
     else
-        // 如果当前节点是master 将最新的数据偏移量通知到slave 这个数据偏移量可以理解为 每发起一次操作都会增加
+        // 如果当前节点是master 将最新的数据偏移量通知到slave master维护的偏移量含义是什么 ???
         offset = server.master_repl_offset;
     hdr->offset = htonu64(offset);
 
     /* Set the message flags.
-     * TODO 这是什么
+     * 如果本次手动故障转移结束 会增加一个特殊的标记
      * */
     if (nodeIsMaster(myself) && server.cluster->mf_end)
         hdr->mflags[0] |= CLUSTERMSG_FLAG0_PAUSED;
@@ -3162,7 +3169,8 @@ void clusterBroadcastPong(int target) {
 /* Send a PUBLISH message.
  *
  * If link is NULL, then the message is broadcasted to the whole cluster.
- * @param link 当link为null时 代表本次消息需要广播到集群的所有节点
+ * 某个client往该server的某个channel投递一条消息
+ * @param link 没有指定link 代表广播到集群的所有节点
  * */
 void clusterSendPublish(clusterLink *link, robj *channel, robj *message) {
     unsigned char *payload;
@@ -3176,10 +3184,13 @@ void clusterSendPublish(clusterLink *link, robj *channel, robj *message) {
     channel_len = sdslen(channel->ptr);
     message_len = sdslen(message->ptr);
 
+    // 构建一条集群内传递的消息
     clusterBuildMessageHdr(hdr, CLUSTERMSG_TYPE_PUBLISH);
     totlen = sizeof(clusterMsg) - sizeof(union clusterMsgData);
+    // 这里是计算clusterMsgData的大小
     totlen += sizeof(clusterMsgDataPublish) - 8 + channel_len + message_len;
 
+    // 只有此时是发布一条消息时 才会设置这2个标识
     hdr->data.publish.msg.channel_len = htonl(channel_len);
     hdr->data.publish.msg.message_len = htonl(message_len);
     hdr->totlen = htonl(totlen);
@@ -3188,10 +3199,12 @@ void clusterSendPublish(clusterLink *link, robj *channel, robj *message) {
     if (totlen < sizeof(buf)) {
         payload = (unsigned char *) buf;
     } else {
+        // 空间不足的情况 申请额外空间
         payload = zmalloc(totlen);
         memcpy(payload, hdr, sizeof(*hdr));
         hdr = (clusterMsg *) payload;
     }
+    // 存储channel以及message
     memcpy(hdr->data.publish.msg.bulk_data, channel->ptr, sdslen(channel->ptr));
     memcpy(hdr->data.publish.msg.bulk_data + sdslen(channel->ptr),
            message->ptr, sdslen(message->ptr));
@@ -3199,6 +3212,7 @@ void clusterSendPublish(clusterLink *link, robj *channel, robj *message) {
     if (link)
         clusterSendMessage(link, payload, totlen);
     else
+        // 将数据发往集群中每个节点
         clusterBroadcastMessage(payload, totlen);
 
     decrRefCount(channel);
@@ -3302,8 +3316,10 @@ int clusterSendModuleMessageToTarget(const char *target, uint64_t module_id, uin
  * For now we do very little, just propagating PUBLISH messages across the whole
  * cluster. In the future we'll try to get smarter and avoiding propagating those
  * messages to hosts without receives for a given channel.
+ * 某个client往该服务器的某个channel推送某条消息时执行该方法 (当发现服务器是集群模式的情况)
+ * @param channel
+ * @param message
  * -------------------------------------------------------------------------- */
-// 本节点作为集群中的一个节点 收到一条需要推送到channel的消息时 会传播其他节点
 void clusterPropagatePublish(robj *channel, robj *message) {
     clusterSendPublish(NULL, channel, message);
 }

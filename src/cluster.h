@@ -229,6 +229,7 @@ typedef struct {
 typedef struct {
     uint32_t channel_len;
     uint32_t message_len;
+    // 内部会存储channel 以及 message
     unsigned char bulk_data[8]; /* 8 bytes just as placeholder. */
 } clusterMsgDataPublish;
 

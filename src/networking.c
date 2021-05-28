@@ -246,7 +246,8 @@ void clientInstallWriteHandler(client *c) {
  * */
 int prepareClientToWrite(client *c) {
     /* If it's the Lua client we always return ok without installing any
-     * handler since there is no socket at all. */
+     * handler since there is no socket at all.
+     * */
     if (c->flags & (CLIENT_LUA|CLIENT_MODULE)) return C_OK;
 
     /* If CLIENT_CLOSE_ASAP flag is set, we need not write anything.
@@ -367,7 +368,7 @@ void _addReplyProtoToList(client *c, const char *s, size_t len) {
  * 将redisObject的信息写入到client对应的写缓冲区中 (静态buf+reply链表)
  * */
 void addReply(client *c, robj *obj) {
-    // 检测此时是否可以将数据写入到client中
+    // 检测此时是否可以将数据写入到client中  如果该client是一个fakeClient 就不需要写入数据
     if (prepareClientToWrite(c) != C_OK) return;
 
     // sdsEncodedObject 代表redisObject 已经完成了序列化
@@ -3238,7 +3239,7 @@ int clientsArePaused(void) {
  * write, close sequence needed to serve a client.
  *
  * The function returns the total number of events processed.
- * TODO
+ * 比如在数据恢复阶段 每隔一段时间就要处理一些囤积的事件
  * */
 void processEventsWhileBlocked(void) {
     int iterations = 4; /* See the function top-comment. */
@@ -3301,14 +3302,14 @@ void *IOThreadMain(void *myid) {
 
     while(1) {
         /* Wait for start
-         * 自选检测是否准备好任务  应该是这样 当线程能够获取到锁时 就代表即将要插入任务了 这时不适合采用锁的方式 通过自旋刷新任务数并开始执行任务
+         * 首先自旋检测任务是否产生
          * */
         for (int j = 0; j < 1000000; j++) {
             if (io_threads_pending[id] != 0) break;
         }
 
         /* Give the main thread a chance to stop this thread.
-         * pthread_mutex_lock/pthread_mutex_unlock 应该可以刷新内存屏障
+         * pthread_mutex_lock/pthread_mutex_unlock 可以刷新内存屏障  同时如果外部线程此时持有锁 本线程就会被阻塞在pthread_mutex_lock
          * */
         if (io_threads_pending[id] == 0) {
             pthread_mutex_lock(&io_threads_mutex[id]);
@@ -3325,6 +3326,7 @@ void *IOThreadMain(void *myid) {
         listIter li;
         listNode *ln;
         listRewind(io_threads_list[id],&li);
+        // 根据此时被唤醒的类型 处理不同的任务
         while((ln = listNext(&li))) {
             client *c = listNodeValue(ln);
             if (io_threads_op == IO_THREADS_OP_WRITE) {
@@ -3376,7 +3378,7 @@ void initThreadedIO(void) {
         pthread_mutex_init(&io_threads_mutex[i],NULL);
         // 代表每个线程此时待处理任务为0
         io_threads_pending[i] = 0;
-        // 锁定线程 然后在IOThreadMain中也有个lock方法 也就是在这里提前上锁后 thread的主流程就会被锁定 只有从外部unlock后主流程才会正常执行
+        // 主线程会先获取io线程的锁 这样其他线程就会阻塞在自己的循环中， 当主线程需要这些线程干活了 就会解锁
         pthread_mutex_lock(&io_threads_mutex[i]); /* Thread will be stopped. */
         if (pthread_create(&tid,NULL,IOThreadMain,(void*)(long)i) != 0) {
             serverLog(LL_WARNING,"Fatal: Can't initialize IO thread.");

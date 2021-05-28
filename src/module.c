@@ -7842,7 +7842,7 @@ void moduleUnsubscribeAllServerEvents(RedisModule *module) {
 }
 
 /**
- * 在加载数据时 发出一些进度事件
+ * 计算最新进度
  * @param is_aof 本次是否是由于加载aof文件触发 否则是加载rdb触发
  */
 void processModuleLoadingProgressEvent(int is_aof) {
@@ -7856,6 +7856,8 @@ void processModuleLoadingProgressEvent(int is_aof) {
         RedisModuleLoadingProgressV1 fi = {REDISMODULE_LOADING_PROGRESS_VERSION,
                                            server.hz,
                                            progress};
+
+        // 因为现在还没有看到添加监听器的逻辑 所以先忽略
         moduleFireServerEvent(REDISMODULE_EVENT_LOADING_PROGRESS,
                               is_aof ?
                               REDISMODULE_SUBEVENT_LOADING_PROGRESS_AOF :
@@ -7906,20 +7908,24 @@ void moduleRegisterCoreAPI(void);
  */
 void moduleInitModulesSystem(void) {
     moduleUnblockedClients = listCreate();
+    // 所有需要加载的module会存储在这个队列中
     server.loadmodule_queue = listCreate();
+    // 存储所有module的容器
     modules = dictCreate(&modulesDictType, NULL);
 
     /* Set up the keyspace notification subscriber list and static client */
     moduleKeyspaceSubscribers = listCreate();
+    // 这里创建一个空的client 并追加一个module标记 代表该client是由module基于特殊目的创建的
     moduleFreeContextReusedClient = createClient(NULL);
     moduleFreeContextReusedClient->flags |= CLIENT_MODULE;
     moduleFreeContextReusedClient->user = NULL; /* root user. */
 
-    /* Set up filter list */
+    /* Set up filter list 执行commnd时 还需要经过一组过滤器 */
     moduleCommandFilters = listCreate();
 
+    // 将所有对外暴露的api 以name/fun的键值对形式存储到moduleapi中
     moduleRegisterCoreAPI();
-    // 这里开启的pipe是为了什么
+    // 初始化module管道
     if (pipe(server.module_blocked_pipe) == -1) {
         serverLog(LL_WARNING,
                   "Can't create the pipe for module blocking commands: %s",
@@ -8459,7 +8465,9 @@ int *RM_GetCommandKeys(RedisModuleCtx *ctx, RedisModuleString **argv, int argc, 
 }
 
 /* Register all the APIs we export. Keep this function at the end of the
- * file so that's easy to seek it to add new entries. */
+ * file so that's easy to seek it to add new entries.
+ * 将所有会对外暴露的api注册到module上
+ * */
 void moduleRegisterCoreAPI(void) {
     server.moduleapi = dictCreate(&moduleAPIDictType, NULL);
     server.sharedapi = dictCreate(&moduleAPIDictType, NULL);

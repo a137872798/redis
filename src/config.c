@@ -284,6 +284,12 @@ void resetServerSaveParams(void) {
     server.saveparamslen = 0;
 }
 
+/**
+ * 这里指定了所有需要额外加载的module的路径
+ * @param path
+ * @param argv
+ * @param argc
+ */
 void queueLoadModule(sds path, sds *argv, int argc) {
     int i;
     struct moduleLoadQueueEntry *loadmod;
@@ -361,6 +367,10 @@ void initConfigValues() {
     }
 }
 
+/**
+ * 从字符串中加载服务器配置
+ * @param config
+ */
 void loadServerConfigFromString(char *config) {
     char *err = NULL;
     int linenum = 0, totlines, i;
@@ -369,6 +379,7 @@ void loadServerConfigFromString(char *config) {
 
     lines = sdssplitlen(config,strlen(config),"\n",1,&totlines);
 
+    // 按行解析配置项 以及设置到server中
     for (i = 0; i < totlines; i++) {
         sds *argv;
         int argc;
@@ -376,7 +387,9 @@ void loadServerConfigFromString(char *config) {
         linenum = i+1;
         lines[i] = sdstrim(lines[i]," \t\r\n");
 
-        /* Skip comments and blank lines */
+        /* Skip comments and blank lines
+         * 忽略注释以及空行
+         * */
         if (lines[i][0] == '#' || lines[i][0] == '\0') continue;
 
         /* Split into arguments */
@@ -395,6 +408,7 @@ void loadServerConfigFromString(char *config) {
 
         /* Iterate the configs that are standard */
         int match = 0;
+        // 从所有config中 找到匹配的配置项
         for (standardConfig *config = configs; config->name != NULL; config++) {
             if ((!strcasecmp(argv[0],config->name) ||
                 (config->alias && !strcasecmp(argv[0],config->alias))))
@@ -403,6 +417,7 @@ void loadServerConfigFromString(char *config) {
                     err = "wrong number of arguments";
                     goto loaderr;
                 }
+                // 更新配置项
                 if (!config->interface.set(config->data, argv[1], 0, &err)) {
                     goto loaderr;
                 }
@@ -417,7 +432,7 @@ void loadServerConfigFromString(char *config) {
             continue;
         }
 
-        /* Execute config directives */
+        /* Execute config directives 可能是一些其他配置项 */
         if (!strcasecmp(argv[0],"bind") && argc >= 2) {
             int j, addresses = argc-1;
 
@@ -474,6 +489,7 @@ void loadServerConfigFromString(char *config) {
             loadServerConfig(argv[1],NULL);
         } else if ((!strcasecmp(argv[0],"client-query-buffer-limit")) && argc == 2) {
              server.client_max_querybuf_len = memtoll(argv[1],NULL);
+             // 在配置项中可能记录了该节点的master的地址信息
         } else if ((!strcasecmp(argv[0],"slaveof") ||
                     !strcasecmp(argv[0],"replicaof")) && argc == 3) {
             slaveof_linenum = linenum;
@@ -572,6 +588,7 @@ void loadServerConfigFromString(char *config) {
                 goto loaderr;
             }
             server.notify_keyspace_events = flags;
+            // 配置项中包含了用户信息 就加入到acl模块中
         } else if (!strcasecmp(argv[0],"user") && argc >= 2) {
             int argc_err;
             if (ACLAppendUserForLoading(argv,argc,&argc_err) == C_ERR) {
@@ -582,8 +599,10 @@ void loadServerConfigFromString(char *config) {
                 err = buf;
                 goto loaderr;
             }
+            // 包含了所有需要手动加载的module
         } else if (!strcasecmp(argv[0],"loadmodule") && argc >= 2) {
             queueLoadModule(argv[1],&argv[2],argc-2);
+            // 代表本次是哨兵相关的配置
         } else if (!strcasecmp(argv[0],"sentinel")) {
             /* argc == 1 is handled by main() as we need to enter the sentinel
              * mode ASAP. */
@@ -627,9 +646,13 @@ loaderr:
  *
  * Both filename and options can be NULL, in such a case are considered
  * empty. This way loadServerConfig can be used to just load a file or
- * just load a string. */
+ * just load a string.
+ * 加载配置文件中的数据
+ * @param options 一些选项信息可能可以在这里找到
+ * */
 void loadServerConfig(char *filename, char *options) {
     sds config = sdsempty();
+    // 单行配置项的最大长度
     char buf[CONFIG_MAX_LINE+1];
 
     /* Load the file content */
@@ -646,15 +669,17 @@ void loadServerConfig(char *filename, char *options) {
                 exit(1);
             }
         }
+        // 将读取到的数据全部追加到config上  sds支持自动扩容
         while(fgets(buf,CONFIG_MAX_LINE+1,fp) != NULL)
             config = sdscat(config,buf);
         if (fp != stdin) fclose(fp);
     }
-    /* Append the additional options */
+    /* Append the additional options 如果还有一些额外的选项信息 也追加到config中 */
     if (options) {
         config = sdscat(config,"\n");
         config = sdscat(config,options);
     }
+    // 从config中加载服务器配置
     loadServerConfigFromString(config);
     sdsfree(config);
 }

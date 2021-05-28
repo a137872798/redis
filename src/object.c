@@ -52,8 +52,9 @@ robj *createObject(int type, void *ptr) {
     o->refcount = 1;
 
     /* Set the LRU to the current lruclock (minutes resolution), or
-     * alternatively the LFU counter. */
-    // TODO 有关lru相关的先放一边
+     * alternatively the LFU counter.
+     * 这里就是基于不同的内存淘汰策略设置lru
+     * */
     if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
         o->lru = (LFUGetTimeInMinutes()<<8) | LFU_INIT_VAL;
     } else {

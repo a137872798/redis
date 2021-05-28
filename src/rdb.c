@@ -2071,7 +2071,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key) {
 
 /* Mark that we are loading in the global state and setup the fields
  * needed to provide loading stats.
- * 开始加载rdb中的数据
+ * 标记此时开始加载某个文件
  * */
 void startLoading(size_t size, int rdbflags) {
     /* Load the DB */
@@ -2096,13 +2096,12 @@ void startLoading(size_t size, int rdbflags) {
 /* Mark that we are loading in the global state and setup the fields
  * needed to provide loading stats.
  * 'filename' is optional and used for rdb-check on error
- * 开始加载某个rdb文件
+ * 标记此时正在加载某个文件
  * */
 void startLoadingFile(FILE *fp, char* filename, int rdbflags) {
     struct stat sb;
     if (fstat(fileno(fp), &sb) == -1)
         sb.st_size = 0;
-    // 记录此时正在加载的rdb文件
     rdbFileBeingLoaded = filename;
     startLoading(sb.st_size, rdbflags);
 }

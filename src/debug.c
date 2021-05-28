@@ -264,7 +264,7 @@ void computeDatasetDigest(unsigned char *final) {
 
     memset(final,0,20); /* Start with a clean result */
 
-    for (j = 0; j < server.dbnum; j++) {
+    for (j = 0; j < server.; j++) {
         redisDb *db = server.db+j;
 
         if (dictSize(db->dict) == 0) continue;

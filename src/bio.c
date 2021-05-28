@@ -148,7 +148,7 @@ void bioCreateBackgroundJob(int type, void *arg1, void *arg2, void *arg3) {
     job->arg1 = arg1;
     job->arg2 = arg2;
     job->arg3 = arg3;
-    // 加锁是为了数组的可见性
+    // 必须在lock内使用cond对象
     pthread_mutex_lock(&bio_mutex[type]);
     listAddNodeTail(bio_jobs[type],job);
     bio_pending[type]++;
@@ -193,7 +193,7 @@ void *bioProcessBackgroundJobs(void *arg) {
     // 将线程设置成可以从外部直接关闭的情况
     makeThreadKillable();
 
-    // 每个线程运行时会获取自己的锁
+    // 条件对象必须在锁中访问 这里先获取锁
     pthread_mutex_lock(&bio_mutex[type]);
     /* Block SIGALRM so we are sure that only the main thread will
      * receive the watchdog signal. */
@@ -206,11 +206,15 @@ void *bioProcessBackgroundJobs(void *arg) {
     while(1) {
         listNode *ln;
 
-        /* The loop always starts with the lock hold. */
+        /* The loop always starts with the lock hold.
+         * */
         if (listLength(bio_jobs[type]) == 0) {
+            // 阻塞等待对应的任务队列填充元素  这里会释放锁
             pthread_cond_wait(&bio_newjob_cond[type],&bio_mutex[type]);
             continue;
         }
+
+        // 此时外部线程已经获取到锁 并将任务填充到队列中了
         /* Pop the job from the queue. */
         ln = listFirst(bio_jobs[type]);
         job = ln->value;
@@ -218,16 +222,20 @@ void *bioProcessBackgroundJobs(void *arg) {
          * a stand alone job structure to process.*/
         pthread_mutex_unlock(&bio_mutex[type]);
 
+        // 根据要执行的任务类型 走不同的逻辑
         /* Process the job accordingly to its type. */
         if (type == BIO_CLOSE_FILE) {
             close((long)job->arg1);
         } else if (type == BIO_AOF_FSYNC) {
             redis_fsync((long)job->arg1);
+            // 某些对象的内存释放会被延后， 一般只是将当前使用的指针置空 而将一个新的指针指向这个内存块后存储到lazy队列中
         } else if (type == BIO_LAZY_FREE) {
             /* What we free changes depending on what arguments are set:
              * arg1 -> free the object at pointer.
              * arg2 & arg3 -> free two dictionaries (a Redis DB).
-             * only arg3 -> free the radix tree. */
+             * only arg3 -> free the radix tree.
+             * 不同对象指针不同
+             * */
             if (job->arg1)
                 lazyfreeFreeObjectFromBioThread(job->arg1);
             else if (job->arg2 && job->arg3)
@@ -240,12 +248,16 @@ void *bioProcessBackgroundJobs(void *arg) {
         zfree(job);
 
         /* Lock again before reiterating the loop, if there are no longer
-         * jobs to process we'll block again in pthread_cond_wait(). */
+         * jobs to process we'll block again in pthread_cond_wait().
+         * 通过加锁的方式实现线程安全的操作任务队列
+         * */
         pthread_mutex_lock(&bio_mutex[type]);
         listDelNode(bio_jobs[type],ln);
         bio_pending[type]--;
 
-        /* Unblock threads blocked on bioWaitStepOfType() if any. */
+        /* Unblock threads blocked on bioWaitStepOfType() if any.
+         * 唤醒其他线程
+         * */
         pthread_cond_broadcast(&bio_step_cond[type]);
     }
 }

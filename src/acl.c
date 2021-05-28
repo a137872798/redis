@@ -232,7 +232,9 @@ void *ACLListDupSds(void *item) {
  * of users (the Users global radix tree), and returns a reference to
  * the structure representing the user.
  *
- * If the user with such name already exists NULL is returned. */
+ * If the user with such name already exists NULL is returned.
+ * 创建一个用户对象 并插入到users中
+ * */
 user *ACLCreateUser(const char *name, size_t namelen) {
     if (raxFind(Users,(unsigned char*)name,namelen) != raxNotFound) return NULL;
     user *u = zmalloc(sizeof(*u));
@@ -982,7 +984,9 @@ char *ACLSetUserStringError(void) {
 }
 
 /* Initialize the default user, that will always exist for all the process
- * lifetime. */
+ * lifetime.
+ * 创建默认用户  具备所有权限
+ * */
 void ACLInitDefaultUser(void) {
     DefaultUser = ACLCreateUser("default",7);
     ACLSetUser(DefaultUser,"+@all",-1);
@@ -991,12 +995,16 @@ void ACLInitDefaultUser(void) {
     ACLSetUser(DefaultUser,"nopass",-1);
 }
 
-/* Initialization of the ACL subsystem. */
+/* Initialization of the ACL subsystem.
+ * 初始化权限模块
+ * */
 void ACLInit(void) {
+    // 存储所有用户
     Users = raxNew();
     UsersToLoad = listCreate();
     ACLLog = listCreate();
     ACLInitDefaultUser();
+    // 在初始化阶段默认不需要进行权限校验
     server.requirepass = NULL; /* Only used for backward compatibility. */
 }
 
@@ -1065,19 +1073,24 @@ int ACLAuthenticateUser(client *c, robj *username, robj *password) {
  * should have an assigned ID (that is used to index the bitmap). This function
  * creates such an ID: it uses sequential IDs, reusing the same ID for the same
  * command name, so that a command retains the same ID in case of modules that
- * are unloaded and later reloaded. */
+ * are unloaded and later reloaded.
+ * 根据某个command的名称 获取id
+ * */
 unsigned long ACLGetCommandID(const char *cmdname) {
     static rax *map = NULL;
     static unsigned long nextid = 0;
 
     sds lowername = sdsnew(cmdname);
     sdstolower(lowername);
+    // 局部变量 当缓存用
     if (map == NULL) map = raxNew();
     void *id = raxFind(map,(unsigned char*)lowername,sdslen(lowername));
+    // 代表id已经存在 直接返回
     if (id != raxNotFound) {
         sdsfree(lowername);
         return (unsigned long)id;
     }
+    // 为该command生成一个id 并将关系设置到rax中
     raxInsert(map,(unsigned char*)lowername,strlen(lowername),
               (void*)nextid,NULL);
     sdsfree(lowername);

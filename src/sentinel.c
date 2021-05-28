@@ -586,7 +586,7 @@ void initSentinel(void) {
 
     /* Initialize various data structures. 这里只是一些相关属性的初始化 */
     sentinel.current_epoch = 0;
-    // 由sentinel来协调所有的master
+    // 这是本哨兵监控的所有master
     sentinel.masters = dictCreate(&instancesDictType, NULL);
     sentinel.tilt = 0;
     sentinel.tilt_start_time = 0;
@@ -597,6 +597,7 @@ void initSentinel(void) {
     sentinel.announce_port = 0;
     sentinel.simfailure_flags = SENTINEL_SIMFAILURE_NONE;
     sentinel.deny_scripts_reconfig = SENTINEL_DEFAULT_DENY_SCRIPTS_RECONFIG;
+    // 此时myid还没有被初始化
     memset(sentinel.myid, 0, sizeof(sentinel.myid));
 }
 
