@@ -2156,15 +2156,17 @@ void stopSaving(int success) {
 }
 
 /* Track loading progress in order to serve client's from time to time
-   and if needed calculate rdb checksum  */
+   and if needed calculate rdb checksum
+   每当读取一定长度的数据时 就会计算一次校验和
+   */
 void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
+    // 只有当需要验证校验和的时候 才需要计算
     if (server.rdb_checksum)
         // 重新计算校验和
         rioGenericUpdateChecksum(r, buf, len);
-    // 代表每当加载了多少数据时 就要触发一次回调函数
+    // 代表在数据加载阶段 每当读取了多少数据 就要处理一次阻塞中的事件
     if (server.loading_process_events_interval_bytes &&
-
-    // 代表此时总处理数量至少超过了loading_process_events_interval_bytes 允许触发一次回调
+    // 也就是刚好又满足了一个loading_process_events_interval_bytes的大小
         (r->processed_bytes + len)/server.loading_process_events_interval_bytes > r->processed_bytes/server.loading_process_events_interval_bytes)
     {
         /* The DB can take some non trivial amount of time to load. Update
@@ -2174,11 +2176,13 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
          * */
         updateCachedTime(0);
         if (server.masterhost && server.repl_state == REPL_STATE_TRANSFER)
-            // 副本发现时间戳变化 通知到master
+            // TODO 这里发送一个空行到master是什么意思
             replicationSendNewlineToMaster();
-        loadingProgress(r->processed_bytes);
-        processEventsWhileBlocked();
 
+        // 更新此时的数据恢复进度
+        loadingProgress(r->processed_bytes);
+        // 处理network囤积的事件
+        processEventsWhileBlocked();
         // 通过module 来处理加载事件
         processModuleLoadingProgressEvent(0);
     }
@@ -2186,15 +2190,19 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
 
 /* Load an RDB file from the rio stream 'rdb'. On success C_OK is returned,
  * otherwise C_ERR is returned and 'errno' is set accordingly.
- * 从rio流中获取rdb文件
+ * 通过rio流中的数据回复本地数据  rio流只是一个抽象 底层可以是文件也可以是socket  也可以是buffer 这样他们可以使用同一套rdb格式解析逻辑
+ * @param rsi 当通过加载aof文件进行数据恢复时 文件中可能包含rdb数据 这时调用该方法不需要传入rsi对象
  * */
 int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
     uint64_t dbid;
     int type, rdbver;
+    // 在恢复rdb数据前 db默认指向0号
     redisDb *db = server.db+0;
     char buf[1024];
 
+    // 当设置了这个函数后 每当读取一定长度的数据就会触发一次计算校验和的逻辑  这样当rdb数据读取完毕后 顺便对比一下校验和是否一致
     rdb->update_cksum = rdbLoadProgressCallback;
+    // 在数据恢复阶段 每恢复多少数据时 需要处理一下network模块残留的事件
     rdb->max_processing_chunk = server.loading_process_events_interval_bytes;
 
     // 从rio流中读取数据  rdb文件会以 REDID+VERSION开头
@@ -2218,28 +2226,35 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
     long long lru_idle = -1, lfu_freq = -1, expiretime = -1, now = mstime();
     long long lru_clock = LRU_CLOCK();
 
+    // rdb文件存储的是快照数据
     while(1) {
         sds key;
         robj *val;
 
-        /* Read type. */
+        /* Read type.
+         * 先读取rdb数据类型 可能记录的是一些参数信息 而不是redisObject 就要分情况处理
+         * */
         if ((type = rdbLoadType(rdb)) == -1) goto eoferr;
 
         /* Handle special types. */
         if (type == RDB_OPCODE_EXPIRETIME) {
             /* EXPIRETIME: load an expire associated with the next key
              * to load. Note that after loading an expire we need to
-             * load the actual type, and continue. */
+             * load the actual type, and continue.
+             * 本次读取到的是之前某个redisObject的过期时间
+             * */
             expiretime = rdbLoadTime(rdb);
             expiretime *= 1000;
             if (rioGetReadError(rdb)) goto eoferr;
             continue; /* Read next opcode. */
+            // 同上 只是单位不一样 不需要转换
         } else if (type == RDB_OPCODE_EXPIRETIME_MS) {
             /* EXPIRETIME_MS: milliseconds precision expire times introduced
              * with RDB v3. Like EXPIRETIME but no with more precision. */
             expiretime = rdbLoadMillisecondTime(rdb,rdbver);
             if (rioGetReadError(rdb)) goto eoferr;
             continue; /* Read next opcode. */
+            // 获取的是某个redisObject的lfu信息
         } else if (type == RDB_OPCODE_FREQ) {
             /* FREQ: LFU frequency. */
             uint8_t byte;
@@ -2252,9 +2267,11 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
             if ((qword = rdbLoadLen(rdb,NULL)) == RDB_LENERR) goto eoferr;
             lru_idle = qword;
             continue; /* Read next opcode. */
+            // 代表rdb数据的部分已经被读取完了
         } else if (type == RDB_OPCODE_EOF) {
             /* EOF: End of file, exit the main loop. */
             break;
+            // 读取到了一个切换db的命令
         } else if (type == RDB_OPCODE_SELECTDB) {
             /* SELECTDB: Select the specified database. */
             if ((dbid = rdbLoadLen(rdb,NULL)) == RDB_LENERR) goto eoferr;
@@ -2267,6 +2284,7 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
             }
             db = server.db+dbid;
             continue; /* Read next opcode. */
+            // 读取到一个扩容操作
         } else if (type == RDB_OPCODE_RESIZEDB) {
             /* RESIZEDB: Hint about the size of the keys in the currently
              * selected data base, in order to avoid useless rehashing. */
@@ -2278,6 +2296,7 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
             dictExpand(db->dict,db_size);
             dictExpand(db->expires,expires_size);
             continue; /* Read next opcode. */
+            // 这种类型存储的是一种描述rdb状态的键值对
         } else if (type == RDB_OPCODE_AUX) {
             /* AUX: generic string-string fields. Use to add state to RDB
              * which is backward compatible. Implementations of RDB loading
@@ -2338,6 +2357,7 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
             decrRefCount(auxkey);
             decrRefCount(auxval);
             continue; /* Read type again. */
+            // TODO 如何生成aux格式的数据 需要看写入的逻辑
         } else if (type == RDB_OPCODE_MODULE_AUX) {
             /* Load module data that is not related to the Redis key space.
              * Such data can be potentially be stored both before and after the
@@ -2391,11 +2411,11 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
             }
         }
 
-        // 还原redisObject
-        /* Read key */
+        // 剩余情况key必然是redisObject
+        /* Read key 这里先读取key */
         if ((key = rdbGenericLoadStringObject(rdb,RDB_LOAD_SDS,NULL)) == NULL)
             goto eoferr;
-        /* Read value */
+        /* Read value 通过rio文件流+key+type 还原redisObject */
         if ((val = rdbLoadObject(type,rdb,key)) == NULL) {
             sdsfree(key);
             goto eoferr;
@@ -2409,15 +2429,17 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
          * Similarly if the RDB is the preamble of an AOF file, we want to
          * load all the keys as they are, since the log of operations later
          * assume to work in an exact keyspace state.
-         * 当前节点是集群master节点 并且该数据已经过期 释放数据
          * */
         if (iAmMaster() &&
+                // 这行代表本次rdb内容不是从aof文件中读取出来的  并且数据已经过期 就没有必要加入到db中了
+                // 如果后面还有aof数据 那么aof中记录的command很可能会对这个redisObject进行某种操作 所以不能贸然删除
             !(rdbflags&RDBFLAGS_AOF_PREAMBLE) &&
             expiretime != -1 && expiretime < now)
         {
             sdsfree(key);
             decrRefCount(val);
         } else {
+            // 接下来就是将数据插入到db中  生成redisKey
             robj keyobj;
             initStaticStringObject(keyobj,key);
 
@@ -2426,6 +2448,7 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
              * */
             int added = dbAddRDBLoad(db,key,val);
             if (!added) {
+                // 当发现key已经存在时 如果设置了这个标识 就可以删除旧的key 并插入新的redisObject
                 if (rdbflags & RDBFLAGS_ALLOW_DUP) {
                     /* This flag is useful for DEBUG RELOAD special modes.
                      * When it's set we allow new keys to replace the current
@@ -2433,6 +2456,7 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
                     dbSyncDelete(db,&keyobj);
                     dbAddRDBLoad(db,key,val);
                 } else {
+                    // 这里就是打印日志信息
                     serverLog(LL_WARNING,
                         "RDB has duplicated key '%s' in DB %d",key,db->id);
                     serverPanic("Duplicated key found in RDB file");
@@ -2451,13 +2475,15 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
              * */
             objectSetLRUOrLFU(val,lfu_freq,lru_idle,lru_clock,1000);
 
-            /* call key space notification on key loaded for modules only */
+            /* call key space notification on key loaded for modules only
+             * 当这个key被加载到db后 会发出一个事件 目前redis内部没有内置的事件监听器
+             * */
             moduleNotifyKeyspaceEvent(NOTIFY_LOADED, "loaded", &keyobj, db->id);
         }
 
         /* Loading the database more slowly is useful in order to test
          * certain edge cases.
-         * 之前有某些线程可能处于睡眠状态 (在等待数据恢复) 一旦rdb/aof完成数据恢复后 就可以唤醒该线程了
+         * 如果设置了每当成功加载一个key后 就沉睡一段时间 让线程短暂的沉睡 默认为false 也就是不需要沉睡
          * */
         if (server.key_load_delay) usleep(server.key_load_delay);
 
@@ -2467,20 +2493,25 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
         lfu_freq = -1;
         lru_idle = -1;
     }
+
+    // 此时已经解析完全部的rdb数据了
     /* Verify the checksum if RDB version is >= 5 */
     if (rdbver >= 5) {
         uint64_t cksum, expected = rdb->cksum;
 
         if (rioRead(rdb,&cksum,8) == 0) goto eoferr;
+        // 检测是否需要处理验证校验和
         if (server.rdb_checksum) {
             memrev64ifbe(&cksum);
             if (cksum == 0) {
                 serverLog(LL_WARNING,"RDB file was saved with checksum disabled: no check performed.");
+                // 代表数据遭到篡改
             } else if (cksum != expected) {
                 serverLog(LL_WARNING,"Wrong RDB checksum expected: (%llx) but "
                     "got (%llx). Aborting now.",
                         (unsigned long long)expected,
                         (unsigned long long)cksum);
+                // 在打印错误信息后 退出redis进程
                 rdbExitReportCorruptRDB("RDB CRC error");
             }
         }
@@ -2515,6 +2546,7 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     if ((fp = fopen(filename,"r")) == NULL) return C_ERR;
     // 设置此时正在加载的rdb文件 同时发出事件
     startLoadingFile(fp, filename,rdbflags);
+    // 将文件包装成rio流
     rioInitWithFile(&rdb,fp);
     // 通过rdb完成数据恢复
     retval = rdbLoadRio(&rdb,rdbflags,rsi);

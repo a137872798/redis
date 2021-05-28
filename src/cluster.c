@@ -4755,18 +4755,22 @@ void clusterUpdateState(void) {
  *
  * The function also uses the logging facility in order to warn the user
  * about desynchronizations between the data we have in memory and the
- * cluster configuration. */
+ * cluster configuration.
+ * 当某个节点以集群模式打开时 需要做数据校验
+ * */
 int verifyClusterConfigWithData(void) {
     int j;
     int update_config = 0;
 
     /* Return ASAP if a module disabled cluster redirections. In that case
-     * every master can store keys about every possible hash slot. */
+     * every master can store keys about every possible hash slot.
+     * 如果集群不支持重定向 也就是每个master都要存储完整的路由表 这样才能定位到有数据的节点
+     * */
     if (server.cluster_module_flags & CLUSTER_MODULE_FLAG_NO_REDIRECTION)
         return C_OK;
 
     /* If this node is a slave, don't perform the check at all as we
-     * completely depend on the replication stream. */
+     * completely depend on the replication stream. 接下来的一些校验都是针对master的 */
     if (nodeIsSlave(myself)) return C_OK;
 
     /* Make sure we only have keys in DB0. */

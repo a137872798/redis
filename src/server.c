@@ -5738,11 +5738,12 @@ int checkForSentinelMode(int argc, char **argv) {
 void loadDataFromDisk(void) {
     long long start = ustime();
     if (server.aof_state == AOF_ON) {
-        // 其中aof文件中可能会包含rdb数据 这里就是一些数据的还原操作
+        // 当前节点开启了aof功能 现在通过加载aof文件恢复数据 在aof文件中可能会包含部分rdb数据
         if (loadAppendOnlyFile(server.aof_filename) == C_OK)
             serverLog(LL_NOTICE,"DB loaded from append only file: %.3f seconds",(float)(ustime()-start)/1000000);
     } else {
-        // 当aof被关闭时尝试通过rdb进行数据恢复
+        // 通过加载rdb文件恢复数据  这里跟通过aof文件进行数据恢复的不同点就是传入了一个rsi 在数据恢复过程中可能会有一些属性被设置到rsi中
+        // 而aof携带部分rdb的情况 不会传入rsi对象
         rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
         errno = 0; /* Prevent a stale value from affecting error checking */
         if (rdbLoad(server.rdb_filename,&rsi,RDBFLAGS_NONE) == C_OK) {
@@ -5750,13 +5751,12 @@ void loadDataFromDisk(void) {
                 (float)(ustime()-start)/1000000);
 
             /* Restore the replication ID / offset from the RDB file.
-             * 当本节点是slave节点时 从rdb文件中恢复副本数据的偏移量 也就是集群间数据同步的状态通过offset来追踪
+             * 当本节点作为集群的slave节点时 在通过rdb文件恢复数据时 可能会写入replicaId 等信息
              * */
             if ((server.masterhost ||
                 (server.cluster_enabled &&
                 nodeIsSlave(server.cluster->myself))) &&
-
-                // 代表在rdb文件中存储了副本的偏移量
+                // 代表rdb文件中确实有相关数据 并且已经设置到rsi中了
                 rsi.repl_id_is_set &&
                 rsi.repl_offset != -1 &&
                 /* Note that older implementations may save a repl_stream_db
@@ -5764,15 +5764,18 @@ void loadDataFromDisk(void) {
                  * information in function rdbPopulateSaveInfo. */
                 rsi.repl_stream_db != -1)
             {
+                // 将相关属性转移到server上
                 memcpy(server.replid,rsi.repl_id,sizeof(server.replid));
+                // 本节点作为slave会记录之前master的数据偏移量 这样好判断数据同步是否完成
                 server.master_repl_offset = rsi.repl_offset;
                 /* If we are a slave, create a cached master from this
                  * information, in order to allow partial resynchronizations
-                 * with masters. 设置一些集群相关的信息 缓存一份master数据 作用是什么??? */
+                 * with masters. 生成一个临时的master 并设置到 server.cached_master*/
                 replicationCacheMasterUsingMyself();
-                // 恢复master上次同步数据的db
+                // 指定cached_master的db
                 selectDb(server.cached_master,rsi.repl_stream_db);
             }
+            // 数据恢复失败 结束进程
         } else if (errno != ENOENT) {
             serverLog(LL_WARNING,"Fatal error loading the DB: %s. Exiting.",strerror(errno));
             exit(1);
@@ -6107,6 +6110,7 @@ int main(int argc, char **argv) {
         InitServerLast();
         // 从磁盘中恢复数据
         loadDataFromDisk();
+        // 如果当前节点在集群模式下打开
         if (server.cluster_enabled) {
             if (verifyClusterConfigWithData() == C_ERR) {
                 serverLog(LL_WARNING,

@@ -864,7 +864,6 @@ typedef struct client {
     off_t repldbsize;       /* Replication DB file size. */
     sds replpreamble;       /* Replication DB preamble. */
     long long read_reploff; /* Read replication offset if this is a master. */
-    // 作为slave节点此时数据同步的偏移量
     long long reploff;      /* Applied replication offset if this is a master. */
     // 在进行主副本数据同步时使用 表示数据同步的进度
     long long repl_ack_off; /* Replication ack offset, if this is a slave. */

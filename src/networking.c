@@ -1185,7 +1185,9 @@ void disconnectSlaves(void) {
 
 /* Remove the specified client from global lists where the client could
  * be referenced, not including the Pub/Sub channels.
- * This is used by freeClient() and replicationCacheMaster(). */
+ * This is used by freeClient() and replicationCacheMaster().
+ * 断开与该client的连接
+ * */
 void unlinkClient(client *c) {
     listNode *ln;
 
@@ -1194,9 +1196,11 @@ void unlinkClient(client *c) {
 
     /* Certain operations must be done only if the client has an active connection.
      * If the client was already unlinked or if it's a "fake client" the
-     * conn is already set to NULL. */
+     * conn is already set to NULL. 如果该client此时还有连接 先断开连接*/
     if (c->conn) {
-        /* Remove from the list of active clients. */
+        /* Remove from the list of active clients.
+         * 将该client从server.clients中移除
+         * */
         if (c->client_list_node) {
             uint64_t id = htonu64(c->id);
             raxRemove(server.clients_index,(unsigned char*)&id,sizeof(id),NULL);

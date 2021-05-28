@@ -1651,7 +1651,7 @@ void replicationEmptyDbCallback(void *privdata) {
 /* Once we have a link with the master and the synchronization was
  * performed, this function materializes the master client we store
  * at server.master, starting from the specified file descriptor.
- * 此时slave连接到了master
+ * 创建一个对应master的client 此时conn可以为null 代表还没有连接到master
  * */
 void replicationCreateMasterClient(connection *conn, int dbid) {
     server.master = createClient(conn);
@@ -1660,17 +1660,22 @@ void replicationCreateMasterClient(connection *conn, int dbid) {
         connSetReadHandler(server.master->conn, readQueryFromClient);
     server.master->flags |= CLIENT_MASTER;
     server.master->authenticated = 1;
+    // slave节点此时认为master的总偏移量 通过这个可以判断是否需要同步数据
     server.master->reploff = server.master_initial_offset;
+    // TODO 这几个偏移量的关系是 ???
     server.master->read_reploff = server.master->reploff;
     server.master->user = NULL; /* This client can do everything. */
+    // 设置副本id
     memcpy(server.master->replid, server.master_replid,
         sizeof(server.master_replid));
     /* If master offset is set to -1, this master is old and is not
-     * PSYNC capable, so we flag it accordingly. */
+     * PSYNC capable, so we flag it accordingly.
+     * 如果此时还不知道该节点的偏移量 打上一个psync标记 TODO 这个标记该怎么使用呢???
+     * */
     if (server.master->reploff == -1)
         server.master->flags |= CLIENT_PRE_PSYNC;
 
-    // 当前client的命令都是基于这个db的
+    // 如果此时指定了db 就设置master的此时数据针对的db
     if (dbid != -1) selectDb(server.master,dbid);
 }
 
@@ -3222,7 +3227,7 @@ void replicationCacheMaster(client *c) {
  * the new master will accept its replication ID, and potentiall also the
  * current offset if no data was lost during the failover. So we use our
  * current replication ID and offset in order to synthesize a cached master.
- * 缓存master信息
+ * 缓存master节点的相关信息 在没有与master节点建立连接的情况下 通过这种方式获取第一手数据
  * */
 void replicationCacheMasterUsingMyself(void) {
     serverLog(LL_NOTICE,
@@ -3233,18 +3238,23 @@ void replicationCacheMasterUsingMyself(void) {
     /* This will be used to populate the field server.master->reploff
      * by replicationCreateMasterClient(). We'll later set the created
      * master as server.cached_master, so the replica will use such
-     * offset for PSYNC. */
+     * offset for PSYNC.
+     * 将此时server中存储的master偏移量作为 master的初始偏移量
+     * */
     server.master_initial_offset = server.master_repl_offset;
 
     /* The master client we create can be set to any DBID, because
-     * the new master will start its replication stream with SELECT. */
+     * the new master will start its replication stream with SELECT.
+     * 此时连接还没完成 先创建一个空的client作为master节点
+     * */
     replicationCreateMasterClient(NULL,-1);
 
-    /* Use our own ID / offset. */
+    /* Use our own ID / offset. 拷贝replid */
     memcpy(server.master->replid, server.replid, sizeof(server.replid));
 
-    /* Set as cached master. */
+    /* Set as cached master. 断开与master节点的连接 */
     unlinkClient(server.master);
+    // 将该master设置成cache_master
     server.cached_master = server.master;
     server.master = NULL;
 }
