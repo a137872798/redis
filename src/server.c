@@ -2020,7 +2020,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* Software watchdog: deliver the SIGALRM that will reach the signal
      * handler if we don't return here fast enough.
-     * 设置一个看门狗
+     * debug相关的忽略
      * */
     if (server.watchdog_period) watchdogScheduleSignal(server.watchdog_period);
 
@@ -4332,7 +4332,6 @@ int prepareForShutdown(int flags) {
      * 此时还处于数据恢复阶段 或者本次以哨兵模式启动的服务器   这些标记是用来确定是否要在终止redis时存储一份rdb数据的
      * */
     if (server.loading || server.sentinel_mode)
-        // 清除save标记 并设置一个nosave的标记  代表在关闭redis时 不需要存储数据 数据都未加载完成 必然没有需要存储的数据  哨兵模式下为什么不需要存储呢???
         flags = (flags & ~SHUTDOWN_SAVE) | SHUTDOWN_NOSAVE;
 
     int save = flags & SHUTDOWN_SAVE;

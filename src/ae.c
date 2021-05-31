@@ -426,7 +426,9 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
  * if flags has AE_CALL_AFTER_SLEEP set, the aftersleep callback is called.
  * if flags has AE_CALL_BEFORE_SLEEP set, the beforesleep callback is called.
  *
- * The function returns the number of events processed. */
+ * The function returns the number of events processed.
+ * 事件循环
+ * */
 int aeProcessEvents(aeEventLoop *eventLoop, int flags)
 {
     int processed = 0, numevents;
