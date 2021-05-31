@@ -6893,7 +6893,8 @@ void clusterRedirectClient(client *c, clusterNode *n, int hashslot, int error_co
  * If the client is found to be blocked into a hash slot this node no
  * longer handles, the client is sent a redirection error, and the function
  * returns 1. Otherwise 0 is returned and no operation is performed.
- * 判断此时client是否还有阻塞的必要
+ *
+ * 检测在某个client上阻塞的key 此时是否已经移动到集群中的其他节点 并将提示信息返回给client
  * */
 int clusterRedirectBlockedClientIfNeeded(client *c) {
     // 代表由于这3种类型导致的阻塞
@@ -6908,7 +6909,7 @@ int clusterRedirectBlockedClientIfNeeded(client *c) {
          * If the cluster is configured to allow reads on cluster down, we
          * still want to emit this error since a write will be required
          * to unblock them which may never come.
-         * 因为此时集群处于不可用状态 将错误信息返回给client
+         * 此时集群无法使用 将错误信息返回给client
          * */
         if (server.cluster->state == CLUSTER_FAIL) {
             clusterRedirectClient(c, NULL, 0, CLUSTER_REDIR_DOWN_STATE);
@@ -6916,18 +6917,17 @@ int clusterRedirectBlockedClientIfNeeded(client *c) {
         }
 
         /* All keys must belong to the same slot, so check first key only.
-         * 此时client上还有多少待执行的block操作
+         * 检查key所在的节点是否发生了变化
          * */
         di = dictGetIterator(c->bpop.keys);
         if ((de = dictNext(di)) != NULL) {
             robj *key = dictGetKey(de);
-            // 获取每个block操作要处理的key所在的slot
             int slot = keyHashSlot((char *) key->ptr, sdslen(key->ptr));
             clusterNode *node = server.cluster->slots[slot];
 
             /* if the client is read-only and attempting to access key that our
              * replica can handle, allow it.
-             * 如果当前节点是目标节点的slave节点 那么本次请求可以由本节点处理
+             * 如果最近一次操作是只读操作 并且本节点是目标节点的子节点 允许用本节点处理请求
              * */
             if ((c->flags & CLIENT_READONLY) &&
                 (c->lastcmd->flags & CMD_READONLY) &&

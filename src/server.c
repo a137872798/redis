@@ -1609,7 +1609,7 @@ int clientsCronResizeQueryBuffer(client *c) {
     /* There are two conditions to resize the query buffer:
      * 1) Query buffer is > BIG_ARG and too big for latest peak.
      * 2) Query buffer is > BIG_ARG and client is idle.
-     * 当满足其中一个条件时 会回收之前开辟的内存空间
+     * 代表buf占用内存过大
      * */
     if (querybuf_size > PROTO_MBULK_BIG_ARG &&
          ((querybuf_size/(c->querybuf_peak+1)) > 2 ||
@@ -1632,7 +1632,7 @@ int clientsCronResizeQueryBuffer(client *c) {
      * also needs resizing from time to time, otherwise after a very large
      * transfer (a huge value or a big MIGRATE operation) it will keep using
      * a lot of memory.
-     * 如果该client是leader节点对应的client 它的内存回收条件会简单点
+     * 这里也是进行内存回收 不细看
      * */
     if (c->flags & CLIENT_MASTER) {
         /* There are two conditions to resize the pending query buffer:
@@ -4426,7 +4426,7 @@ int prepareForShutdown(int flags) {
     moduleFireServerEvent(REDISMODULE_EVENT_SHUTDOWN,0,NULL);
 
     /* Remove the pid file if possible and needed.
-     * 当运行在守护进程 或者保存了进程文件时 尝试清理进程文件
+     * 删除进程文件
      * */
     if (server.daemonize || server.pidfile) {
         serverLog(LL_NOTICE,"Removing the pid file.");
@@ -4435,7 +4435,7 @@ int prepareForShutdown(int flags) {
 
     /* Best effort flush of slave output buffers, so that we hopefully
      * send them pending writes.
-     * 将此时还留存在缓冲区中的数据尽可能写出
+     * 将slave的数据尽可能写出
      * */
     flushSlavesOutputBuffers();
 

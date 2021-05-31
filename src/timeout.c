@@ -65,7 +65,6 @@ int clientsCronHandleTimeout(client *c, mstime_t now_ms) {
     // 将当前时间转换成秒
     time_t now = now_ms/1000;
 
-    // server设置了每个client的最大空闲时间 应该是等待这么长时间 没有下一次通信就断开连接
     if (server.maxidletime &&
         /* This handles the idle clients connection timeout if set.
          * 这几种client是不会断开连接的 (redis集群内各个节点保持长连接)
@@ -80,11 +79,12 @@ int clientsCronHandleTimeout(client *c, mstime_t now_ms) {
         serverLog(LL_VERBOSE,"Closing idle client");
         freeClient(c);
         return 1;
-        // redisServer 没有设置client的超时时间 此时client处于阻塞状态  检查此时是否满足解除阻塞状态的条件
+        // 如果某个client此时阻塞与某个key  检查它的key是否移动到了其他节点 是的话解除阻塞状态
     } else if (c->flags & CLIENT_BLOCKED) {
         /* Cluster: handle unblock & redirect of clients blocked
          * into keys no longer served by this server. */
         if (server.cluster_enabled) {
+            // client原本由于某个key被阻塞  此时key已经转移到了集群的其他节点 所以可以解除阻塞状态了
             if (clusterRedirectBlockedClientIfNeeded(c))
                 // 解除client的阻塞状态
                 unblockClient(c);

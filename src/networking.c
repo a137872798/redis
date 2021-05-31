@@ -207,8 +207,8 @@ void clientInstallWriteHandler(client *c) {
      * writes at this stage.
      * */
     if (!(c->flags & CLIENT_PENDING_WRITE) &&
-        (c->replstate == REPL_STATE_NONE ||   // ？？？
-         (c->replstate == SLAVE_STATE_ONLINE && !c->repl_put_online_on_ack))) // 还未收到该slave节点的ack信息前 无法写入新数据 需要标记成pending_write
+        (c->replstate == REPL_STATE_NONE ||   // 如果本节点不是副本节点，没有涉及到数据同步逻辑
+         (c->replstate == SLAVE_STATE_ONLINE && !c->repl_put_online_on_ack))) // repl_put_online_on_ack 代表该slave节点完成了数据同步 在此前 无法写入新数据 需要标记成pending_write
     {
         /* Here instead of installing the write handler, we just flag the
          * client and put it into a list of clients that have something
@@ -243,7 +243,7 @@ void clientInstallWriteHandler(client *c) {
  * Typically gets called every time a reply is built, before adding more
  * data to the clients output buffers. If the function returns C_ERR no
  * data should be appended to the output buffers.
- * 判断此时client是否准备好写入
+ * 判断此时能否将缓冲区内的数据发送给client
  * */
 int prepareClientToWrite(client *c) {
     /* If it's the Lua client we always return ok without installing any
@@ -277,9 +277,7 @@ int prepareClientToWrite(client *c) {
      * If CLIENT_PENDING_READ is set, we're in an IO thread and should
      * not install a write handler. Instead, it will be done by
      * handleClientsWithPendingReadsUsingThreads() upon return.
-     * 1.此时没有待处理的数据 代表底层socket缓冲区还没有写满
-     * 2.没有设置pending_read代表不需要通过专门的io线程来处理
-     * 满足这2个条件后就可以判断是否标记成 pending_write
+     *
      */
     if (!clientHasPendingReplies(c) && !(c->flags & CLIENT_PENDING_READ))
             clientInstallWriteHandler(c);
@@ -295,9 +293,7 @@ int prepareClientToWrite(client *c) {
 /* Attempts to add the reply to the static buffer in the client struct.
  * Returns C_ERR if the buffer is full, or the reply list is not empty,
  * in which case the reply must be added to the reply list.
- * 将数据写入到client的写缓冲区中
- * 注意写缓冲区分为2个部分 第一个是静态buf 应该是不会调整大小的
- * 另一部分是reply链表 会根据需要自动扩容 当静态buf空间不足时数据就会被写入到reply链表中
+ * 将数据写入到client的静态数组buf中
  * */
 int _addReplyToBuffer(client *c, const char *s, size_t len) {
     size_t available = sizeof(c->buf)-c->bufpos;
@@ -305,7 +301,9 @@ int _addReplyToBuffer(client *c, const char *s, size_t len) {
     if (c->flags & CLIENT_CLOSE_AFTER_REPLY) return C_OK;
 
     /* If there already are entries in the reply list, we cannot
-     * add anything more to the static buffer. */
+     * add anything more to the static buffer.
+     * 如果此时reply内部已经有数据了 返回异常信息
+     * */
     if (listLength(c->reply) > 0) return C_ERR;
 
     /* Check that the buffer has enough space available for this string. */
@@ -1469,8 +1467,9 @@ int writeToClient(client *c, int handler_installed) {
     size_t objlen;
     clientReplyBlock *o;
 
+    // clientHasPendingReplies 为true 只要buf或者reply中任意一个有数据即可
     while(clientHasPendingReplies(c)) {
-        // 此时buf中有数据 将buf中的数据通过conn发送
+        // 将buf中的数据写入
         if (c->bufpos > 0) {
             nwritten = connWrite(c->conn,c->buf+c->sentlen,c->bufpos-c->sentlen);
             if (nwritten <= 0) break;
@@ -1525,6 +1524,7 @@ int writeToClient(client *c, int handler_installed) {
          * a slave or a monitor (otherwise, on high-speed traffic, the
          * replication/output buffer will grow indefinitely)
          * 如果本次发送目标是slave是没有限流的 其他类型的client 每次返回的数据有限 应该是为了节省网络带宽
+         * 如果内存比较紧张的情况下 也会尽可能多的发送数据
          * */
         if (totwritten > NET_MAX_WRITES_PER_EVENT &&
             (server.maxmemory == 0 ||
@@ -3151,7 +3151,7 @@ void asyncCloseClientOnOutputBufferLimitReached(client *c) {
  * output buffers without returning control to the event loop.
  * This is also called by SHUTDOWN for a best-effort attempt to send
  * slaves the latest writes.
- * 将slave节点写缓冲区的数据尽可能的发出
+ * 将准备发送到slave节点的数据尽可能的发出，
  * */
 void flushSlavesOutputBuffers(void) {
     listIter li;
@@ -3160,7 +3160,11 @@ void flushSlavesOutputBuffers(void) {
     listRewind(server.slaves,&li);
     while((ln = listNext(&li))) {
         client *slave = listNodeValue(ln);
-        // 如果conn上绑定了writeHandler 或者打上了pendingWrite标记
+
+        // TODO 以下这些条件代表什么
+
+        // 首先只有注册了writeHandler的才代表还有数据未发出
+        // 在副本场景下 如果上一个数据还未收到ack 代表不确定数据是否写入slave成功 就不会发送新的数据 这种也会给client打上一个pending_write标记
         int can_receive_writes = connHasWriteHandler(slave->conn) ||
                                  (slave->flags & CLIENT_PENDING_WRITE);
 
@@ -3177,7 +3181,6 @@ void flushSlavesOutputBuffers(void) {
          *    flag for this flag.
          *
          * 3. Obviously if the slave is not ONLINE.
-         * 此时该slave处于在线状态并且还有未发出的数据 并且此时不在等待ack
          */
         if (slave->replstate == SLAVE_STATE_ONLINE &&
             can_receive_writes &&

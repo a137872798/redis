@@ -168,15 +168,15 @@ void queueClientForReprocessing(client *c) {
  * 某个client从阻塞状态解除
  * */
 void unblockClient(client *c) {
-    // 此时处于有关单节点的阻塞状态中
+    // 如果当前client是由于等待某些key导致的block 此时已经可以解除阻塞了 可能是key准备完成，也可能是key移动到了别的节点
     if (c->btype == BLOCKED_LIST ||
         c->btype == BLOCKED_ZSET ||
         c->btype == BLOCKED_STREAM) {
         unblockClientWaitingData(c);
-        // 集群相关的阻塞状态
+        // TODO
     } else if (c->btype == BLOCKED_WAIT) {
         unblockClientWaitingReplicas(c);
-        // module相关的阻塞状态???
+        // TODO
     } else if (c->btype == BLOCKED_MODULE) {
         if (moduleClientIsBlockedOnKeys(c)) unblockClientWaitingData(c);
         unblockClientFromModule(c);
@@ -191,7 +191,7 @@ void unblockClient(client *c) {
     c->btype = BLOCKED_NONE;
     // 将client 从timeout容器中移除
     removeClientFromTimeoutTable(c);
-    // 因为此时阻塞状态已经解除了  可以将querybuf中的数据转换成command的参数了
+    // 此时阻塞状态已经解除了 可以继续处理client.qb中囤积的数据了
     queueClientForReprocessing(c);
 }
 
@@ -672,7 +672,7 @@ void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeo
 
 /* Unblock a client that's waiting in a blocking operation such as BLPOP.
  * You should never call this function directly, but unblockClient() instead.
- * 这里认为阻塞client的所有key都已经准备完毕了
+ * 如果当前client是由于等待某些key导致的block 此时已经可以解除阻塞了 可能是key准备完成，也可能是key移动到了别的节点
  * */
 void unblockClientWaitingData(client *c) {
     dictEntry *de;
@@ -687,7 +687,6 @@ void unblockClientWaitingData(client *c) {
     while((de = dictNext(di)) != NULL) {
         robj *key = dictGetKey(de);
 
-        // 存储了该client有关于该key阻塞状态的一些信息  bki->listnode 存储的是client么???
         bkinfo *bki = dictGetVal(de);
 
         /* Remove this client from the list of clients waiting for this key.
@@ -705,7 +704,7 @@ void unblockClientWaitingData(client *c) {
     dictReleaseIterator(di);
 
     /* Cleanup the client structure
-     * TODO bpop.keys结构是什么时候生成的???
+     * 做一些清理工作
      * */
     dictEmpty(c->bpop.keys,NULL);
     if (c->bpop.target) {
