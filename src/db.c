@@ -210,6 +210,7 @@ void dbAdd(redisDb *db, robj *key, robj *val) {
 int dbAddRDBLoad(redisDb *db, sds key, robj *val) {
     int retval = dictAdd(db->dict, key, val);
     if (retval != DICT_OK) return 0;
+    // 如果此时本节点在集群模式下 需要将key设置到路由表中
     if (server.cluster_enabled) slotToKeyAdd(key);
     return 1;
 }
