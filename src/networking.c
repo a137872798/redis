@@ -316,7 +316,7 @@ int _addReplyToBuffer(client *c, const char *s, size_t len) {
 
 /* Adds the reply to the reply linked list.
  * Note: some edits to this function need to be relayed to AddReplyFromClient.
- * 将s写入到reply链表中 只有当静态buf没有空间时 才会将数据写入到reply链表中
+ * 将s写入到reply链表中
  * */
 void _addReplyProtoToList(client *c, const char *s, size_t len) {
     if (c->flags & CLIENT_CLOSE_AFTER_REPLY) return;
@@ -370,7 +370,6 @@ void addReply(client *c, robj *obj) {
     // 检测此时是否可以将数据写入到client中  如果该client是一个fakeClient 就不需要写入数据
     if (prepareClientToWrite(c) != C_OK) return;
 
-    // sdsEncodedObject 代表redisObject 已经完成了序列化
     if (sdsEncodedObject(obj)) {
         // 将数据写入到 buf中  返回error代表静态buf空间已满 尝试将数据写入到reply链表中
         if (_addReplyToBuffer(c,obj->ptr,sdslen(obj->ptr)) != C_OK)

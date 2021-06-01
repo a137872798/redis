@@ -209,7 +209,7 @@ void feedReplicationBacklog(void *ptr, size_t len) {
         memcpy(server.repl_backlog+server.repl_backlog_idx,p,thislen);
         // 移动指针
         server.repl_backlog_idx += thislen;
-        // 将idx重置 此时会覆盖旧数据    TODO 为什么积压数据要使用轮式结构来存储呢 并且怎么确保这部分数据已经被使用了,可以安全覆盖
+        // 将idx重置 此时会覆盖旧数据
         if (server.repl_backlog_idx == server.repl_backlog_size)
             server.repl_backlog_idx = 0;
         len -= thislen;
@@ -272,7 +272,7 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
 
     /* If there aren't slaves, and there is no backlog buffer to populate,
      * we can return ASAP.
-     * 如果本次slaves 列表为空 且没有积压的数据 不需要发送数据
+     * TODO 如果slaves为空 repl_backlog不为空 意味着什么
      * */
     if (server.repl_backlog == NULL && listLength(slaves) == 0) return;
 
@@ -319,6 +319,7 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
      * 将本次要同步的数据在repl_backlog中额外留存了一份 是便于之后发起重试么???
      * */
     if (server.repl_backlog) {
+        // 存储临时数据的容器
         char aux[LONG_STR_SIZE+3];
 
         /* Add the multi bulk reply length. */
@@ -328,7 +329,7 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
         aux[len+1] = '\r';
         aux[len+2] = '\n';
 
-        // 将剩余的数据写入到backlog中
+        // 先往backlog中写入一个前缀信息
         feedReplicationBacklog(aux,len+3);
 
         for (j = 0; j < argc; j++) {
@@ -355,7 +356,7 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
         client *slave = ln->value;
 
         /* Don't feed slaves that are still waiting for BGSAVE to start.
-         * 如果该slave正处于通过后台进程存储数据的阶段 忽略本次复写请求
+         * 如果该slave正处于通过后台进程存储数据的阶段 忽略本次复写请求  TODO 那么之后还会传输这部分数据么 还有每个slave都要定期将最新的状态上报给master么 存在时间差怎么处理
          * */
         if (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_START) continue;
 
@@ -369,7 +370,9 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
         addReplyArrayLen(slave,argc);
 
         /* Finally any additional argument that was not stored inside the
-         * static buffer if any (from j to argc). */
+         * static buffer if any (from j to argc).
+         * 这里都只是将数据写入到缓冲区 并没有发送数据
+         * */
         for (j = 0; j < argc; j++)
             addReplyBulk(slave,argv[j]);
     }

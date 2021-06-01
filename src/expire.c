@@ -63,14 +63,14 @@ int activeExpireCycleTryExpire(redisDb *db, dictEntry *de, long long now) {
         // 将key转换成redisObject
         robj *keyobj = createStringObject(key,sdslen(key));
 
-        // 将本次过期命令同步到aof和其他副本上
+        // 在aof中追加一个command 并且将数据写入到各个slave的buf中 TODO 什么时候真正将数据发送到slave
         propagateExpire(db,keyobj,server.lazyfree_lazy_expire);
         // 如果是惰性处理方式 也就是执行异步删除
         if (server.lazyfree_lazy_expire)
             dbAsyncDelete(db,keyobj);
         else
             dbSyncDelete(db,keyobj);
-        // 发起一个事件
+        // 触发监听器以及通知订阅者
         notifyKeyspaceEvent(NOTIFY_EXPIRED,
             "expired",keyobj,db->id);
         // 某些client在执行multi命令时会检测key的变化 此时就要进行通知
@@ -172,7 +172,7 @@ void activeExpireCycle(int type) {
      * */
     if (clientsArePaused()) return;
 
-    // 如果本次在快速模式下执行
+    // 如果本次在快速模式下执行 就会判断时间间隔是否太短 ，太短就不会进行抽样，因为这样能删除的key一般来说会比较少，效率不高
     if (type == ACTIVE_EXPIRE_CYCLE_FAST) {
         /* Don't start a fast cycle if the previous cycle did not exit
          * for time limit, unless the percentage of estimated stale keys is
@@ -316,7 +316,7 @@ void activeExpireCycle(int type) {
 
                         // 计算该key的超时时间
                         ttl = dictGetSignedIntegerVal(e)-now;
-                        // 比较entry.ttl与now 可以知道某个key此时是否已经过期 并发起通知事件 以及同步到aof和slave节点
+                        // 比较entry.ttl与now 可以知道某个key此时是否已经过期 并发起通知事件以及将delCommand写入到aof中，将同步数据写入到每个slave相关的缓冲区中
                         if (activeExpireCycleTryExpire(db,e,now)) expired++;
 
                         // 当前未超时
@@ -429,16 +429,16 @@ void activeExpireCycle(int type) {
  * with a DB id > 63 are not expired, but a trivial fix is to set the bitmap
  * to the max 64 bit unsigned value when we know there is a key with a DB
  * ID greater than 63, and check all the configured DBs in such a case.
- * 这里存储了slave下所有过期的key 推测是通过接收master的过期命令来确认哪些key需要被删除
+ * 这里存储了slave下所有过期的key
  * */
 dict *slaveKeysWithExpire = NULL;
 
 /* Check the set of keys created by the master with an expire set in order to
  * check if they should be evicted.
- * 针对当前节点是slave的情况下 删除所有过期的节点
+ * slave节点要删除的key是从外部设置进来的 而不是自己去查找
  * */
 void expireSlaveKeys(void) {
-    // 当存储过期key的容器为空时直接返回
+    // 存储过期key的容器为空 代表此时数据都存在 不需要处理
     if (slaveKeysWithExpire == NULL ||
         dictSize(slaveKeysWithExpire) == 0) return;
 
@@ -489,7 +489,7 @@ void expireSlaveKeys(void) {
         /* Set the new bitmap as value of the key, in the dictionary
          * of keys with an expire set directly in the writable slave. Otherwise
          * if the bitmap is zero, we no longer need to keep track of it.
-         * 代表该key在某些db 下又变的有效了 不应该被删除
+         * 代表该key在某些db下又变的有效了 不应该被删除
          * 更新entry下需要检测的dbid
          * */
         if (new_dbids)
@@ -512,7 +512,9 @@ void expireSlaveKeys(void) {
 }
 
 /* Track keys that received an EXPIRE or similar command in the context
- * of a writable slave. */
+ * of a writable slave.
+ * 记录slave下的哪个key已经过期
+ * */
 void rememberSlaveKeyWithExpire(redisDb *db, robj *key) {
     if (slaveKeysWithExpire == NULL) {
         static dictType dt = {
@@ -527,16 +529,20 @@ void rememberSlaveKeyWithExpire(redisDb *db, robj *key) {
     }
     if (db->id > 63) return;
 
+    // 将参数设置到dict中
     dictEntry *de = dictAddOrFind(slaveKeysWithExpire,key->ptr);
     /* If the entry was just created, set it to a copy of the SDS string
      * representing the key: we don't want to need to take those keys
      * in sync with the main DB. The keys will be removed by expireSlaveKeys()
-     * as it scans to find keys to remove. */
+     * as it scans to find keys to remove.
+     * 代表是首次创建 将value初始化为0
+     * */
     if (de->key == key->ptr) {
         de->key = sdsdup(key->ptr);
         dictSetUnsignedIntegerVal(de,0);
     }
 
+    // value记录的是该key在哪些db上都过期了
     uint64_t dbids = dictGetUnsignedIntegerVal(de);
     dbids |= (uint64_t)1 << db->id;
     dictSetUnsignedIntegerVal(de,dbids);

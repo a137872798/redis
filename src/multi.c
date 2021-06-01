@@ -383,22 +383,28 @@ void unwatchAllKeys(client *c) {
 }
 
 /* "Touch" a key, so that if this key is being WATCHed by some client the
- * next EXEC will fail. */
+ * next EXEC will fail.
+ * 代表某个db下的key发生了变化
+ * */
 void touchWatchedKey(redisDb *db, robj *key) {
     list *clients;
     listIter li;
     listNode *ln;
 
+    // 如果该key此时并没有被某个client监控 不需要处理
     if (dictSize(db->watched_keys) == 0) return;
     clients = dictFetchValue(db->watched_keys, key);
     if (!clients) return;
 
     /* Mark all the clients watching this key as CLIENT_DIRTY_CAS */
-    /* Check if we are already watching for this key */
+    /* Check if we are already watching for this key
+     * 这里是一组监控该key的client
+     * */
     listRewind(clients,&li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
 
+        // 追加一个dirty标记
         c->flags |= CLIENT_DIRTY_CAS;
     }
 }

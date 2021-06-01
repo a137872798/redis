@@ -124,6 +124,7 @@ int dbAsyncDelete(redisDb *db, robj *key) {
      * */
     if (de) {
         dictFreeUnlinkedEntry(db->dict,de);
+        // 如果本节点在集群模式下启动 将key从路由表删除
         if (server.cluster_enabled) slotToKeyDel(key->ptr);
         return 1;
     } else {

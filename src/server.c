@@ -1824,7 +1824,7 @@ void databasesCron(void) {
     if (server.active_expire_enabled) {
         // 根据当前节点是否是master节点 走不同的逻辑
         if (iAmMaster()) {
-            // 本次传入的过期检测模式是慢检测
+            // 本次传入的过期检测模式是慢检测  如果是快检测会判断时间间隔是否太短，太短就会直接结束检测流程
             activeExpireCycle(ACTIVE_EXPIRE_CYCLE_SLOW);
         } else {
             // 副本删除过期key

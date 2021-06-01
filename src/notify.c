@@ -95,7 +95,12 @@ sds keyspaceEventsFlagsToString(int flags) {
  *
  * 'event' is a C string representing the event name.
  * 'key' is a Redis object representing the key name.
- * 'dbid' is the database ID where the key lives.  */
+ * 'dbid' is the database ID where the key lives.
+ * @param type 描述事件类型
+ * @param event 事件名
+ * @param 针对的是哪个key对于的redisObject
+ * @param 需要db+key才能定位到唯一对象
+ * */
 void notifyKeyspaceEvent(int type, char *event, robj *key, int dbid) {
     sds chan;
     robj *chanobj, *eventobj;
@@ -105,15 +110,21 @@ void notifyKeyspaceEvent(int type, char *event, robj *key, int dbid) {
     /* If any modules are interested in events, notify the module system now.
      * This bypasses the notifications configuration, but the module engine
      * will only call event subscribers if the event type matches the types
-     * they are interested in. */
+     * they are interested in.
+     * 通知module的监听器
+     * */
      moduleNotifyKeyspaceEvent(type, event, key, dbid);
 
-    /* If notifications for this class of events are off, return ASAP. */
+    /* If notifications for this class of events are off, return ASAP.
+     * 判断本节点是否支持通知这种类型的事件
+     * */
     if (!(server.notify_keyspace_events & type)) return;
 
     eventobj = createStringObject(event,strlen(event));
 
-    /* __keyspace@<db>__:<key> <event> notifications. */
+    /* __keyspace@<db>__:<key> <event> notifications.
+     * 这里利用的是订阅发布模式 就是将消息转发到所有订阅了这个事件的client
+     * */
     if (server.notify_keyspace_events & NOTIFY_KEYSPACE) {
         chan = sdsnewlen("__keyspace@",11);
         len = ll2string(buf,sizeof(buf),dbid);

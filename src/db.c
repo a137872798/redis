@@ -578,7 +578,9 @@ long long dbTotalServerKeyCount() {
  *----------------------------------------------------------------------------*/
 
 /* Note that the 'c' argument may be NULL if the key was modified out of
- * a context of a client. */
+ * a context of a client.
+ * 当某个db下的某个redisObject发生了变化 需要通知监控这个key的所有client
+ * */
 void signalModifiedKey(client *c, redisDb *db, robj *key) {
     touchWatchedKey(db,key);
     trackingInvalidateKey(c,key);
@@ -1362,7 +1364,7 @@ void propagateExpire(redisDb *db, robj *key, int lazy) {
     // 如果此时aof处于可用状态 将本次command信息记录到aof文件中
     if (server.aof_state != AOF_OFF)
         feedAppendOnlyFile(server.delCommand,db->id,argv,2);
-    // 将本次命令传播到指定的slave节点上
+    // 将本次命令传播到本节点下的所有副本(只是将数据写入到缓冲区 还没有真正写入socket)
     replicationFeedSlaves(server.slaves,db->id,argv,2);
 
     decrRefCount(argv[0]);
@@ -1826,7 +1828,9 @@ int xreadGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult 
 /* Slot to Key API. This is used by Redis Cluster in order to obtain in
  * a fast way a key that belongs to a specified hash slot. This is useful
  * while rehashing the cluster and in other conditions when we need to
- * understand if we have keys for a given hash slot. */
+ * understand if we have keys for a given hash slot.
+ * 将某个key从路由表中删除
+ * */
 void slotToKeyUpdateKey(sds key, int add) {
     size_t keylen = sdslen(key);
     unsigned int hashslot = keyHashSlot(key,keylen);
