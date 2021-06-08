@@ -1295,6 +1295,7 @@ struct redisServer {
     list *aof_rewrite_buf_blocks;   /* Hold changes during an AOF rewrite. */
     sds aof_buf;      /* AOF buffer, written before entering the event loop */
     int aof_fd;       /* File descriptor of currently selected AOF file */
+    // 记录上一条aof数据是针对哪个db的 通过判断本次要执行的command针对的db 与之前的db是否一致判断是否要执行切换db的命令
     int aof_selected_db; /* Currently selected DB in AOF */
     // 也是一个标记代表在某个时刻认为aof刷盘需要延迟 在serverCron中一旦发现这个标记就会执行刷盘任务
     time_t aof_flush_postponed_start; /* UNIX time of postponed AOF flush */

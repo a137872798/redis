@@ -75,7 +75,9 @@ void aofRewriteBufferReset(void) {
     listSetFreeMethod(server.aof_rewrite_buf_blocks,zfree);
 }
 
-/* Return the current size of the AOF rewrite buffer. */
+/* Return the current size of the AOF rewrite buffer.
+ * 计算此时存储在rewrite缓冲区的数据总大小
+ * */
 unsigned long aofRewriteBufferSize(void) {
     listNode *ln;
     listIter li;
@@ -91,7 +93,9 @@ unsigned long aofRewriteBufferSize(void) {
 
 /* Event handler used to send data to the child process doing the AOF
  * rewrite. We send pieces of our AOF differences buffer so that the final
- * write when the child finishes the rewrite will be small. */
+ * write when the child finishes the rewrite will be small.
+ * 这个函数的任务就是将父进程的数据通过fd对应的pipe写入到子进程的pipe  需要传输的数据就存放在aof_rewrite_buf_blocks中
+ * */
 void aofChildWriteDiffData(aeEventLoop *el, int fd, void *privdata, int mask) {
     listNode *ln;
     aofrwblock *block;
@@ -102,6 +106,7 @@ void aofChildWriteDiffData(aeEventLoop *el, int fd, void *privdata, int mask) {
     UNUSED(mask);
 
     while(1) {
+        // 不断读取父进程中需要传输的数据
         ln = listFirst(server.aof_rewrite_buf_blocks);
         block = ln ? ln->value : NULL;
         if (server.aof_stop_sending_diff || !block) {
@@ -121,14 +126,18 @@ void aofChildWriteDiffData(aeEventLoop *el, int fd, void *privdata, int mask) {
     }
 }
 
-/* Append data to the AOF rewrite buffer, allocating new blocks if needed. */
+/* Append data to the AOF rewrite buffer, allocating new blocks if needed.
+ * 当此时aof子进程正在运行， 同时又执行了新的command(会产生新的aof数据) 线程安全怎么做的??? 那么会在此时执行该方法 将数据也写入一份到aof_rewrite_buf_blocks
+ * */
 void aofRewriteBufferAppend(unsigned char *s, unsigned long len) {
     listNode *ln = listLast(server.aof_rewrite_buf_blocks);
     aofrwblock *block = ln ? ln->value : NULL;
 
     while(len) {
         /* If we already got at least an allocated block, try appending
-         * at least some piece into it. */
+         * at least some piece into it.
+         * 已经存在block 将本次数据追加到该block下
+         * */
         if (block) {
             unsigned long thislen = (block->free < len) ? block->free : len;
             if (thislen) {  /* The current block is not already full. */
@@ -140,6 +149,7 @@ void aofRewriteBufferAppend(unsigned char *s, unsigned long len) {
             }
         }
 
+        // 还有剩余的数据 生成一个新的blocks并追加到链表上
         if (len) { /* First block to allocate, or need another block. */
             int numblocks;
 
@@ -161,7 +171,10 @@ void aofRewriteBufferAppend(unsigned char *s, unsigned long len) {
     }
 
     /* Install a file event to send data to the rewrite child if there is
-     * not one already. */
+     * not one already.
+     * 这里使用pipe的特性完成父子进程间的数据传输
+     * 如果发现还没有为pipe注册监听的事件，进行监听 以及设置回调函数
+     * */
     if (aeGetFileEvents(server.el,server.aof_pipe_write_data_to_child) == 0) {
         aeCreateFileEvent(server.el, server.aof_pipe_write_data_to_child,
             AE_WRITABLE, aofChildWriteDiffData, NULL);
@@ -639,11 +652,12 @@ sds catAppendOnlyExpireAtCommand(sds buf, struct redisCommand *cmd, robj *key, r
 }
 
 /**
- * 将某条command信息写入到aof中
- * @param cmd
- * @param dictid
- * @param argv
- * @param argc
+ * 作为整个aof写入的入口  首先要清楚触发该方法的时机是什么 redis在执行一些command时，如果该命令应当被追加到aof中且此时aof处于开启状态
+ * 就会自动的将数据追加到aof中
+ * @param cmd 本次执行的command
+ * @param dictid 本次操作的redisObject所在的db
+ * @param argv 执行本次command的所有参数
+ * @param argc 参数数量
  */
 void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int argc) {
     sds buf = sdsempty();
@@ -651,7 +665,7 @@ void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int a
 
     /* The DB this command was targeting is not the same as the last command
      * we appended. To issue a SELECT command is needed.
-     * 如果指定的db与此时选择的db不同 先生成一条切换db的command
+     * 如果指定的db与此时选择的db不同 先生成一条selectCommand
      * */
     if (dictid != server.aof_selected_db) {
         char seldb[64];
@@ -662,7 +676,7 @@ void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int a
         server.aof_selected_db = dictid;
     }
 
-    // 如果本条command是一个指定超时时间的指令 将数据写入到buf中
+    // 这里根据command的类型生成不同的数据体
     if (cmd->proc == expireCommand || cmd->proc == pexpireCommand ||
         cmd->proc == expireatCommand) {
         /* Translate EXPIRE/PEXPIRE/EXPIREAT into PEXPIREAT */
@@ -704,10 +718,12 @@ void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int a
         buf = catAppendOnlyGenericCommand(buf,argc,argv);
     }
 
+    // 此时已经将格式化数据写入到了buf中
+
     /* Append to the AOF buffer. This will be flushed on disk just before
      * of re-entering the event loop, so before the client will get a
      * positive reply about the operation performed.
-     * 将数据写入到aof_buf中
+     * 将本次数据追加到 aof_buf中 最终写入aof_file是通过这个aof_buf的
      * */
     if (server.aof_state == AOF_ON)
         server.aof_buf = sdscatlen(server.aof_buf,buf,sdslen(buf));
@@ -716,7 +732,7 @@ void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int a
      * accumulate the differences between the child DB and the current one
      * in a buffer, so that when the child process will do its work we
      * can append the differences to the new append only file.
-     * 如果此时存在aof子进程 将数据也写入到 rewrite_buf中
+     * 如果此时有正在处理aof的子进程 将数据也写入到rewriteBuf中
      * */
     if (server.aof_child_pid != -1)
         aofRewriteBufferAppend((unsigned char*)buf,sdslen(buf));
