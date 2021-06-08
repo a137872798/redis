@@ -1845,7 +1845,9 @@ void databasesCron(void) {
     if (!hasActiveChildProcess()) {
         /* We use global counters so if we stop the computation at a given
          * DB we'll be able to start from the successive in the next
-         * cron loop iteration. */
+         * cron loop iteration.
+         * 全局变量 这样每次循环的起始db会不一样 均匀处理每个db
+         * */
         static unsigned int resize_db = 0;
         static unsigned int rehash_db = 0;
 
@@ -1866,7 +1868,7 @@ void databasesCron(void) {
         // 设置了需要rehash的标识
         if (server.activerehashing) {
             for (j = 0; j < dbs_per_call; j++) {
-                // 每轮只要能影响到一个db就可以了 剩余的数据会在下个时间周期内搬运
+                // 每轮只要能影响到一个db就可以了 剩余的数据会在下个时间周期内搬运  因为这个会相对耗时
                 int work_done = incrementallyRehash(rehash_db);
                 if (work_done) {
                     /* If the function did some work, stop here, we'll do
@@ -1926,7 +1928,7 @@ void checkChildrenDone(void) {
      * as long as we didn't finish to drain the pipe, since then we're at risk
      * of starting a new fork and a new pipe before we're done with the previous
      * one.
-     * 代表此时尚未完成任务  pipe_conns代表此时需要同步数据的slave连接
+     * 如果此时的子进程是向slave节点传输数据  那么可以不等待
      * */
     if (server.rdb_child_pid != -1 && server.rdb_pipe_conns)
         return;
@@ -2159,24 +2161,24 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* Start a scheduled AOF rewrite if this was requested by the user while
      * a BGSAVE was in progress.
-     * 当尝试为 aof/rdb开启子进程时 如果发现此时有其他子进程 就会打上一个延时的标记 这里是在检查标记
+     * 当尝试为 aof/rdb开启子进程时 如果发现此时有其他子进程 就会打上一个延时的标记 这里是在检查标记 并执行rewrite任务
      * */
     if (!hasActiveChildProcess() &&
         server.aof_rewrite_scheduled)
     {
-        // 开启子进程 执行写入任务
+        // TODO 开启子进程 执行写入任务
         rewriteAppendOnlyFileBackground();
     }
 
     /* Check if a background saving or AOF rewrite in progress terminated. */
     if (hasActiveChildProcess() || ldbPendingChildren())
     {
-        // 这里会阻塞主进程 直到子进程完成了自己的任务
+        // 检测子进程是否完成了任务 非阻塞
         checkChildrenDone();
     } else {
         /* If there is not a background saving/rewrite in progress check if
          * we have to save/rewrite now.
-         * 遍历redisServer设置的保存条件 比如多少时间内有多少数据发生了变化 就会触发rdb保存
+         * 此时没有正在执行的后台任务，判断是否满足saveparam条件 并触发存储rdb逻辑
          * */
         for (j = 0; j < server.saveparamslen; j++) {
             // 遍历所有保存条件
@@ -2206,16 +2208,15 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         }
 
         /* Trigger an AOF rewrite if needed.
-         * 这里的aof重做 好像就是生成aof文件
-         * 看来redis并没有追求强一致性 每次command并没有立即刷盘  会等待aof缓冲区中存储足够多的数据后 才进行刷盘
+         * 判断是否满足aof重做条件  与rdb任务冲突 (一次只能开启一个子进程执行任务)
          * */
         if (server.aof_state == AOF_ON &&
             !hasActiveChildProcess() &&
-            // 这里要求写入了aof增长比率
             server.aof_rewrite_perc &&
+            // 如果aof文件内数据很少 rewrite(瘦身)的效果就会比较差 所以有一个最小的限制值
             server.aof_current_size > server.aof_rewrite_min_size)
         {
-            // 判断是否设置了重做的基本长度
+            // 判断是否满足条件
             long long base = server.aof_rewrite_base_size ?
                 server.aof_rewrite_base_size : 1;
             long long growth = (server.aof_current_size*100/base) - 100;
@@ -2228,14 +2229,14 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
     /* Just for the sake of defensive programming, to avoid forgeting to
      * call this function when need.
-     * 因为此时开启了子进程 调整dict的resize
+     * 根据是否存在子进程，更新dict.resize标记
      * */
     updateDictResizePolicy();
 
 
     /* AOF postponed flush: Try at every cron cycle if the slow fsync
      * completed.
-     * 代表之前某次写入aof不是强制刷盘   这里尝试性刷盘 主要就是检测是否长时间未执行刷盘操作 是的话就会执行刷盘
+     * 代表aof刷盘被延迟了 现在开始执行刷盘任务
      * */
     if (server.aof_flush_postponed_start) flushAppendOnlyFile(0);
 
@@ -2249,14 +2250,13 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
     /* Clear the paused clients flag if needed.
-     * 检测某些client是否可以从阻塞状态中解除 惰性检测 同时这些client会被加入到 unblocked_clients 链表中
+     * 检测某些client是否可以从暂停状态中解除 惰性检测 同时这些client会被加入到 unblocked_clients 链表中
      * */
     clientsArePaused(); /* Don't check return value, just use the side effect.*/
 
-    // TODO 先忽略有关副本和集群的定时任务
-
     /* Replication cron function -- used to reconnect to master,
-     * detect transfer failures, start background RDB transfers and so forth. */
+     * detect transfer failures, start background RDB transfers and so forth.
+     * */
     run_with_period(1000) replicationCron();
 
     /* Run the Redis Cluster cron. */
@@ -2265,13 +2265,13 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
     /* Run the Sentinel timer if we are in sentinel mode.
-     * TODO 忽略哨兵模式
      * */
     if (server.sentinel_mode) sentinelTimer();
 
-    /* Cleanup expired MIGRATE cached sockets. */
+    /* Cleanup expired MIGRATE cached sockets.
+     * 检测某些缓存的临时性socket是否长时间未使用  进行关闭
+     * */
     run_with_period(1000) {
-        // 关闭一些已经超时的socket
         migrateCloseTimedoutSockets();
     }
 
@@ -2296,7 +2296,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * Note: this code must be after the replicationCron() call above so
      * make sure when refactoring this file to keep this order. This is useful
      * because we want to give priority to RDB savings for replication.
-     * 这里判断是否需要启动子进程处理rdb
+     * 原本打算执行的某个rdb任务在之前发现已经存在子进程了 设置标记后等待合适的时机 重新生成rdb
      * */
     if (!hasActiveChildProcess() &&
         server.rdb_bgsave_scheduled &&
@@ -2355,11 +2355,11 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * */
     if (ProcessingEventsWhileBlocked) {
         uint64_t processed = 0;
-        // 使用io线程组 尽可能多的 处理此时client囤积的任务 (主要指querybuf的数据读取,解析,执行command)
+        // 使用io线程组，尽可能多的处理此时client囤积的任务 (主要指querybuf的数据读取,解析,执行command)
         processed += handleClientsWithPendingReadsUsingThreads();
         // 这个好像是ssl相关的 先忽略
         processed += tlsProcessPendingData();
-        // 这里是处理囤积的write任务
+        // 执行所有pending_write任务
         processed += handleClientsWithPendingWrites();
         // 在这里统一关闭所有待关闭client
         processed += freeClientsInAsyncFreeQueue();
@@ -2395,20 +2395,21 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
 
     /* Run a fast expire cycle (the called function will return
      * ASAP if a fast cycle is not needed).
-     * 如果非集群模式下 会执行一个db过期key的快速检索 TODO
+     * masterhost == null 代表当前节点是master节点 会执行一个db过期key的快速检索
      * */
     if (server.active_expire_enabled && server.masterhost == NULL)
         activeExpireCycle(ACTIVE_EXPIRE_CYCLE_FAST);
 
     /* Unblock all the clients blocked for synchronous replication
      * in WAIT.
-     * 处理所有等待ack信息的client  只有开启集群模式 在replication中才会将client加入到waiting_ack队列中
+     * 详见waitCommand的逻辑 链表中每个client都在等待其他副本的同步偏移量跟上这个client
      * */
     if (listLength(server.clients_waiting_acks))
+        // 检测集群条件是否满足 并将满足条件的client从阻塞状态解除
         processClientsWaitingReplicas();
 
     /* Check if there are clients unblocked by modules that implement
-     * blocking commands. TODO */
+     * blocking commands. 这个模块感觉更像是插件系统??? */
     if (moduleCount()) moduleHandleBlockedClients();
 
     /* Try to process pending commands for clients that were just unblocked.
@@ -2422,7 +2423,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * processUnblockedClients(), so if there are multiple pipelined WAITs
      * and the just unblocked WAIT gets blocked again, we don't have to wait
      * a server cron cycle in absence of other event loop events. See #6623.
-     * 在其他时机点可能会设置一个需要往所有slave节点发送ack请求的标记 这里发现该标记后 将请求发往各个slave
+     * 在执行waitCommand后，需要获取所有副本(slave)最新的同步偏移量，就会设置这个标记。并在这里往所有节点发送请求
      * */
     if (server.get_ack_from_slaves) {
         robj *argv[3];
@@ -2443,7 +2444,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * */
     trackingBroadcastInvalidationMessages();
 
-    /* Write the AOF buffer on disk aof文件刷盘 */
+    /* Write the AOF buffer on disk aof文件刷盘 在什么时机写入aof??? */
     flushAppendOnlyFile(0);
 
     /* Handle writes with pending output buffers.

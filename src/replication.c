@@ -364,14 +364,13 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
          * are queued in the output buffer until the initial SYNC completes),
          * or are already in sync with the master. */
 
-        // 下面就是将本次command信息写入到socket
+        // * 这里都只是将数据写入到缓冲区 并没有发送数据  写入操作是异步执行的
 
         /* Add the multi bulk length. */
         addReplyArrayLen(slave,argc);
 
         /* Finally any additional argument that was not stored inside the
          * static buffer if any (from j to argc).
-         * 这里都只是将数据写入到缓冲区 并没有发送数据
          * */
         for (j = 0; j < argc; j++)
             addReplyBulk(slave,argv[j]);
@@ -3483,47 +3482,64 @@ int replicationCountAcksByOffset(long long offset) {
 }
 
 /* WAIT for N replicas to acknowledge the processing of our latest
- * write command (and all the previous commands). */
+ * write command (and all the previous commands).
+ * 作为master节点 接受某个副本的请求 等待集群中指定数量的副本的同步偏移量达到该client的偏移量
+ * */
 void waitCommand(client *c) {
     mstime_t timeout;
     long numreplicas, ackreplicas;
     long long offset = c->woff;
 
+    // 副本节点不能执行这个command
     if (server.masterhost) {
         addReplyError(c,"WAIT cannot be used with replica instances. Please also note that since Redis 4.0 if a replica is configured to be writable (which is not the default) writes to replicas are just local and are not propagated.");
         return;
     }
 
-    /* Argument parsing. */
+    /* Argument parsing.
+     * 读取数量和等待时间信息
+     * */
     if (getLongFromObjectOrReply(c,c->argv[1],&numreplicas,NULL) != C_OK)
         return;
     if (getTimeoutFromObjectOrReply(c,c->argv[2],&timeout,UNIT_MILLISECONDS)
         != C_OK) return;
 
-    /* First try without blocking at all. */
+    /* First try without blocking at all.
+     * 判断此时有多少节点已经同步到这个偏移量了
+     * */
     ackreplicas = replicationCountAcksByOffset(c->woff);
+    // 已经满足条件了 直接返回结果
     if (ackreplicas >= numreplicas || c->flags & CLIENT_MULTI) {
         addReplyLongLong(c,ackreplicas);
         return;
     }
 
     /* Otherwise block the client and put it into our list of clients
-     * waiting for ack from slaves. */
+     * waiting for ack from slaves.
+     * 将该client标记成阻塞状态
+     * */
     c->bpop.timeout = timeout;
+    // 使用这个同步偏移量字段记录信息
     c->bpop.reploffset = offset;
     c->bpop.numreplicas = numreplicas;
+    // 将client追加到一个等待队列中
     listAddNodeTail(server.clients_waiting_acks,c);
+    // 阻塞client
     blockClient(c,BLOCKED_WAIT);
 
     /* Make sure that the server will send an ACK request to all the slaves
-     * before returning to the event loop. */
+     * before returning to the event loop.
+     * 此时需要与其他所有slave节点通信，以便获取这些slave最新的同步偏移量
+     * */
     replicationRequestAckFromSlaves();
 }
 
 /* This is called by unblockClient() to perform the blocking op type
  * specific cleanup. We just remove the client from the list of clients
  * waiting for replica acks. Never call it directly, call unblockClient()
- * instead. */
+ * instead.
+ * 从对应的队列中移除元素
+ * */
 void unblockClientWaitingReplicas(client *c) {
     listNode *ln = listSearchKey(server.clients_waiting_acks,c);
     serverAssert(ln != NULL);
@@ -3532,7 +3548,7 @@ void unblockClientWaitingReplicas(client *c) {
 
 /* Check if there are clients blocked in WAIT that can be unblocked since
  * we received enough ACKs from slaves.
- * TODO 主要用于检测主副本间数据同步是否完成
+ * 检测此时某些client要求的同步偏移量 是否有足够的slave满足
  * */
 void processClientsWaitingReplicas(void) {
     long long last_offset = 0;
@@ -3555,9 +3571,10 @@ void processClientsWaitingReplicas(void) {
             unblockClient(c);
             addReplyLongLong(c,last_numreplicas);
         } else {
-            // 推测是本节点同步数据时收到了多少slave的ack信息 每当同步一次后就会推进offset 当offset追赶上后 就可以继续同步数据了
+            // 针对这些处于wait状态的client，获取他们要求的同步偏移量进行检测
             int numreplicas = replicationCountAcksByOffset(c->bpop.reploffset);
 
+            // 此时条件已经满足 将client从clients_waiting_acks中移除  如果client被阻塞会影响其他操作吗
             if (numreplicas >= c->bpop.numreplicas) {
                 last_offset = c->bpop.reploffset;
                 last_numreplicas = numreplicas;

@@ -1782,7 +1782,7 @@ void aofClosePipes(void) {
  *    data accumulated into server.aof_rewrite_buf into the temp file, and
  *    finally will rename(2) the temp file in the actual file name.
  *    The the new file is reopened as the new append only file. Profit!
- *    开启一个子进程 执行aof文件写入工作
+ *    通过一个子进程执行aof的重做任务(简化指令，删除冲突的指令)
  */
 int rewriteAppendOnlyFileBackground(void) {
     pid_t childpid;

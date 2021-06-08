@@ -199,16 +199,16 @@ client *createClient(connection *conn) {
  * handleClientsWithPendingWrites() function).
  * If we fail and there is more data to write, compared to what the socket
  * buffers can hold, then we'll really install the handler.
- * 某个client可能此时未准备好写事件 打上pending_write标记
+ * 表示某些写入任务需要异步执行 此时无法顺利执行完
  * */
 void clientInstallWriteHandler(client *c) {
     /* Schedule the client to write the output buffers to the socket only
      * if not already done and, for slaves, if the slave can actually receive
      * writes at this stage.
      * */
-    if (!(c->flags & CLIENT_PENDING_WRITE) &&
+    if (!(c->flags & CLIENT_PENDING_WRITE) &&  // 还没有设置pending_write标记
         (c->replstate == REPL_STATE_NONE ||   // 如果本节点不是副本节点，没有涉及到数据同步逻辑
-         (c->replstate == SLAVE_STATE_ONLINE && !c->repl_put_online_on_ack))) // repl_put_online_on_ack 代表该slave节点完成了数据同步 在此前 无法写入新数据 需要标记成pending_write
+         (c->replstate == SLAVE_STATE_ONLINE && !c->repl_put_online_on_ack))) // repl_put_online_on_ack代表该slave节点完成了数据同步，在此前无法向该slave写入新数据需要标记成pending_write
     {
         /* Here instead of installing the write handler, we just flag the
          * client and put it into a list of clients that have something
@@ -277,7 +277,10 @@ int prepareClientToWrite(client *c) {
      * If CLIENT_PENDING_READ is set, we're in an IO thread and should
      * not install a write handler. Instead, it will be done by
      * handleClientsWithPendingReadsUsingThreads() upon return.
-     *
+     * 如果此时有囤积的数据， 代表此时已经注册了writeHandler 就不需要pending_write这个入口了
+     * 触发写逻辑的入口总共有2个 一个是在beforeSleep.handleClientsWithPendingWrites
+     * 还有一个就是当write事件准备完成 回调writeHandler写入数据
+     * 如果当前client 已经设置了pending_read 那么会等待read执行完毕后 将本次待写入数据一齐写入
      */
     if (!clientHasPendingReplies(c) && !(c->flags & CLIENT_PENDING_READ))
             clientInstallWriteHandler(c);
@@ -1466,7 +1469,7 @@ int writeToClient(client *c, int handler_installed) {
     size_t objlen;
     clientReplyBlock *o;
 
-    // clientHasPendingReplies 为true 只要buf或者reply中任意一个有数据即可
+    // clientHasPendingReplies为true 只要buf或者reply中任意一个有数据即可 代表有待发送数据
     while(clientHasPendingReplies(c)) {
         // 将buf中的数据写入
         if (c->bufpos > 0) {
@@ -1550,7 +1553,8 @@ int writeToClient(client *c, int handler_installed) {
          * We just rely on data / pings received for timeout detection. */
         if (!(c->flags & CLIENT_MASTER)) c->lastinteraction = server.unixtime;
     }
-    // 代表所有数据都已经写入成功
+    
+    // 此时所有数据都发送完了 就不需要保留writeHandler了 
     if (!clientHasPendingReplies(c)) {
         c->sentlen = 0;
         /* Note that writeToClient() is called in a threaded way, but
@@ -1572,7 +1576,9 @@ int writeToClient(client *c, int handler_installed) {
     return C_OK;
 }
 
-/* Write event handler. Just send data to the client. */
+/* Write event handler. Just send data to the client.
+ * 当写事件准备完成后  将数据写入到socket缓冲区
+ * */
 void sendReplyToClient(connection *conn) {
     client *c = connGetPrivateData(conn);
     writeToClient(c,1);
@@ -1587,11 +1593,12 @@ void sendReplyToClient(connection *conn) {
 int handleClientsWithPendingWrites(void) {
     listIter li;
     listNode *ln;
+    // 因为某些原因 准备给client的数据还没有发送出去 每当在beforeSleep时 会处理pending_write中的所有client
     int processed = listLength(server.clients_pending_write);
 
     listRewind(server.clients_pending_write,&li);
     while((ln = listNext(&li))) {
-        // 遍历之前标记pending_write的client
+        // 这里直接从pending_write中移除 是为了避免重复处理设置了writeHandler但是还未准备好(无法写入数据的client)
         client *c = listNodeValue(ln);
         c->flags &= ~CLIENT_PENDING_WRITE;
         listDelNode(server.clients_pending_write,ln);
@@ -1608,13 +1615,13 @@ int handleClientsWithPendingWrites(void) {
         if (c->flags & CLIENT_CLOSE_ASAP) continue;
 
         /* Try to write buffers to the client socket.
-         * 将buf中的数据写入到socket缓冲区中
+         * 将buf中的数据写入到socket缓冲区中 如果底层socket满了 就设置writeHandler
          * */
         if (writeToClient(c,0) == C_ERR) continue;
 
         /* If after the synchronous writes above we still have data to
          * output to the client, we need to install the writable handler.
-         * 代表本次未能将所有数据写入到socket缓冲区中
+         * 代表本次未能将所有数据写入到socket缓冲区中 设置writeHandler
          * */
         if (clientHasPendingReplies(c)) {
             int ae_barrier = 0;
@@ -1623,7 +1630,7 @@ int handleClientsWithPendingWrites(void) {
              * so that in the middle of receiving the query, and serving it
              * to the client, we'll call beforeSleep() that will do the
              * actual fsync of AOF to disk. the write barrier ensures that.
-             * TODO
+             * 在conn->flags 上增加或去除 CONN_FLAG_WRITE_BARRIER 标记
              * */
             if (server.aof_state == AOF_ON &&
                 server.aof_fsync == AOF_FSYNC_ALWAYS)
@@ -2176,7 +2183,7 @@ void processInputBuffer(client *c) {
             /* If we are in the context of an I/O thread, we can't really
              * execute the command here. All we can do is to flag the client
              * as one that needs to process the command.
-             * 如果此时client 已经被标记成了 pending_read 追加一个期望晚些执行command的标记
+             * 在打上了pending_read标记 就代表此时有多个io线程在同时执行任务  而redis的线程模型要求 redis是单线程执行command的 所以追加一个延迟执行command的标记 在最后由主线程统一执行任务
              * */
             if (c->flags & CLIENT_PENDING_READ) {
                 c->flags |= CLIENT_PENDING_COMMAND;
@@ -2215,7 +2222,7 @@ void readQueryFromClient(connection *conn) {
 
     /* Check if we want to read from the client later when exiting from
      * the event loop. This is the case if threaded I/O is enabled.
-     * 期望稍后处理buffer中囤积的数据
+     * 如果开启了io线程 并且允许使用io线程读取socket的数据 就可以加入到延时队列中
      * */
     if (postponeClientRead(c)) return;
 
@@ -3241,7 +3248,7 @@ int clientsArePaused(void) {
 
             /* Don't touch slaves and blocked clients.
              * The latter pending requests will be processed when unblocked.
-             * 跳过 slave|blocked的client
+             * paused的client 与这些被阻塞的client或者slave无关
              * */
             if (c->flags & (CLIENT_SLAVE|CLIENT_BLOCKED)) continue;
             queueClientForReprocessing(c);
@@ -3448,7 +3455,7 @@ void startThreadedIO(void) {
 void stopThreadedIO(void) {
     /* We may have still clients with pending reads when this function
      * is called: handle them before stopping the threads.
-     * 先通过这些线程处理掉所有待读取数据
+     * 在停止io线程前 先将所有pending_read任务完成
      * */
     handleClientsWithPendingReadsUsingThreads();
     if (tio_debug) { printf("E"); fflush(stdout); }
@@ -3456,7 +3463,7 @@ void stopThreadedIO(void) {
         (int) listLength(server.clients_pending_read),
         (int) listLength(server.clients_pending_write));
     serverAssert(server.io_threads_active == 1);
-    // 将线程上锁 就任务是暂停这些io线程
+    // 将线程上锁 在io线程主循环中有一个获取锁的操作，这里就会被阻塞
     for (int j = 1; j < server.io_threads_num; j++)
         pthread_mutex_lock(&io_threads_mutex[j]);
     // 更新active标识
@@ -3568,8 +3575,7 @@ int handleClientsWithPendingWritesUsingThreads(void) {
 
         /* Install the write handler if there are pending writes in some
          * of the clients.
-         * 如果写入任务已经完成就不需要处理 如果写入任务未完成 代表有囤积的数据 注册writeHandler  也就是只有底层socket缓冲区空间不足时才会注册writeHandler
-         * 并且pending_write不是由于socket缓冲区空间不足 仅仅是希望在其他时机执行写入任务 这个就涉及到线程模型了
+         * 安装writeHandler释放 释放client
          * */
         if (clientHasPendingReplies(c) &&
                 connSetWriteHandler(c->conn, sendReplyToClient) == AE_ERR)
@@ -3589,13 +3595,14 @@ int handleClientsWithPendingWritesUsingThreads(void) {
  * This is called by the readable handler of the event loop.
  * As a side effect of calling this function the client is put in the
  * pending read clients and flagged as such.
- * TODO 针对该client的数据是否需要延后处理
+ * 判断本次读取任务是否要延后执行 可以看出只要IO线程处于活跃状态 并且允许使用IO线程读取数据 就可以延迟处理任务
  * */
 int postponeClientRead(client *c) {
     if (server.io_threads_active &&
         server.io_threads_do_reads &&
         !clientsArePaused() &&
         !ProcessingEventsWhileBlocked &&
+        // 如果此时client 已经打上了pending_read标记代表此时已经到了延迟执行的时候了 无法继续延迟
         !(c->flags & (CLIENT_MASTER|CLIENT_SLAVE|CLIENT_PENDING_READ)))
     {
         c->flags |= CLIENT_PENDING_READ;
@@ -3615,6 +3622,7 @@ int postponeClientRead(client *c) {
  * 使用这些io线程处理所有待读取数据
  * */
 int handleClientsWithPendingReadsUsingThreads(void) {
+    // io线程没有被激活 或者不允许使用io线程读取和解析数据 就无法执行该方法 (也不会产生pending_read的client)
     if (!server.io_threads_active || !server.io_threads_do_reads) return 0;
     int processed = listLength(server.clients_pending_read);
     if (processed == 0) return 0;
@@ -3667,13 +3675,14 @@ int handleClientsWithPendingReadsUsingThreads(void) {
     if (tio_debug) printf("I/O READ All threads finshed\n");
 
     /* Run the list of clients again to process the new buffers.
-     * 某些client会被打上一个pending_read标记  代表在当时不适合读取数据 期望放在异步处理
+     * 至此所有 pending_read的任务都已经执行完毕了
      * */
     while(listLength(server.clients_pending_read)) {
         ln = listFirst(server.clients_pending_read);
         client *c = listNodeValue(ln);
         // 移除掉pending标记
         c->flags &= ~CLIENT_PENDING_READ;
+        // 并将节点从列表中移除
         listDelNode(server.clients_pending_read,ln);
         /* Clients can become paused while executing the queued commands,
          * so we need to check in between each command. If a pause was
@@ -3683,19 +3692,21 @@ int handleClientsWithPendingReadsUsingThreads(void) {
          * */
         if (clientsArePaused()) continue;
 
-        // 检查该client是否有pending_command标记 有的话执行命令
+        // 打上pending_read标记的client不会立即执行任务 会等待所有io线程解析完数据后， 由主线程统一执行任务
         if (processPendingCommandsAndResetClient(c) == C_ERR) {
             /* If the client is no longer valid, we avoid
              * processing the client later. So we just go
              * to the next. */
             continue;
         }
-        // 针对之前的这些 pending_read client 读取socket缓冲区的数据 以及转换成command,argv 以及执行command
+        // 如果缓冲区中有多个command 在前一个command还未执行完前是无法继续解析数据的
+        // 所以在processPendingCommandsAndResetClient后 确保已经执行完所有囤积的任务后 使用主线程继续解析缓冲区的数据 并尝试执行新产生的command
         processInputBuffer(c);
 
         /* We may have pending replies if a thread readQueryFromClient() produced
          * replies and did not install a write handler (it can't).
-         * 检测是否要将client标记成pending_write
+         * 在执行完很多command后 会产生大量的reply 并返回给client 这时如果有残留数据 就代表有些写入任务没有完成 需要异步执行 所以为client打上一个pending_write的标记
+         * 而设置writerHandler的逻辑 统一在writeToClient中执行 如果此时client已经打上了pending_write标记 就不需要再重复设置了
          */
         if (!(c->flags & CLIENT_PENDING_WRITE) && clientHasPendingReplies(c))
             clientInstallWriteHandler(c);

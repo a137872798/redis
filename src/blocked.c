@@ -127,7 +127,8 @@ void processUnblockedClients(void) {
             if (processPendingCommandsAndResetClient(c) == C_ERR) {
                 continue;
             }
-            /* Then process client if it has more data in it's buffer. */
+            /* Then process client if it has more data in it's buffer.
+             * */
             if (c->querybuf && sdslen(c->querybuf) > 0) {
                 // 将querybuf中的数据 转换成command 以及相关参数 并执行command
                 processInputBuffer(c);
@@ -173,7 +174,7 @@ void unblockClient(client *c) {
         c->btype == BLOCKED_ZSET ||
         c->btype == BLOCKED_STREAM) {
         unblockClientWaitingData(c);
-        // TODO
+        // 当该client是在等待本master下其他副本的同步偏移量跟上本节点时 对应的阻塞类型就是 BLOCKED_WAIT
     } else if (c->btype == BLOCKED_WAIT) {
         unblockClientWaitingReplicas(c);
         // TODO

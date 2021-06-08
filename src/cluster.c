@@ -6135,7 +6135,7 @@ void migrateCloseSocket(robj *host, robj *port) {
 }
 
 /**
- * 关闭已经超时的socket
+ * 某些缓存的socket 如果长时间未使用
  */
 void migrateCloseTimedoutSockets(void) {
     dictIterator *di = dictGetSafeIterator(server.migrate_cached_sockets);
@@ -6145,7 +6145,7 @@ void migrateCloseTimedoutSockets(void) {
         // 遍历每个缓存的socket
         migrateCachedSocket *cs = dictGetVal(de);
 
-        // 判断距离最近一次使用时间是否超过了 ttl 是的话断开连接释放内存
+        // 某些缓存的连接长时间未使用
         if ((server.unixtime - cs->last_use_time) > MIGRATE_SOCKET_CACHE_TTL) {
             connClose(cs->conn);
             zfree(cs);

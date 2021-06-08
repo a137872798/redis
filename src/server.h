@@ -714,7 +714,9 @@ typedef struct multiState {
 } multiState;
 
 /* This structure holds the blocking operation state for a client.
- * The fields used depend on client->btype. */
+ * The fields used depend on client->btype.
+ * 描述某个client的阻塞状态
+ * */
 typedef struct blockingState {
     /* Generic fields. */
     mstime_t timeout;       /* Blocking operation timeout. If UNIX current time
@@ -1294,6 +1296,7 @@ struct redisServer {
     sds aof_buf;      /* AOF buffer, written before entering the event loop */
     int aof_fd;       /* File descriptor of currently selected AOF file */
     int aof_selected_db; /* Currently selected DB in AOF */
+    // 也是一个标记代表在某个时刻认为aof刷盘需要延迟 在serverCron中一旦发现这个标记就会执行刷盘任务
     time_t aof_flush_postponed_start; /* UNIX time of postponed AOF flush */
     time_t aof_last_fsync;            /* UNIX time of last fsync() */
     time_t aof_rewrite_time_last;   /* Time used by last AOF rewrite run. */
