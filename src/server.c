@@ -3998,7 +3998,7 @@ int processCommand(client *c) {
      * go through checking for replication and QUIT will cause trouble
      * when FORCE_REPLICATION is enabled and would be implemented in
      * a regular command proc.
-     * 本次接收到一条退出指令 在恢复完client会 立即关闭server
+     * 代表当前client会与redis断开连接 在network模块会检查该标记并断开连接
      * */
     if (!strcasecmp(c->argv[0]->ptr,"quit")) {
         addReply(c,shared.ok);
@@ -4022,7 +4022,7 @@ int processCommand(client *c) {
             (char*)c->argv[0]->ptr, args);
         sdsfree(args);
         return C_OK;
-        // 如果只是参数数量不匹配的情况 认为是client的问题 不会返回异常
+        // 如果是参数数量不匹配的情况 将参数错误信息返回给client
     } else if ((c->cmd->arity > 0 && c->cmd->arity != c->argc) ||
                (c->argc < -c->cmd->arity)) {
         rejectCommandFormat(c,"wrong number of arguments for '%s' command",
@@ -4030,12 +4030,13 @@ int processCommand(client *c) {
         return C_OK;
     }
 
-    // 获取本次执行的command类型标识
+    // 获取本次执行的command类型标识 如果是批任务，并且本次执行的是exec并且这组批任务中至少有一个是write
     int is_write_command = (c->cmd->flags & CMD_WRITE) ||
                            (c->cmd->proc == execCommand && (c->mstate.cmd_flags & CMD_WRITE));
-    // 当前命令本身不应该在oom的情况下执行 如果本次是一个执行任务 mstate.cmd_flags 代表的是这组任务 这组任务也不应该在oom的情况下继续执行
+    // 代表当前command不应该在oom的情况下继续执行
     int is_denyoom_command = (c->cmd->flags & CMD_DENYOOM) ||
                              (c->cmd->proc == execCommand && (c->mstate.cmd_flags & CMD_DENYOOM));
+    // 以下2个标记之后再看
     int is_denystale_command = !(c->cmd->flags & CMD_STALE) ||
                                (c->cmd->proc == execCommand && (c->mstate.cmd_inv_flags & CMD_STALE));
     int is_denyloading_command = !(c->cmd->flags & CMD_LOADING) ||
@@ -4043,15 +4044,22 @@ int processCommand(client *c) {
 
     /* Check if the user is authenticated. This check is skipped in case
      * the default user is flagged as "nopass" and is active.
-     * c->authenticated只是判断默认用户是否要校验
+     * 判断当前用户是否已验权
+     * USER_FLAG_NOPASS 代表不需要密码 也就是不用验权
+     * USER_FLAG_DISABLED 代表当前用户不可用
+     * !c->authenticated 代表默认用户还未验权
      * */
     int auth_required = (!(DefaultUser->flags & USER_FLAG_NOPASS) ||
                           (DefaultUser->flags & USER_FLAG_DISABLED)) &&
                         !c->authenticated;
-    // 默认用户也需要校验 将错误信息通知给client
+
+    // 代表此时还未进行验权
     if (auth_required) {
         /* AUTH and HELLO and no auth modules are valid even in
-         * non-authenticated state. */
+         * non-authenticated state.
+         * 如果要执行的command本身并不需要验权 就不会拦截 比如验权命令本身 或者是hello命令
+         * TODO 什么时候发起的authCommand/helloCommand命令?
+         * */
         if (!(c->cmd->flags & CMD_NO_AUTH)) {
             rejectCommand(c,shared.noautherr);
             return C_OK;
@@ -4061,7 +4069,7 @@ int processCommand(client *c) {
     /* Check if the user can run this command according to the current
      * ACLs. */
     int acl_keypos;
-    // 除了执行command的权限校验外 可能还有参数级别的校验
+    // 当用户认证成功后 会更改client->user 此时对用户权限进行校验，因为当前用户不一定有权限执行这个command
     int acl_retval = ACLCheckCommandPerm(c,&acl_keypos);
 
     // 权限校验失败认为是client参数错误 本次processCommand还是成功的
@@ -4082,7 +4090,7 @@ int processCommand(client *c) {
      * However we don't perform the redirection if:
      * 1) The sender of this command is our master.
      * 2) The command has no key arguments.
-     * TODO 这里涉及到请求在集群内的转发
+     * TODO 这里涉及到请求在集群内的转发  有关集群的逻辑之后看
      * */
     if (server.cluster_enabled &&
         !(c->flags & CLIENT_MASTER) &&

@@ -1469,13 +1469,17 @@ int expireIfNeeded(redisDb *db, robj *key) {
  */
 int *getKeysPrepareResult(getKeysResult *result, int numkeys) {
     /* GETKEYS_RESULT_INIT initializes keys to NULL, point it to the pre-allocated stack
-     * buffer here. */
+     * buffer here.
+     * 这时还没有初始化keys 使用keysbuf初始化keys
+     * */
     if (!result->keys) {
         serverAssert(!result->numkeys);
         result->keys = result->keysbuf;
     }
 
-    /* Resize if necessary */
+    /* Resize if necessary
+     * 分配内存
+     * */
     if (numkeys > result->size) {
         if (result->keys != result->keysbuf) {
             /* We're not using a static buffer, just (re)alloc */
@@ -1511,13 +1515,13 @@ int getKeysUsingCommandTable(struct redisCommand *cmd,robj **argv, int argc, get
 
     // 代表本次总计要校验多少个key
     int count = ((last - cmd->firstkey)+1);
-    // 提前为result申请内存
+    // 提前为result申请内存  这是没有考虑step的情况
     keys = getKeysPrepareResult(result, count);
 
     // 每次移动固定的step 将获取到的argc下标填充到result中
     for (j = cmd->firstkey; j <= last; j += cmd->keystep) {
 
-        // 本次要校验的参数下标超过了参数的总长度
+        // 此时要获取的key已经超过了所有的参数
         if (j >= argc) {
             /* Modules commands, and standard commands with a not fixed number
              * of arguments (negative arity parameter) do not have dispatch
@@ -1536,6 +1540,7 @@ int getKeysUsingCommandTable(struct redisCommand *cmd,robj **argv, int argc, get
                 serverPanic("Redis built-in command declared keys positions not matching the arity requirements.");
             }
         }
+        // 将需要校验的key对应command->argv的下标存储到keys中
         keys[i++] = j;
     }
     result->numkeys = i;
@@ -1553,7 +1558,7 @@ int getKeysUsingCommandTable(struct redisCommand *cmd,robj **argv, int argc, get
  *
  * This function uses the command table if a command-specific helper function
  * is not required, otherwise it calls the command-specific function.
- * 根据command信息以及参数信息 从db中读取一些key 并填充到result中
+ * 将本次执行command使用到的key填充到result中
  * */
 int getKeysFromCommand(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result) {
     // TODO 先忽略module相关的

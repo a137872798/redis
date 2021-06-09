@@ -1055,7 +1055,9 @@ int ACLCheckUserCredentials(robj *username, robj *password) {
  * connection user reference is populated.
  *
  * The return value is C_OK or C_ERR with the same meaning as
- * ACLCheckUserCredentials(). */
+ * ACLCheckUserCredentials().
+ * 客户端对关联用户进行验权
+ * */
 int ACLAuthenticateUser(client *c, robj *username, robj *password) {
     if (ACLCheckUserCredentials(username,password) == C_OK) {
         c->authenticated = 1;
@@ -1125,13 +1127,13 @@ user *ACLGetUserByName(const char *name, size_t namelen) {
  * command cannot be executed because the user is not allowed to run such
  * command, the second if the command is denied because the user is trying
  * to access keys that are not among the specified patterns.
- * 为某个client绑定的用户进行权限校验
+ * 检查当前client关联的用户是否有足够的权限执行command
  * */
 int ACLCheckCommandPerm(client *c, int *keyidxptr) {
 
     // 该client绑定的用户
     user *u = c->user;
-    // 此时该client即将执行的command_id
+    // 本次要执行的command
     uint64_t id = c->cmd->id;
 
     /* If there is no associated user, the connection can run anything.
@@ -1141,6 +1143,7 @@ int ACLCheckCommandPerm(client *c, int *keyidxptr) {
 
     /* Check if the user can execute this command.
      * authCommand 本身是不需要权限校验的
+     * 而如果当前用户设置了可以执行所有权限的标记 也不需要校验
      * */
     if (!(u->flags & USER_FLAG_ALLCOMMANDS) &&
         c->cmd->proc != authCommand)
@@ -1152,6 +1155,7 @@ int ACLCheckCommandPerm(client *c, int *keyidxptr) {
         if (ACLGetUserCommandBit(u,id) == 0) {
             /* Check if the subcommand matches.
              * 这里是command没有匹配上的情况  尝试匹配subcommand
+             * 当参数比较少 或者用户没有设置subCommand的情况 就返回错误信息
              * */
             if (c->argc < 2 ||
                 u->allowed_subcommands == NULL ||
@@ -1165,7 +1169,7 @@ int ACLCheckCommandPerm(client *c, int *keyidxptr) {
             while (1) {
                 if (u->allowed_subcommands[id][subid] == NULL)
                     return ACL_DENIED_CMD;
-                // 这里尝试匹配subcommand
+                // 这里尝试匹配subcommand 只要匹配成功 还是允许执行命令的
                 if (!strcasecmp(c->argv[1]->ptr,
                                 u->allowed_subcommands[id][subid]))
                     break; /* Subcommand match found. Stop here. */
@@ -1176,17 +1180,16 @@ int ACLCheckCommandPerm(client *c, int *keyidxptr) {
 
     /* Check if the user can execute commands explicitly touching the keys
      * mentioned in the command arguments.
-     * 除了对command本身做校验外 还需要对参数做校验
-     * 通过执行getkeys_proc 可以知道要对哪些参数做校验
-     * 或者设置了firstkey 就可以定位到某几个参数 并进行校验
+     * 某些key可能在某些command下不允许被使用 这里是进行检验
      * */
     if (!(c->user->flags & USER_FLAG_ALLKEYS) &&
+    // 下面这2个参数是辅助校验key的
         (c->cmd->getkeys_proc || c->cmd->firstkey))
     {
         // 获取一个空的getKeyResult
         getKeysResult result = GETKEYS_RESULT_INIT;
 
-        // numkeys 代表本次要检查的key数量
+        // numkeys 代表本次要检查的key数量  具体要检查哪些key会存储在result中
         int numkeys = getKeysFromCommand(c->cmd,c->argv,c->argc,&result);
 
         // keyidx对应参数下标
@@ -1213,7 +1216,7 @@ int ACLCheckCommandPerm(client *c, int *keyidxptr) {
                 }
             }
 
-            // 某个参数key 匹配不上任何一个pattern
+            // 执行某些command时 某几个参数根据当前用户决定是否有执行权力
             if (!match) {
                 if (keyidxptr) *keyidxptr = keyidx[j];
                 getKeysFreeResult(&result);
@@ -2048,7 +2051,9 @@ void addReplyCommandCategories(client *c, struct redisCommand *cmd) {
  * AUTH <username> <password> (Redis >= 6.0 form)
  *
  * When the user is omitted it means that we are trying to authenticate
- * against the default user. */
+ * against the default user.
+ * 执行验权命令本身是不需要验权的 就像调用登录接口本身不需要用户token
+ * */
 void authCommand(client *c) {
     /* Only two or three argument forms are allowed. */
     if (c->argc > 3) {
@@ -2076,6 +2081,7 @@ void authCommand(client *c) {
         password = c->argv[2];
     }
 
+    // 进行验权
     if (ACLAuthenticateUser(c,username,password) == C_OK) {
         addReply(c,shared.ok);
     } else {

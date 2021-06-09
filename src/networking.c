@@ -146,7 +146,9 @@ client *createClient(connection *conn) {
     c->flags = 0;
     c->ctime = c->lastinteraction = server.unixtime;
     /* If the default user does not require authentication, the user is
-     * directly authenticated. */
+     * directly authenticated.
+     * 每个刚连接的client的用户都是默认用户
+     * */
     c->authenticated = (c->user->flags & USER_FLAG_NOPASS) &&
                        !(c->user->flags & USER_FLAG_DISABLED);
     c->replstate = REPL_STATE_NONE;

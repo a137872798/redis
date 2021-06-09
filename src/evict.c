@@ -182,8 +182,8 @@ void evictionPoolAlloc(void) {
  * right.
  * @param dbid 本次会从该db下淘汰redisObject
  * @param sampledict 本次处理的目标dict 可能是db.dict/db.expires  根据内存淘汰策略决定
- * @param keydict db.dict
- * @param 本次可能会被淘汰的对象都会被包装成entry后存储到pool中
+ * @param keydict 就是db.dict
+ * @param pool 本次可能会被淘汰的对象都会被包装成entry后存储到pool中
  * */
 void evictionPoolPopulate(int dbid, dict *sampledict, dict *keydict, struct evictionPoolEntry *pool) {
     int j, k, count;
@@ -191,7 +191,7 @@ void evictionPoolPopulate(int dbid, dict *sampledict, dict *keydict, struct evic
     // 根据最大的抽样数量 分配对应的内存空间
     dictEntry *samples[server.maxmemory_samples];
 
-    // 这里随机抽取了一些key
+    // 这里随机抽取了一些key  并填充到samples中
     count = dictGetSomeKeys(sampledict, samples, server.maxmemory_samples);
     for (j = 0; j < count; j++) {
         unsigned long long idle;
@@ -199,14 +199,15 @@ void evictionPoolPopulate(int dbid, dict *sampledict, dict *keydict, struct evic
         robj *o;
         dictEntry *de;
 
+        // 获取该slot下随机采用的key
         de = samples[j];
         key = dictGetKey(de);
 
         /* If the dictionary we are sampling from is not the main
          * dictionary (but the expires one) we need to lookup the key
          * again in the key dictionary to obtain the value object.
-         * 开始检查当前的淘汰策略
-         * 如果本次淘汰跟ttl无关 也就是无关key本身是否要被回收 这样的好处是方便 缺点就是可能会淘汰一些还有效的key
+         * 如果淘汰策略允许淘汰未过时的key 切换dict容器  是这样，基于超时时间存储的dict与普通dict的value不同 一个是long 一个是redisObject
+         * 基于lru、lfu算法进行淘汰时都是使用redisObject的信息
          * */
         if (server.maxmemory_policy != MAXMEMORY_VOLATILE_TTL) {
             // 从db.dict中查找 key,redisObject
@@ -231,10 +232,10 @@ void evictionPoolPopulate(int dbid, dict *sampledict, dict *keydict, struct evic
              * first. So inside the pool we put objects using the inverted
              * frequency subtracting the actual frequency to the maximum
              * frequency of 255.
-             * 这时idle是一个类似分数的概念
+             * 这时idle是一个类似分数的概念  计算公式比较复杂 这里就不展开了
              * */
             idle = 255 - LFUDecrAndReturn(o);
-            // 直接计算还有多久过期
+            // 根据该对象的过期时间计算idle
         } else if (server.maxmemory_policy == MAXMEMORY_VOLATILE_TTL) {
             /* In this case the sooner the expire the better. */
             idle = ULLONG_MAX - (long) dictGetVal(de);
@@ -243,7 +244,7 @@ void evictionPoolPopulate(int dbid, dict *sampledict, dict *keydict, struct evic
             serverPanic("Unknown eviction policy in evictionPoolPopulate()");
         }
 
-        // 上面计算出了当前遍历到的样本的idle时间
+        // 上面计算出了当前遍历到的样本的idle时间  idle越大代表淘汰该对象收益越高
 
         /* Insert the element inside the pool.
          * First, find the first empty bucket or the first populated
@@ -253,13 +254,14 @@ void evictionPoolPopulate(int dbid, dict *sampledict, dict *keydict, struct evic
         k = 0;
 
         // 在server启动后 pool被初始化时内部每个元素的被提前填充 idle为0 且key默认为null
-        // pool中的元素 idle是逐渐增大的 这里是定位到一个合适的下标 直到发现首个idle>=当前元素
+        // pool中的元素 idle是逐渐增大的
+        // 这里是在定位到一个合适的下标   那么淘汰时也是选择淘汰最后一个(idle最大 收益最高)
         while (k < EVPOOL_SIZE &&
                pool[k].key &&
                pool[k].idle < idle)
             k++;
 
-        // 代表此时idle小于pool中所有元素的idle 跳过该元素 开始检测下一个元素
+        // 代表此时idle小于pool中所有元素的idle 并且此时pool是满的 (移除的时候是从后往前移除)
         if (k == 0 && pool[EVPOOL_SIZE - 1].key != NULL) {
             /* Can't insert if the element is < the worst element we have
              * and there are no empty buckets. */
@@ -490,14 +492,16 @@ int getMaxmemoryState(size_t *total, size_t *logical, size_t *tofree, float *lev
     mem_reported = zmalloc_used_memory();
     if (total) *total = mem_reported;
 
-    /* We may return ASAP if there is no need to compute the level. */
+    /* We may return ASAP if there is no need to compute the level.
+     * 如果没有设置内存上限 或者此时占用内存没有达到上线 就可以将此时获取到的情况返回
+     * */
     int return_ok_asap = !server.maxmemory || mem_reported <= server.maxmemory;
     if (return_ok_asap && !level) return C_OK;
 
     /* Remove the size of slaves output buffers and AOF buffer from the
      * count of used memory. */
     mem_used = mem_reported;
-    // overhead 是slave以及aof占用的内存 这部分内存照理说是不包含在内存管理内的
+    // 这里可以将aof和slave占用的内存忽略
     size_t overhead = freeMemoryGetNotCountedMemory();
     mem_used = (mem_used > overhead) ? mem_used - overhead : 0;
 
@@ -514,11 +518,13 @@ int getMaxmemoryState(size_t *total, size_t *logical, size_t *tofree, float *lev
 
     if (return_ok_asap) return C_OK;
 
-    /* Check if we are still over the memory limit. */
+    /* Check if we are still over the memory limit.
+     * 代表还有空间可用
+     * */
     if (mem_used <= server.maxmemory) return C_OK;
 
     /* Compute how much memory we need to free.
-     * 代表至少要释放多少内存
+     * 计算需要释放多少内存
      * */
     mem_tofree = mem_used - server.maxmemory;
 
@@ -543,7 +549,7 @@ int freeMemoryIfNeeded(void) {
     int keys_freed = 0;
     /* By default replicas should ignore maxmemory
      * and just be masters exact copies.
-     * 当前节点是副本 且不需要考虑slave的内存情况 也就是内存控制任务完全放在master节点 其他节点只要确保同步正常就可以确保内存在合理范围之内
+     * 当前节点是副本 且设置了不需要考虑slave的内存情况 也就是内存控制任务完全放在master节点 其他节点只要确保同步正常就可以确保内存在合理范围之内
      * */
     if (server.masterhost && server.repl_slave_ignore_maxmemory) return C_OK;
 
@@ -557,23 +563,26 @@ int freeMemoryIfNeeded(void) {
      * POV of clients not being able to write, but also from the POV of
      * expires and evictions of keys not being performed.
      * 如果此时client都被暂停 此时不会发生新的写入操作 就认为内存是够用的
+     * TODO 发现在集群模块中会将某个client暂停 先搁置
      * */
     if (clientsArePaused()) return C_OK;
 
     // 如果此时mem_reported < server.maxMem 就代表有足够的空间
+    // mem_reported 是此时检测已经使用的内存
     // mem_tofree 是要释放的内存
     if (getMaxmemoryState(&mem_reported, NULL, &mem_tofree, NULL) == C_OK)
         return C_OK;
 
+    // 记录已经释放的内存空间
     mem_freed = 0;
 
+    // 此时已经确定要释放内存了
     latencyStartMonitor(latency);
-    // 这里就涉及到内存淘汰策略了
+    // 这里就涉及到内存淘汰策略了  如果执行了不允许进行内存淘汰 跳转到cant_free
     if (server.maxmemory_policy == MAXMEMORY_NO_EVICTION)
         goto cant_free; /* We need to free memory, but policy forbids. */
 
 
-    // mem_freed 对应此时已经释放的空间
     while (mem_freed < mem_tofree) {
         int j, k, i;
 
@@ -588,6 +597,7 @@ int freeMemoryIfNeeded(void) {
         // 当采用lru/lfu 或者 volatile_ttl的内存淘汰策略时
         if (server.maxmemory_policy & (MAXMEMORY_FLAG_LRU | MAXMEMORY_FLAG_LFU) ||
             server.maxmemory_policy == MAXMEMORY_VOLATILE_TTL) {
+            // 这个链表按照一个得分对所有需要淘汰的对象进行排序 每次只会淘汰那个得分最高的对象
             struct evictionPoolEntry *pool = EvictionPoolLRU;
 
             // 通过下面的算法决定哪个key被淘汰的优先级最高
@@ -603,10 +613,11 @@ int freeMemoryIfNeeded(void) {
                  * */
                 for (i = 0; i < server.dbnum; i++) {
                     db = server.db + i;
-                    // 根据此时的内存淘汰策略 选择仅从设置了超时时间的key中淘汰对象 还是全db范围淘汰对象
+                    // 根据此时的内存淘汰策略 选择仅从设置了超时时间的key中淘汰对象 还是db下全key范围淘汰对象
                     dict = (server.maxmemory_policy & MAXMEMORY_FLAG_ALLKEYS) ?
                            db->dict : db->expires;
                     if ((keys = dictSize(dict)) != 0) {
+                        // 抽样计算得分并填充到evictionPool中
                         evictionPoolPopulate(i, dict, db->dict, pool);
                         total_keys += keys;
                     }
@@ -754,7 +765,7 @@ int freeMemoryIfNeeded(void) {
      * */
     if (result != C_OK) {
         latencyStartMonitor(lazyfree_latency);
-        // 阻塞等待所有bio任务处理完成
+        // 阻塞等待后台任务处理完所有的内存释放任务 如果中途有足够的内存了 就可以返回ok 如果内存还是不足 且没有释放内存的任务了 本次就没有足够的内存空间
         while (bioPendingJobsOfType(BIO_LAZY_FREE)) {
             if (getMaxmemoryState(NULL, NULL, NULL, NULL) == C_OK) {
                 result = C_OK;
@@ -776,7 +787,7 @@ int freeMemoryIfNeeded(void) {
  *
  * - There must be no script in timeout condition.
  * - Nor we are loading data right now.
- *
+ * 检测此时是否有足够的内存来执行命令
  */
 int freeMemoryIfNeededAndSafe(void) {
     // 如果此时服务器处于数据恢复阶段 内存必然是够用的
