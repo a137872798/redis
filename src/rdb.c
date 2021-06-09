@@ -1124,7 +1124,9 @@ ssize_t rdbSaveAuxFieldStrInt(rio *rdb, char *key, long long val) {
     return rdbSaveAuxField(rdb,key,strlen(key),buf,vlen);
 }
 
-/* Save a few default AUX fields with information about the RDB generated. */
+/* Save a few default AUX fields with information about the RDB generated.
+ * 存储一些其他的相关信息
+ * */
 int rdbSaveInfoAuxFields(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
     int redis_bits = (sizeof(void*) == 8) ? 64 : 32;
     int aof_preamble = (rdbflags & RDBFLAGS_AOF_PREAMBLE) != 0;
@@ -1135,7 +1137,9 @@ int rdbSaveInfoAuxFields(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
     if (rdbSaveAuxFieldStrInt(rdb,"ctime",time(NULL)) == -1) return -1;
     if (rdbSaveAuxFieldStrInt(rdb,"used-mem",zmalloc_used_memory()) == -1) return -1;
 
-    /* Handle saving options that generate aux fields. */
+    /* Handle saving options that generate aux fields.
+     * 存储一些副本相关的信息
+     * */
     if (rsi) {
         if (rdbSaveAuxFieldStrInt(rdb,"repl-stream-db",rsi->repl_stream_db)
             == -1) return -1;
@@ -1196,7 +1200,9 @@ ssize_t rdbSaveSingleModuleAux(rio *rdb, int when, moduleType *mt) {
  *
  * When the function returns C_ERR and if 'error' is not NULL, the
  * integer pointed by 'error' is set to the value of errno just after the I/O
- * error. */
+ * error.
+ * 为当前所有db数据生成快照信息 存储到文件中
+ * */
 int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     dictIterator *di = NULL;
     dictEntry *de;
@@ -1205,13 +1211,16 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     uint64_t cksum;
     size_t processed = 0;
 
+    // 每当写入一定数据量 自动生成校验和
     if (server.rdb_checksum)
         rdb->update_cksum = rioGenericUpdateChecksum;
     snprintf(magic,sizeof(magic),"REDIS%04d",RDB_VERSION);
+    // 写入标记rdb数据的魔数以及saveInfo信息
     if (rdbWriteRaw(rdb,magic,9) == -1) goto werr;
     if (rdbSaveInfoAuxFields(rdb,rdbflags,rsi) == -1) goto werr;
     if (rdbSaveModulesAux(rdb, REDISMODULE_AUX_BEFORE_RDB) == -1) goto werr;
 
+    // 为db生成快照  有关数据的写入一般会使用到一些压缩技巧节省内存开销 跟lucene一样
     for (j = 0; j < server.dbnum; j++) {
         redisDb *db = server.db+j;
         dict *d = db->dict;
@@ -1230,21 +1239,27 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
         if (rdbSaveLen(rdb,db_size) == -1) goto werr;
         if (rdbSaveLen(rdb,expires_size) == -1) goto werr;
 
-        /* Iterate this DB writing every entry */
+        /* Iterate this DB writing every entry
+         * 遍历db中的每对key/value
+         * */
         while((de = dictNext(di)) != NULL) {
             sds keystr = dictGetKey(de);
             robj key, *o = dictGetVal(de);
             long long expire;
 
             initStaticStringObject(key,keystr);
+            // 可以看到在生成rdb数据时  即使该key已经过期 还是会存储数据
             expire = getExpire(db,&key);
             if (rdbSaveKeyValuePair(rdb,&key,o,expire) == -1) goto werr;
 
             /* When this RDB is produced as part of an AOF rewrite, move
              * accumulated diff from parent to child while rewriting in
-             * order to have a smaller final write. */
-            if (rdbflags & RDBFLAGS_AOF_PREAMBLE &&
-                rdb->processed_bytes > processed+AOF_READ_DIFF_INTERVAL_BYTES)
+             * order to have a smaller final write.
+             * 首先本次存储rdb的动作应该是在生成aof文件时产生的 这时执行该方法的必然是子进程
+             * 其次每当rdb中写入了一定量的值 就会从父进程中读取新产生的数据 数据是存储在aof_child_diff中的 此时并没有使用
+             * 之后在存储aof数据时就会进行瘦身 所以在处理aof前数据越全越好
+             * */
+            if (rdbflags & RDBFLAGS_AOF_PREAMBLE && rdb->processed_bytes > processed+AOF_READ_DIFF_INTERVAL_BYTES)
             {
                 processed = rdb->processed_bytes;
                 aofReadDiffFromParent();
@@ -1257,7 +1272,9 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     /* If we are storing the replication information on disk, persist
      * the script cache as well: on successful PSYNC after a restart, we need
      * to be able to process any EVALSHA inside the replication backlog the
-     * master will send us. */
+     * master will send us.
+     * TODO 忽略lua脚本
+     * */
     if (rsi && dictSize(server.lua_scripts)) {
         di = dictGetIterator(server.lua_scripts);
         while((de = dictNext(di)) != NULL) {
@@ -1269,6 +1286,7 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
         di = NULL; /* So that we don't release it again on error. */
     }
 
+    // 某些module可能需要在rdb结束后存储一些信息 这里就是选择这部分module 并存储数据的过程
     if (rdbSaveModulesAux(rdb, REDISMODULE_AUX_AFTER_RDB) == -1) goto werr;
 
     /* EOF opcode */
@@ -2131,7 +2149,7 @@ void stopLoading(int success) {
 }
 
 /**
- * 开始生成rdb
+ * 主要是基于module的事件机制，通知监听器
  * @param rdbflags
  */
 void startSaving(int rdbflags) {
@@ -2190,7 +2208,7 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
 
 /* Load an RDB file from the rio stream 'rdb'. On success C_OK is returned,
  * otherwise C_ERR is returned and 'errno' is set accordingly.
- * 通过rio流中的数据回复本地数据  rio流只是一个抽象 底层可以是文件也可以是socket  也可以是buffer 这样他们可以使用同一套rdb格式解析逻辑
+ * 通过rio流中的数据恢复本地数据  rio流只是一个抽象 底层可以是文件也可以是socket  也可以是buffer 这样他们可以使用同一套rdb格式解析逻辑
  * @param rsi 当通过加载aof文件进行数据恢复时 文件中可能包含rdb数据 这时调用该方法不需要传入rsi对象
  * */
 int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
@@ -2818,7 +2836,7 @@ void bgsaveCommand(client *c) {
     // 此时已经开启了后台进程 无法继续创建
     if (server.rdb_child_pid != -1) {
         addReplyError(c,"Background save already in progress");
-        // 此时有其他子进程正在运行 本次必须是延时写入 才能正常处理
+        // 此时有其他子进程正在运行 如果本次允许延迟处理 返回延迟处理的信息 否则返回失败的信息
     } else if (hasActiveChildProcess()) {
         if (schedule) {
             server.rdb_bgsave_scheduled = 1;
@@ -2829,6 +2847,7 @@ void bgsaveCommand(client *c) {
             "Use BGSAVE SCHEDULE in order to schedule a BGSAVE whenever "
             "possible.");
         }
+        // 使用后台线程生成rdb
     } else if (rdbSaveBackground(server.rdb_filename,rsiptr) == C_OK) {
         addReplyStatus(c,"Background saving started");
     } else {

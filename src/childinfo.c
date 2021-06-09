@@ -33,7 +33,7 @@
 /* Open a child-parent channel used in order to move information about the
  * RDB / AOF saving process from the child to the parent (for instance
  * the amount of copy on write memory used)
- * 打开父子进程通道
+ * 这里是传输一些通用信息 不局限于aof或者rdb
  * */
 void openChildInfoPipe(void) {
     if (pipe(server.child_info_pipe) == -1) {

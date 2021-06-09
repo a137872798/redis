@@ -2161,12 +2161,11 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* Start a scheduled AOF rewrite if this was requested by the user while
      * a BGSAVE was in progress.
-     * 当尝试为 aof/rdb开启子进程时 如果发现此时有其他子进程 就会打上一个延时的标记 这里是在检查标记 并执行rewrite任务
+     * 打算重启aof时 发现此时有其他正在运行的子进程 会设置该标记 此时发现没有子进程了 就可以执行aof任务
      * */
     if (!hasActiveChildProcess() &&
         server.aof_rewrite_scheduled)
     {
-        // TODO 开启子进程 执行写入任务
         rewriteAppendOnlyFileBackground();
     }
 
@@ -2192,7 +2191,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
              * */
             if (server.dirty >= sp->changes &&
                 server.unixtime-server.lastsave > sp->seconds &&
-                // 后台进程开始存储数据的时间戳
+                // 如果上一次生成rdb是成功的 那么本次也可以继续尝试生成rdb 如果上一次生成rdb是失败的 那么会有一个等待时间 必须间隔这么长时间后才能生成rdb
                 (server.unixtime-server.lastbgsave_try >
                  CONFIG_BGSAVE_RETRY_DELAY ||
                  server.lastbgsave_status == C_OK))
@@ -2208,7 +2207,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         }
 
         /* Trigger an AOF rewrite if needed.
-         * 判断是否满足aof重做条件  与rdb任务冲突 (一次只能开启一个子进程执行任务)
+         * 根据此时aof内数据的大小 开启子进程生成aof文件
          * */
         if (server.aof_state == AOF_ON &&
             !hasActiveChildProcess() &&
@@ -2222,7 +2221,6 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
             long long growth = (server.aof_current_size*100/base) - 100;
             if (growth >= server.aof_rewrite_perc) {
                 serverLog(LL_NOTICE,"Starting automatic rewriting of AOF on %lld%% growth",growth);
-                // 将缓冲区中的数据写入到aof中 注意这里是开启子进程
                 rewriteAppendOnlyFileBackground();
             }
         }
@@ -2236,14 +2234,16 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* AOF postponed flush: Try at every cron cycle if the slow fsync
      * completed.
-     * 代表aof刷盘被延迟了 现在开始执行刷盘任务
+     * 当某次尝试对aof文件进行刷盘时 发现已经存在一个刷盘任务了 需要延迟执行刷盘操作就会在此时执行
      * */
     if (server.aof_flush_postponed_start) flushAppendOnlyFile(0);
 
     /* AOF write errors: in this case we have a buffer to flush as well and
      * clear the AOF error in case of success to make the DB writable again,
      * however to try every second is enough in case of 'hz' is set to
-     * a higher frequency. */
+     * a higher frequency.
+     * 每间隔一段时间 发现上一次aof的写入失败了 就在此时执行aof写入以及刷盘
+     * */
     run_with_period(1000) {
         if (server.aof_last_write_status == C_ERR)
             flushAppendOnlyFile(0);
@@ -2296,7 +2296,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * Note: this code must be after the replicationCron() call above so
      * make sure when refactoring this file to keep this order. This is useful
      * because we want to give priority to RDB savings for replication.
-     * 原本打算执行的某个rdb任务在之前发现已经存在子进程了 设置标记后等待合适的时机 重新生成rdb
+     * 原本打算执行的某个rdb任务在执行前发现已经存在子进程了 设置标记后等待合适的时机重新生成rdb
      * */
     if (!hasActiveChildProcess() &&
         server.rdb_bgsave_scheduled &&
@@ -2444,7 +2444,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * */
     trackingBroadcastInvalidationMessages();
 
-    /* Write the AOF buffer on disk aof文件刷盘 在什么时机写入aof??? */
+    /* Write the AOF buffer on disk aof文件刷盘 */
     flushAppendOnlyFile(0);
 
     /* Handle writes with pending output buffers.

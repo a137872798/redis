@@ -131,7 +131,7 @@ static size_t rioFileWrite(rio *r, const void *buf, size_t len) {
     // 往文件缓冲区中写入了多少数据 还需要刷盘才能交换到磁盘中
     r->io.file.buffered += len;
 
-    // 代表有数据还没有刷盘
+    // 在允许自动刷盘的情况下 每当写入了多少数据就会自动触发一次刷盘
     if (r->io.file.autosync &&
         r->io.file.buffered >= r->io.file.autosync)
     {

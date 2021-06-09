@@ -1279,13 +1279,16 @@ struct redisServer {
     int aof_enabled;                /* AOF configuration */
     // 描述此时aof功能是打开/关闭/等待重写状态
     int aof_state;                  /* AOF_(ON|OFF|WAIT_REWRITE) */
+    // 主线程aof的刷盘策略 子进程生成aof会立即刷盘
     int aof_fsync;                  /* Kind of fsync() policy */
     char *aof_filename;             /* Name of the AOF file */
     int aof_no_fsync_on_rewrite;    /* Don't fsync if a rewrite is in prog. */
     int aof_rewrite_perc;           /* Rewrite AOF if % growth is > M and... */
     off_t aof_rewrite_min_size;     /* the AOF file is at least N bytes. */
     off_t aof_rewrite_base_size;    /* AOF size on latest startup or rewrite. */
+    // 此时aof文件的大小
     off_t aof_current_size;         /* AOF current size. */
+    // 最近一次使用主线程对aof刷盘时 记录的偏移量
     off_t aof_fsync_offset;         /* AOF offset which is already synced to disk. */
     int aof_flush_sleep;            /* Micros to sleep before flush. (used by tests) */
 
@@ -1303,7 +1306,9 @@ struct redisServer {
     time_t aof_rewrite_time_last;   /* Time used by last AOF rewrite run. */
     time_t aof_rewrite_time_start;  /* Current AOF rewrite start time. */
     int aof_lastbgrewrite_status;   /* C_OK or C_ERR */
+    // 每当异步刷盘等待太长时间 而强制执行手动刷盘时该计数值会+1 只是统计相关的
     unsigned long aof_delayed_fsync;  /* delayed AOF fsync() counter */
+    // 在aof数据的增长过程中是否要触发自动刷盘
     int aof_rewrite_incremental_fsync;/* fsync incrementally while aof rewriting? */
     int rdb_save_incremental_fsync;   /* fsync incrementally while rdb saving? */
     int aof_last_write_status;      /* C_OK or C_ERR */
@@ -1317,8 +1322,10 @@ struct redisServer {
     int aof_pipe_read_ack_from_child;
     int aof_pipe_write_ack_to_child;
     int aof_pipe_read_ack_from_parent;
+    // 不再将数据发送到子进程
     int aof_stop_sending_diff;     /* If true stop sending accumulated diffs
                                       to child process. */
+    // 子进程在生成aof时 父进程继续写入的aof_buf的数据
     sds aof_child_diff;             /* AOF diff accumulator child side. */
     /* RDB persistence */
     long long dirty;                /* Changes to DB from the last save */

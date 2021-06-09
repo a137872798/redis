@@ -4397,7 +4397,9 @@ long double RM_LoadLongDouble(RedisModuleIO *io) {
 }
 
 /* Iterate over modules, and trigger rdb aux saving for the ones modules types
- * who asked for it. */
+ * who asked for it.
+ * 某些模块可能需要将某些信息存储在rdb中  在生成rdb数据时 会间接调用该方法
+ * */
 ssize_t rdbSaveModulesAux(rio *rdb, int when) {
     size_t total_written = 0;
     dictIterator *di = dictGetIterator(modules);
