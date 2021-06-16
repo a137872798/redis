@@ -802,7 +802,7 @@ static void clusterConnAcceptHandler(connection *conn) {
      * Initially the link->node pointer is set to NULL as we don't know
      * which node is, but the right node is references once we know the
      * node identity.
-     * 将接收到的conn 包装成link对象  注意此时还没有设置node信息 需要通过接收对端的ping请求来回填node
+     * 被动创建的连接是不会关联node信息的
      * */
     link = createClusterLink(NULL);
     link->conn = conn;
@@ -1100,6 +1100,7 @@ int clusterNodeRemoveSlave(clusterNode *master, clusterNode *slave) {
                         (sizeof(*master->slaves) * remaining_slaves));
             }
             master->numslaves--;
+            // 当master下没有任何slave了 清理该标记
             if (master->numslaves == 0)
                 master->flags &= ~CLUSTER_NODE_MIGRATE_TO;
             return C_OK;
@@ -1124,6 +1125,7 @@ int clusterNodeAddSlave(clusterNode *master, clusterNode *slave) {
                               sizeof(clusterNode *) * (master->numslaves + 1));
     master->slaves[master->numslaves] = slave;
     master->numslaves++;
+    // 只要master下至少有一个slave 就会设置这个标记
     master->flags |= CLUSTER_NODE_MIGRATE_TO;
     return C_OK;
 }
@@ -1693,6 +1695,7 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
     // 本次采集到了多少个节点的数据
     uint16_t count = ntohs(hdr->count);
     clusterMsgDataGossip *g = (clusterMsgDataGossip *) hdr->data.ping.gossip;
+    // 如果本节点作为一个ping请求的接收者 是有可能找不到sender的 首先link->node为null 其次sender刚好没有加入到集群中 那么他发现的所有节点也无法加入到集群
     clusterNode *sender = link->node ? link->node : clusterLookupNode(hdr->sender);
 
     // 挨个处理每个gossip数据
@@ -1748,11 +1751,12 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
              * we have no pending ping for the node, nor we have failure
              * reports for this node, update the last pong time with the
              * one we see from the other nodes.
-             * 在节点可靠的前提下 既然已经收到了这个节点信息 就不需要主动探测这个节点了
+             * 当前节点是可靠的 同时还没有发送ping请求 同时还没有节点报告该节点不可用 这样的话可以信任本次gossip数据
              * */
             if (!(flags & (CLUSTER_NODE_FAIL | CLUSTER_NODE_PFAIL)) &&
                 node->ping_sent == 0 &&
                 clusterNodeFailureReportsCount(node) == 0) {
+                // g->pong_received 就是sender节点上次收到该节点pong数据的时间戳 这里信任这份数据 直接使用 就省去了发送ping请求的功夫
                 mstime_t pongtime = ntohl(g->pong_received);
                 pongtime *= 1000; /* Convert back to milliseconds. */
 
@@ -1760,7 +1764,6 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
                  * it's greater than our view but is not in the future
                  * (with 500 milliseconds tolerance) from the POV of our
                  * clock.
-                 * 更新该节点的pong 这样就不需要探测该节点了 会无谓的浪费网络带宽
                  * */
                 if (pongtime <= (server.mstime + 500) &&
                     pongtime > node->pong_received) {
@@ -1773,6 +1776,7 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
              * can talk with this other node, update the address, disconnect
              * the old link if any, so that we'll attempt to connect with the
              * new address.
+             * 同一个nodename 对应的节点的地址发生了变化 释放原link 之后会在clusterCron中重新创建连接
              * */
             if (node->flags & (CLUSTER_NODE_FAIL | CLUSTER_NODE_PFAIL) &&
                 !(flags & CLUSTER_NODE_NOADDR) &&
@@ -1787,7 +1791,7 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
                 node->flags &= ~CLUSTER_NODE_NOADDR;
             }
         } else {
-            // 通过nodeName无法在本地找到node数据
+            // 通过nodeName无法在本地找到node数据  此时节点会加入到本地缓存的集群中 前提是sender节点存在 也就是发送请求的节点可靠
 
             /* If it's not in NOADDR state and we don't have it, we
              * add it to our trusted dict with exact nodeid and flag.
@@ -1798,7 +1802,6 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
              * Note that we require that the sender of this gossip message
              * is a well known node in our cluster, otherwise we risk
              * joining another cluster.
-             * 会将该节点加入到集群中 也就是redis集群也具备自主发现功能 并且集群本身没有要求强一致性 在某个时刻可能同时存在多个master
              * */
             if (sender &&
                 !(flags & CLUSTER_NODE_NOADDR) &&
@@ -2237,7 +2240,9 @@ int clusterProcessPacket(clusterLink *link) {
 
         /* If this is a MEET packet from an unknown node, we still process
          * the gossip section here since we have to trust the sender because
-         * of the message type. */
+         * of the message type.
+         * 从未知的节点收到信息 直接处理gossip数据
+         * */
         if (!sender && type == CLUSTERMSG_TYPE_MEET)
             clusterProcessGossipSection(hdr, link);
 
@@ -2248,7 +2253,6 @@ int clusterProcessPacket(clusterLink *link) {
     }
 
     /* PING, PONG, MEET: process config information.
-     * 这里是真正处理ping/pong/meet 上面的逻辑主要是返回一个pong消息
      * */
     if (type == CLUSTERMSG_TYPE_PING || type == CLUSTERMSG_TYPE_PONG ||
         type == CLUSTERMSG_TYPE_MEET) {
@@ -2256,8 +2260,7 @@ int clusterProcessPacket(clusterLink *link) {
                   type == CLUSTERMSG_TYPE_PING ? "ping" : "pong",
                   (void *) link->node);
 
-        // 当本节点作为接收ping请求的节点 创建的conn不会维护node信息
-        // 而作为发送心跳包的节点 会在接收到pong消息后 检测节点是否发生变化
+        // 只有用于发送ping请求的link会维护node信息 此时就是接收到pong
         if (link->node) {
             // 忽略ssl相关的
             if (nodeInHandshake(link->node)) {
@@ -2288,7 +2291,7 @@ int clusterProcessPacket(clusterLink *link) {
                 link->node->flags &= ~CLUSTER_NODE_HANDSHAKE;
                 link->node->flags |= flags & (CLUSTER_NODE_MASTER | CLUSTER_NODE_SLAVE);
                 clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
-                // 发现sender与node信息不匹配  释放link 并且设置save_config标记 之后会在before中持久化文件
+                // 发现sender与node信息不匹配  也就是心跳检测发现错误的节点 将link释放 下次就不会往这个节点发送数据了
             } else if (memcmp(link->node->name, hdr->sender,
                               CLUSTER_NAMELEN) != 0) {
                 /* If the reply has a non matching node ID we
@@ -2509,22 +2512,23 @@ int clusterProcessPacket(clusterLink *link) {
 
         /* Get info from the gossip section
          * 在发送数据包时 ping/pong/meet会携带一些其他节点的信息 这里就是处于剩余的数据
+         * 主要就是判断节点是否下线 如果判断该节点下线了就会往其他节点发送fail数据
          * */
         if (sender) clusterProcessGossipSection(hdr, link);
-
-        // 本次处理的不是ping/pong/meet信息
+        // 对应的情况就是某个节点被确定是下线了
     } else if (type == CLUSTERMSG_TYPE_FAIL) {
         clusterNode *failing;
 
         if (sender) {
-            // 判断该节点是否存在于本地
+            // 本节点是否知道那个下线节点的信息
             failing = clusterLookupNode(hdr->data.fail.about.nodename);
-            // 为node打上fail标记
+            // 要求那个节点此时还没有打上fail的标记 同时不是本节点才处理
             if (failing &&
                 !(failing->flags & (CLUSTER_NODE_FAIL | CLUSTER_NODE_MYSELF))) {
                 serverLog(LL_NOTICE,
                           "FAIL message received from %.40s about %.40s",
                           hdr->sender, hdr->data.fail.about.nodename);
+                // 加上fail标记 以及更新下线时间
                 failing->flags |= CLUSTER_NODE_FAIL;
                 failing->fail_time = now;
                 failing->flags &= ~CLUSTER_NODE_PFAIL;
@@ -2532,6 +2536,7 @@ int clusterProcessPacket(clusterLink *link) {
                                      CLUSTER_TODO_UPDATE_STATE);
             }
         } else {
+            // 未知节点发送的数据直接忽略
             serverLog(LL_NOTICE,
                       "Ignoring FAIL message from unknown node %.40s about %.40s",
                       hdr->sender, hdr->data.fail.about.nodename);
@@ -2592,24 +2597,25 @@ int clusterProcessPacket(clusterLink *link) {
         pauseClients(now + (CLUSTER_MF_TIMEOUT * CLUSTER_MF_PAUSE_MULT));
         serverLog(LL_WARNING, "Manual failover requested by replica %.40s.",
                   sender->name);
-
-        // 某个节点从slave变成master节点
+        // 代表本节点维护的某个节点信息已经过期 需要更新
     } else if (type == CLUSTERMSG_TYPE_UPDATE) {
         clusterNode *n; /* The node the update is about. */
+        // 通过比较epoch来确定哪个信息更新
         uint64_t reportedConfigEpoch =
                 ntohu64(hdr->data.update.nodecfg.configEpoch);
 
-        // 本地没有发送者相关信息 忽略
+        // 如果本次从一个未知的节点收到数据 不处理
         if (!sender) return 1;  /* We don't know the sender. */
         n = clusterLookupNode(hdr->data.update.nodecfg.nodename);
-        // 本地没有本次更新的节点信息 忽略
+        // 本地找不到待更新的节点 忽略
         if (!n) return 1;   /* We don't know the reported node. */
 
-        // 本地节点的信息版本号更新 忽略本次处理
+        // 本地此时的版本更新 忽略
         if (n->configEpoch >= reportedConfigEpoch) return 1; /* Nothing new. */
 
         /* If in our current config the node is a slave, set it as a master.
-         * 将该节点更改成 master 此时本节点可能也是master 也就是集群中同时存在多个master
+         * 当发送心跳请求时 发现某个slot已经被分配到一个新的节点了 这时就会反向发送一个update消息 用于通知本节点有关占有slot的那个节点信息已经过期
+         * 首先slot只能被master节点占有所以要将该节点升级成master
          * */
         if (nodeIsSlave(n)) clusterSetNodeAsMaster(n);
 
@@ -4263,7 +4269,7 @@ void clusterCron(void) {
         // link为空 代表还未尝试建立连接
         if (node->link == NULL) {
             clusterLink *link = createClusterLink(node);
-            // 初始化一个conn对象 并尝试连接该node
+            // 初始化一个conn对象 并尝试连接该node  一旦连接成功会立即发送ping请求
             link->conn = server.tls_cluster ? connCreateTLS() : connCreateSocket();
             connSetPrivateData(link->conn, link);
             // 注意连接的端口是 cport    当连接后就会触发对应的handler
@@ -4289,14 +4295,14 @@ void clusterCron(void) {
 
     /* Ping some random node 1 time every 10 iterations, so that we usually ping
      * one random node every second.
-     * 每个节点都会将自己的信息定期发往其他节点
+     * 每个节点定期会往其它节点发送ping请求 主要用于同步数据
      * */
     if (!(iteration % 10)) {
         int j;
 
         /* Check a few random nodes and ping the one with the oldest
          * pong_received time.
-         * 每次随机检测几个node
+         * 每次抽取5个 并从中找到最久未通信的
          * */
         for (j = 0; j < 5; j++) {
             de = dictGetRandomKey(server.cluster->nodes);
@@ -4341,15 +4347,14 @@ void clusterCron(void) {
         clusterNode *node = dictGetVal(de);
         now = mstime(); /* Use an updated time at every iteration. */
 
-        // 跳过这些节点
+        // 跳过连接未完成的节点和自己
         if (node->flags &
             (CLUSTER_NODE_MYSELF | CLUSTER_NODE_NOADDR | CLUSTER_NODE_HANDSHAKE))
             continue;
 
         /* Orphaned master check, useful only if the current instance
          * is a slave that may migrate to another master.
-         * 检测本节点是否是一个孤儿master
-         * 为什么要求本节点是slave节点 集群中最多有几个master 因为node本身是树形结构 只要有slaves就认为是master么???
+         * 当本节点是slave 并且node是master节点时  TODO 如果myself和node都是master会怎么样?
          * */
         if (nodeIsSlave(myself) && nodeIsMaster(node) && !nodeFailed(node)) {
             // 检测该节点下是否有非fail的slave节点
@@ -4358,7 +4363,7 @@ void clusterCron(void) {
             /* A master is orphaned if it is serving a non-zero number of
              * slots, have no working slaves, but used to have at least one
              * slave, or failed over a master that used to have slaves.
-             * 必须要此时该node下已经分配了slot 才算是孤儿master 为什么
+             * 孤儿节点要求此前必须分配了slot
              * */
             if (okslaves == 0 && node->numslots > 0 &&
                 node->flags & CLUSTER_NODE_MIGRATE_TO) {
