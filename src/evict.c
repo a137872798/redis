@@ -261,22 +261,20 @@ void evictionPoolPopulate(int dbid, dict *sampledict, dict *keydict, struct evic
                pool[k].idle < idle)
             k++;
 
-        // 代表此时idle小于pool中所有元素的idle 并且此时pool是满的 (移除的时候是从后往前移除)
+        // 代表此时idle小于pool中所有元素的idle 并且此时pool是满的 (移除的时候是从后往前移除 插入是从前往后)
         if (k == 0 && pool[EVPOOL_SIZE - 1].key != NULL) {
             /* Can't insert if the element is < the worst element we have
              * and there are no empty buckets. */
             continue;
-            // 代表本次会替换其中的某个元素 并且没有冲突 也就不会有数据的迁移
+            // 代表本次元素会填充到某个slot中
         } else if (k < EVPOOL_SIZE && pool[k].key == NULL) {
             /* Inserting into empty position. No setup needed before insert. */
         } else {
-            // 现在有2种情况会进入这个分支
-            // 1.本次元素idle超过了之前所有的节点 会排挤掉第一个节点
-            // 2.本次定位的slot key已经存在 这里有2种处理方式 将之后的数据往后移动 或者将之前的数据往前移动 总之就是为了空出一个slot
+            // 代表需要替换掉某个元素
 
             /* Inserting in the middle. Now k points to the first element
              * greater than the element to insert.
-             * 最后一个槽如果是空的 一般来说元素应该是从最后一个槽开始填充的 所以不该进入这个分支
+             * 如果此时最后一个元素为空 必然会发生数据的迁移 也就是从插入的位置开始 将后面的数据全部往后移动一位
              * */
             if (pool[EVPOOL_SIZE - 1].key == NULL) {
                 /* Free space on the right? Insert at k shifting
@@ -284,22 +282,18 @@ void evictionPoolPopulate(int dbid, dict *sampledict, dict *keydict, struct evic
 
                 /* Save SDS before overwriting. */
                 sds cached = pool[EVPOOL_SIZE - 1].cached;
-                // 因为最后一个slot为空 所以优先选择将数据后移
                 memmove(pool + k + 1, pool + k,
                         sizeof(pool[0]) * (EVPOOL_SIZE - k - 1));
-                // 这里使用一个cached属性存储之前维护的sds
                 pool[k].cached = cached;
             } else {
                 /* No free space on right? Insert at k-1 */
-                // 冲突时将k插入到 k-1的位置 所以这里 k--  同时k-1之前的数据全部往前移动
+                // 这种情况代表pool已经满了 就会将插入位置之前的数据前移
                 k--;
                 /* Shift all elements on the left of k (included) to the
                  * left, so we discard the element with smaller idle time.*/
                 sds cached = pool[0].cached; /* Save SDS before overwriting. */
                 if (pool[0].key != pool[0].cached) sdsfree(pool[0].key);
-                // 将k之前的元素向前移动一位 这样pool[0]就会被移除
                 memmove(pool, pool + 1, sizeof(pool[0]) * k);
-                // 这种情况下 k.cached存储的就是原[0]对应的cached
                 pool[k].cached = cached;
             }
         }
@@ -308,8 +302,8 @@ void evictionPoolPopulate(int dbid, dict *sampledict, dict *keydict, struct evic
          * because allocating and deallocating this object is costly
          * (according to the profiler, not my fantasy. Remember:
          * premature optimization bla bla bla.
-         * 上面的操作就是为了定位key
-         * 可能是因为key的复用性很高 这里对key做了缓存
+         * 由于缓存框架本身的特性 得分高的redisObject对应的key可能总是那几个  所以对key做了缓存
+         * 这里有关pool[k].cached的作用看的不是很明白，但是对淘汰排名逻辑本身没有影响。
          * */
         int klen = sdslen(key);
         // 当key的长度没有超过最大缓存长度时 才会复用sds 否则会生成一个新的sds
@@ -623,11 +617,11 @@ int freeMemoryIfNeeded(void) {
                     }
                 }
 
-                // 代表此时db下没有任何key 也就无法淘汰数据
+                // 代表此时db下没有任何key/或者在expires中没有任何key 也就无法淘汰数据
                 if (!total_keys) break; /* No keys to evict. */
 
                 /* Go backward from best to worst element to evict.
-                 * 从后往前看 因为在pool中 idle得分越高的在越后面
+                 * 从后往前看,因为在pool中idle得分越高的在越后面
                  * */
                 for (k = EVPOOL_SIZE - 1; k >= 0; k--) {
                     if (pool[k].key == NULL) continue;
@@ -661,8 +655,7 @@ int freeMemoryIfNeeded(void) {
         }
 
             /* volatile-random and allkeys-random policy
-             * 采用非lru lfu ttl 的淘汰策略时
-             * 随机淘汰策略  上面的话扫描n个db后 仅选出了一个key 效率会不会太低啊
+             * 这里选择的是随机淘汰策略 上面的话扫描n个db后仅选出了一个key效率会不会太低？
              * 这里随机选出一个key后就可以直接返回了
              * */
         else if (server.maxmemory_policy == MAXMEMORY_ALLKEYS_RANDOM ||
@@ -685,7 +678,7 @@ int freeMemoryIfNeeded(void) {
         }
 
         /* Finally remove the selected key.
-         * 如果找到了最合适被移除的key
+         * 代表本轮找到了合适的key
          * */
         if (bestkey) {
             db = server.db + bestdbid;
@@ -706,9 +699,9 @@ int freeMemoryIfNeeded(void) {
             delta = (long long) zmalloc_used_memory();
             latencyStartMonitor(eviction_latency);
 
-            // 判断是否采用惰性释放的方式 进行淘汰
+            // 判断是否采用惰性释放的方式删除对象
             // 无论是同步还是异步都会立即从db中删除这个key  但是内存的释放可能会延后(调用dbAsyncDelete不一定就会通过bio进行释放 还要看本次要释放的redisObject大小
-            // 只有对象比较大的时候 回收耗时长 才会创建bio回收任务)
+            // 只有对象比较大的时候 回收耗时长 才会通过bio回收任务)
             if (server.lazyfree_lazy_eviction)
                 dbAsyncDelete(db, keyobj);
             else
@@ -731,7 +724,7 @@ int freeMemoryIfNeeded(void) {
              * start spending so much time here that is impossible to
              * deliver data to the slaves fast enough, so we force the
              * transmission here inside the loop.
-             * 此时将slave的数据尽可能的发送出去
+             * 提前将缓冲区的数据发送出去 主要是同步副本的删除命令 避免副本没有足够的空间执行之后的命令
              * */
             if (slaves) flushSlavesOutputBuffers();
 
@@ -742,7 +735,7 @@ int freeMemoryIfNeeded(void) {
              * memory, since the "mem_freed" amount is computed only
              * across the dbAsyncDelete() call, while the thread can
              * release the memory all the time.
-             * 每当释放的key 满16个时 检查是否有足够的空间
+             * 如果采用的是惰性删除，内存的释放是异步的，那么每隔16轮主动去重新检测内存是否足够
              * */
             if (server.lazyfree_lazy_eviction && !(keys_freed % 16)) {
                 if (getMaxmemoryState(NULL, NULL, NULL, NULL) == C_OK) {

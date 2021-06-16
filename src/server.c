@@ -1827,7 +1827,7 @@ void databasesCron(void) {
             // 本次传入的过期检测模式是慢检测  如果是快检测会判断时间间隔是否太短，太短就会直接结束检测流程
             activeExpireCycle(ACTIVE_EXPIRE_CYCLE_SLOW);
         } else {
-            // 副本删除过期key
+            // 副本删除过期key TODO 实际上master的删除自然会同步到副本上  这里为什么要单独开出一个分支专门处理副本的删除呢 内部的slaveKeysWithExpire 又是怎么产生的?
             expireSlaveKeys();
         }
     }
@@ -3615,7 +3615,7 @@ struct redisCommand *lookupCommandOrOriginal(sds name) {
  * However for functions that need to (also) propagate out of the context of a
  * command execution, for example when serving a blocked client, you
  * want to use propagate().
- * 将某个command 传播到副本或者aof
+ * 将某个command 同步到副本或者aof
  */
 void propagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
                int flags)
@@ -3659,7 +3659,7 @@ void alsoPropagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
 /* It is possible to call the function forceCommandPropagation() inside a
  * Redis command implementation in order to to force the propagation of a
  * specific command execution into AOF / Replication.
- * 如果设置了传播标记 追加2个force标记
+ * 在原有的传播标记上 追加force标记
  * */
 void forceCommandPropagation(client *c, int flags) {
     if (flags & PROPAGATE_REPL) c->flags |= CLIENT_FORCE_REPL;
@@ -3734,7 +3734,7 @@ void call(client *c, int flags) {
 
     /* Send the command to clients in MONITOR mode if applicable.
      * Administrative commands are considered too dangerous to be shown.
-     * TODO 先忽略监控器
+     * TODO 先忽略监控节点
      * */
     if (listLength(server.monitors) &&
         !server.loading &&
@@ -3745,13 +3745,12 @@ void call(client *c, int flags) {
 
     /* Initialization: clear the flags that must be set by the command on
      * demand, and initialize the array for additional commands propagation.
-     * 移除掉force标记和prevent标记
+     * 去掉这些标记 避免影响之后的判断
      * */
     c->flags &= ~(CLIENT_FORCE_AOF|CLIENT_FORCE_REPL|CLIENT_PREVENT_PROP);
 
-    // 获取之前存储的所有需要传播的任务
+    // 每当执行某个新的command时 重置also_propagate 这是不同于事务的另一套体系
     redisOpArray prev_also_propagate = server.also_propagate;
-    // 重置also_propagate
     redisOpArrayInit(&server.also_propagate);
 
     /* Call the command.
@@ -3760,10 +3759,10 @@ void call(client *c, int flags) {
     dirty = server.dirty;
     updateCachedTime(0);
     start = server.ustime;
-    // 执行command 此时可能会发起对某些redisObject的操作 同时可能会将某些信息返回给client
+    // 执行command 此时可能会发起对某些redisObject的操作 同时可能会将某些信息写入到client的缓冲区
     c->cmd->proc(c);
     duration = ustime()-start;
-    // 计算执行函数后 有多少key受到影响
+    // 代表有多少个redisObject受打影响
     dirty = server.dirty-dirty;
     if (dirty < 0) dirty = 0;
 
@@ -3816,12 +3815,12 @@ void call(client *c, int flags) {
     }
 
     /* Propagate the command into the AOF and replication link
-     * 被打上 CMD_CALL_PROPAGATE_AOF/CMD_CALL_PROPAGATE_REPL  并且此时没有处于保护状态
-     * TODO 目前没看到打上标记的逻辑   应该是在执行command时设置的
+     * 原本要求同步到aof以及rep上  而执行command后 并没有需要防止所有的传播 换句话就是需要传播
      * */
     if (flags & CMD_CALL_PROPAGATE &&
         (c->flags & CLIENT_PREVENT_PROP) != CLIENT_PREVENT_PROP)
     {
+        // 是否会传播需要通过下面的逻辑判断  比如执行multi实际上不会触发传播 而在执行exec命令时会将multi包括内部所有子命令一起传播 (前提是内部所有command中只要有一条满足传播条件，也就是非只读，非admin)
         int propagate_flags = PROPAGATE_NONE;
 
         /* Check if the command operated changes in the data set. If so
@@ -3831,13 +3830,18 @@ void call(client *c, int flags) {
         if (dirty) propagate_flags |= (PROPAGATE_AOF|PROPAGATE_REPL);
 
         /* If the client forced AOF / replication of the command, set
-         * the flags regardless of the command effects on the data set. */
+         * the flags regardless of the command effects on the data set.
+         * 可能数据没有变化 根据执行的command判断需要同步的是哪种类型
+         * */
         if (c->flags & CLIENT_FORCE_REPL) propagate_flags |= PROPAGATE_REPL;
         if (c->flags & CLIENT_FORCE_AOF) propagate_flags |= PROPAGATE_AOF;
 
         /* However prevent AOF / replication propagation if the command
          * implementation called preventCommandPropagation() or similar,
-         * or if we don't have the call() flags to do so. */
+         * or if we don't have the call() flags to do so.
+         * 目前仅在set/stream中看到设置保护模式 先忽略
+         * 可能某些情况下此时不适合同步到aof或者是副本上 这里情况就不展开了
+         * */
         if (c->flags & CLIENT_PREVENT_REPL_PROP ||
             !(flags & CMD_CALL_PROPAGATE_REPL))
                 propagate_flags &= ~PROPAGATE_REPL;
@@ -3848,30 +3852,29 @@ void call(client *c, int flags) {
         /* Call propagate() only if at least one of AOF / replication
          * propagation is needed. Note that modules commands handle replication
          * in an explicit way, so we never replicate them automatically.
-         * TODO
+         * 将本次操作写入到aof以及同步到其他副本
          * */
         if (propagate_flags != PROPAGATE_NONE && !(c->cmd->flags & CMD_MODULE))
             propagate(c->cmd,c->db->id,c->argv,c->argc,propagate_flags);
     }
 
     /* Restore the old replication flags, since call() can be executed
-     * recursively. */
+     * recursively.  这2步是恢复调用前的flags */
     c->flags &= ~(CLIENT_FORCE_AOF|CLIENT_FORCE_REPL|CLIENT_PREVENT_PROP);
-
-    // 恢复之前的flags
     c->flags |= client_old_flags &
         (CLIENT_FORCE_AOF|CLIENT_FORCE_REPL|CLIENT_PREVENT_PROP);
+
+    // 以上已经执行完command 并且同时写入到了aof和副本中 (对于aof并不会同步刷盘，写入效率高，但是存在数据丢失问题，接下来就要看如何解决这个问题，副本的写入是异步的)
 
     /* Handle the alsoPropagate() API to handle commands that want to propagate
      * multiple separated commands. Note that alsoPropagate() is not affected
      * by CLIENT_PREVENT_PROP flag.
-     * 现在开始将之前囤积的所有任务 同步到aof和副本上  为什么不直接同步呢 是因为某些command在一个事务中么???
+     * 这些是module相关的 module可以理解为一种插件系统 这里的逻辑先忽略 (在redistSet中有看到相关的逻辑)
      * */
     if (server.also_propagate.numops) {
         int j;
         redisOp *rop;
 
-        // TODO
         if (flags & CMD_CALL_PROPAGATE) {
             int multi_emitted = 0;
             /* Wrap the commands in server.also_propagate array,
@@ -3879,18 +3882,18 @@ void call(client *c, int flags) {
              * in case the nested MULTI/EXEC.
              *
              * And if the array contains only one command, no need to
-             * wrap it, since the single command is atomic. */
+             * wrap it, since the single command is atomic.
+             * 这里可以简单理解成传播了一个事务命令
+             * */
             if (server.also_propagate.numops > 1 &&
                 !(c->cmd->flags & CMD_MODULE) &&
                 !(c->flags & CLIENT_MULTI) &&
                 !(flags & CMD_CALL_NOWRAP))
             {
-                // 先传播一条multi命令到各个client上
                 execCommandPropagateMulti(c);
                 multi_emitted = 1;
             }
 
-            // 处理之前囤积的所有同步command
             for (j = 0; j < server.also_propagate.numops; j++) {
                 rop = &server.also_propagate.ops[j];
                 int target = rop->target;
@@ -3901,21 +3904,18 @@ void call(client *c, int flags) {
                     propagate(rop->cmd,rop->dbid,rop->argv,rop->argc,target);
             }
 
-            // 此时可以提交之前出来的所有command了  为什么redis会需要事务 基于什么原因引出这个概念
             if (multi_emitted) {
                 execCommandPropagateExec(c);
             }
         }
-        // 此时以及处理完所有also_propagate命令了 所以可以清除list
         redisOpArrayFree(&server.also_propagate);
     }
 
-    // 还原之前所有待执行的传播任务   也就是上面执行的传播任务都是在执行command后产生的
+    // 还原数据 看来会存在嵌套的场景
     server.also_propagate = prev_also_propagate;
 
     /* If the client has keys tracking enabled for client side caching,
      * make sure to remember the keys it fetched via this command.
-     * 代表本次command 仅仅是访问redisObject 而没有修改数据
      * TODO 忽略track
      * */
     if (c->cmd->flags & CMD_READONLY) {
@@ -4036,9 +4036,10 @@ int processCommand(client *c) {
     // 代表当前command不应该在oom的情况下继续执行
     int is_denyoom_command = (c->cmd->flags & CMD_DENYOOM) ||
                              (c->cmd->proc == execCommand && (c->mstate.cmd_flags & CMD_DENYOOM));
-    // 以下2个标记之后再看
+    // 该command是否允许在游离的节点上执行
     int is_denystale_command = !(c->cmd->flags & CMD_STALE) ||
                                (c->cmd->proc == execCommand && (c->mstate.cmd_inv_flags & CMD_STALE));
+    // 当前节点数据加载还未完成 是否允许执行
     int is_denyloading_command = !(c->cmd->flags & CMD_LOADING) ||
                                  (c->cmd->proc == execCommand && (c->mstate.cmd_inv_flags & CMD_LOADING));
 
@@ -4123,15 +4124,16 @@ int processCommand(client *c) {
      * 代表redis服务器有设置内存使用上限
      * */
     if (server.maxmemory && !server.lua_timedout) {
-        // 这里判断此时是否有足够的内存  释放内存的方式就会涉及到内存淘汰策略
+        // 这里判断此时是否有足够的内存  释放内存的方式就会涉及到内存淘汰策略  某些命令不支持在oom的情况下继续执行
         int out_of_memory = freeMemoryIfNeededAndSafe() == C_ERR;
         /* freeMemoryIfNeeded may flush slave output buffers. This may result
          * into a slave, that may be the active client, to be freed.
-         * TODO current_client 代表此时正在执行哪个client发起的命令 什么情况下会被置空
+         * 在freeMemoryIfNeeded中 会将slave缓冲区中的数据尽可能的发送出去，是为了尽快的同步delCommand 避免slave节点内存不足，在这个过程中可能会间接导致与该client的连接断开(比如发生了什么错误)
+         * 在调用unlinkClient后就会将current_client置空 此时也就没有继续执行command的必要了
          * */
         if (server.current_client == NULL) return C_ERR;
 
-        // 判断当前command是否不允许在oom的情况下执行 比如get操作不会使用新内存 还是可以正常执行的
+        // 判断当前command是否不允许在oom的情况下执行 比如get操作不会申请新内存 还是可以正常执行的
         int reject_cmd_on_oom = is_denyoom_command;
         /* If client is in MULTI/EXEC context, queuing may consume an unlimited
          * amount of memory, so we want to stop that.
@@ -4170,14 +4172,13 @@ int processCommand(client *c) {
 
     /* Don't accept write commands if there are problems persisting on disk
      * and if this is a master instance.
-     * 检测redis在执行磁盘写入时是否出现了异常 这里的磁盘写入异常指的是 aof/rdb写入异常
+     * 检查最近的一次aof/rdb写入是否正常
      * */
     int deny_write_type = writeCommandsDeniedByDiskError();
 
-    // 代表此时无法正常将数据写入到磁盘 并且本次收到的是一条write命令
+    // 此时aof/rdb无法正常工作  顺便提一下aof默认是关闭的，redis可以仅依靠满足saveparam触发rdb的生成来实现可用性(但不是高可用，数据可能会丢失)
+    // 并且本节点是master节点 也就意味着无法通过与master节点的数据同步实现数据恢复 并且本次是一次写入命令 或者是一次探测命令(pingCommand同时兼具了检测对端节点能否正常工作的任务)
     if (deny_write_type != DISK_ERROR_TYPE_NONE &&
-    // TODO 这个条件应该是代表当前节点是master节点 也就是副本即使发现此时rdb/aof写入失败 也要执行command
-    //  (也就是副本能否正常的进行刷盘实际上是不关心的 只要master能够正常刷盘就可以)
         server.masterhost == NULL &&
         (is_write_command ||c->cmd->proc == pingCommand))
     {
@@ -4192,14 +4193,12 @@ int processCommand(client *c) {
 
     /* Don't accept write commands if there are not enough good slaves and
      * user configured the min-slaves-to-write option.
-     * 当前节点是master节点就要检测此时有多少能正常工作的slave节点
+     * 当前可以正常工作的slave节点数量低于要求的最小值， 无法执行命令 对最小可用slave数量有所限制是为了保障高可用性
+     * TODO 有关集群/副本/分片的逻辑之后梳理
      * */
     if (server.masterhost == NULL &&
         server.repl_min_slaves_to_write &&
-        // 滞后节点是干嘛的
         server.repl_min_slaves_max_lag &&
-        is_write_command &&
-        // 当此时可用的slave节点过少时 任务本次数据可能会丢失 所以拒绝本次请求
         server.repl_good_slaves_count < server.repl_min_slaves_to_write)
     {
         rejectCommand(c, shared.noreplicaserr);
@@ -4208,7 +4207,7 @@ int processCommand(client *c) {
 
     /* Don't accept write commands if this is a read only slave. But
      * accept write commands if this is our master.
-     * 当前节点是slave节点 并且是一个只读节点是不能接收外部的写入操作的 但是master的写入任务还是会执行(复写)
+     * repl_slave_ro 代表当前slave节点是一个只读节点，无法执行写入命令
      * */
     if (server.masterhost && server.repl_slave_ro &&
         !(c->flags & CLIENT_MASTER) &&
@@ -4220,7 +4219,7 @@ int processCommand(client *c) {
 
     /* Only allow a subset of commands in the context of Pub/Sub if the
      * connection is in RESP2 mode. With RESP3 there are no limits.
-     * 某个订阅发布的client 只能发起这些指令
+     * 如果该client是作为本节点的订阅者，只能执行以下命令
      * */
     if ((c->flags & CLIENT_PUBSUB && c->resp == 2) &&
         c->cmd->proc != pingCommand &&
@@ -4238,10 +4237,10 @@ int processCommand(client *c) {
     /* Only allow commands with flag "t", such as INFO, SLAVEOF and so on,
      * when slave-serve-stale-data is no and we are a slave with a broken
      * link with master.
-     * 当前是slave节点 并且与集群断开连接
+     * 当前slave节点处于游离状态时 是否允许执行命令 (游离状态就代表此时本节点的数据不是最新的  因为缺少了同步数据的目标节点)
      * */
     if (server.masterhost && server.repl_state != REPL_STATE_CONNECTED &&
-    // TODO 这2个参数???
+    // repl_serve_stale_data 默认为1，也就是允许在游离节点上执行命令 在生产环境下为保证一致性应该将该配置设置成0
         server.repl_serve_stale_data == 0 &&
         is_denystale_command)
     {
@@ -4287,7 +4286,7 @@ int processCommand(client *c) {
 
     /* Exec the command
      * 在通过参数校验 command执行权限校验 内存校验 节点状态校验后 终于开始执行command
-     * 如果发现本次执行的是一个批任务 并且本次不是表示终止的任务 将command 加入到队列中
+     * 如果发现本次执行的是一个批任务 并且本次不是表示终止的任务 将command加入到队列中
      * */
     if (c->flags & CLIENT_MULTI &&
         c->cmd->proc != execCommand && c->cmd->proc != discardCommand &&
@@ -4296,10 +4295,13 @@ int processCommand(client *c) {
         queueMultiCommand(c);
         addReply(c,shared.queued);
     } else {
-        // 在执行任务的过程中又会涉及到 aof/slave节点的数据复写
+        // 这里传入的CMD_CALL_FULL包含了CMD_CALL_PROPAGATE_REPL 而CMD_CALL_PROPAGATE_REPL等同于CMD_CALL_PROPAGATE_AOF|CMD_CALL_PROPAGATE_REPL
+        // 也就是默认情况下需要将任务同步到aof和slave上
         call(c,CMD_CALL_FULL);
+        // TODO 副本相关
         c->woff = server.master_repl_offset;
-        // 在执行完某些任务后 可能某些key会被加入到ready_keys 此时就可以唤醒阻塞等待这些key的client
+        // 在执行完某些任务后 可能某些key会被加入到ready_keys (在执行dbAdd时就会将key设置到ready_keys中)
+        // 此时就可以唤醒阻塞等待这些key的client  什么情况会产生被阻塞的client
         if (listLength(server.ready_keys))
             handleClientsBlockedOnKeys();
     }

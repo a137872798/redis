@@ -181,16 +181,21 @@ robj *lookupKeyWriteOrReply(client *c, robj *key, robj *reply) {
 /* Add the key to the DB. It's up to the caller to increment the reference
  * counter of the value if needed.
  *
- * The program is aborted if the key already exists. */
+ * The program is aborted if the key already exists.
+ * 往db中追加一个新的redisObject
+ * */
 void dbAdd(redisDb *db, robj *key, robj *val) {
     sds copy = sdsdup(key->ptr);
     int retval = dictAdd(db->dict, copy, val);
 
     serverAssertWithInfo(NULL,key,retval == DICT_OK);
+    // 仅以下3种类型支持block操作
     if (val->type == OBJ_LIST ||
         val->type == OBJ_ZSET ||
         val->type == OBJ_STREAM)
         signalKeyAsReady(db, key);
+    // 将节点加入到路由表中
+    // TODO 在主从模型下 能够接收请求的必然是master节点 也就是master管理所有路由信息? 副本会管理路由信息么??
     if (server.cluster_enabled) slotToKeyAdd(key->ptr);
 }
 
@@ -1352,12 +1357,13 @@ long long getExpire(redisDb *db, robj *key) {
  * AOF and the master->slave link guarantee operation ordering, everything
  * will be consistent even if we allow write operations against expiring
  * keys.
+ * 将某个redisObject已经过期的信息同步到副本和aof上
  * @param lazy 是否采用惰性淘汰的方式
  * */
 void propagateExpire(redisDb *db, robj *key, int lazy) {
     robj *argv[2];
 
-    // 这里生成参数信息 准备将指令发往slave节点
+    // 生成unlink或者del命令
     argv[0] = lazy ? shared.unlink : shared.del;
     argv[1] = key;
     incrRefCount(argv[0]);
@@ -1366,7 +1372,7 @@ void propagateExpire(redisDb *db, robj *key, int lazy) {
     // 如果此时aof处于可用状态 将本次command信息记录到aof文件中
     if (server.aof_state != AOF_OFF)
         feedAppendOnlyFile(server.delCommand,db->id,argv,2);
-    // 将本次命令传播到本节点下的所有副本(只是将数据写入到缓冲区 还没有真正写入socket)
+    // 将本次命令传播到本节点下的所有副本(只是将数据写入到缓冲区 还没有真正写入socket 有关socket的写入是在beforeSleep中执行的 也就是将io操作尽可能合并在一块执行)
     replicationFeedSlaves(server.slaves,db->id,argv,2);
 
     decrRefCount(argv[0]);
@@ -1440,7 +1446,9 @@ int expireIfNeeded(redisDb *db, robj *key) {
      *
      * Still we try to return the right information to the caller,
      * that is, 0 if we think the key should be still valid, 1 if
-     * we think the key is expired at this time. */
+     * we think the key is expired at this time.
+     * 当key过期的情况 要同步到其他节点上(仅针对master)
+     * */
     if (server.masterhost != NULL) return 1;
 
     /* Delete the key */

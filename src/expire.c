@@ -63,7 +63,7 @@ int activeExpireCycleTryExpire(redisDb *db, dictEntry *de, long long now) {
         // 将key转换成redisObject
         robj *keyobj = createStringObject(key,sdslen(key));
 
-        // 在aof中追加一个command 并且将数据写入到各个slave的buf中 TODO 什么时候真正将数据发送到slave
+        // 在aof中追加一个command 并且将数据写入到各个slave的buf中
         propagateExpire(db,keyobj,server.lazyfree_lazy_expire);
         // 如果是惰性处理方式 也就是执行异步删除
         if (server.lazyfree_lazy_expire)

@@ -112,6 +112,7 @@ static int connSocketConnect(connection *conn, const char *addr, int port, const
     conn->fd = fd;
     conn->state = CONN_STATE_CONNECTING;
 
+    // 在ae_handler处理事件时 会回调conn_handler
     conn->conn_handler = connect_handler;
     aeCreateFileEvent(server.el, conn->fd, AE_WRITABLE,
             conn->type->ae_handler, conn);
@@ -244,6 +245,7 @@ static int connSocketSetReadHandler(connection *conn, ConnectionCallbackFunc fun
     if (!conn->read_handler)
         aeDeleteFileEvent(server.el,conn->fd,AE_READABLE);
     else
+        // 实际上注册的是ae_handler 再由ae_handler转发到read_handler
         if (aeCreateFileEvent(server.el,conn->fd,
                     AE_READABLE,conn->type->ae_handler,conn) == AE_ERR) return C_ERR;
     return C_OK;

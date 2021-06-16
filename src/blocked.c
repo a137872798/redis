@@ -251,7 +251,6 @@ void disconnectAllBlockedClients(void) {
 void serveClientsBlockedOnListKey(robj *o, readyList *rl) {
     /* We serve clients in the same order they blocked for
      * this key, from the first blocked to the last.
-     *
      * */
     dictEntry *de = dictFind(rl->db->blocking_keys,rl->key);
 
@@ -286,7 +285,7 @@ void serveClientsBlockedOnListKey(robj *o, readyList *rl) {
             if (value) {
                 /* Protect receiver->bpop.target, that will be
                  * freed by the next unblockClient()
-                 * call. TODO */
+                 * call. */
                 if (dstkey) incrRefCount(dstkey);
                 // 此时client 已经等到了数据 可以从阻塞状态解除了  在这里会将client从blocking_keys对应的robjList移除
                 unblockClient(receiver);
@@ -537,7 +536,7 @@ void serveClientsBlockedOnKeyByModule(readyList *rl) {
  * other side of the linked list. However as long as the key starts to
  * be used only for a single type, like virtually any Redis application will
  * do, the function is already fair.
- * 此时某些key可能已经准备好了 将由于等待这些key而阻塞的client唤醒
+ * 此时某些key可能已经准备好了 将由于等待这些key而阻塞的client唤醒，并处理囤积的任务
  * */
 void handleClientsBlockedOnKeys(void) {
     while(listLength(server.ready_keys) != 0) {
@@ -727,7 +726,7 @@ void unblockClientWaitingData(client *c) {
  * made by a script or in the context of MULTI/EXEC.
  *
  * The list will be finally processed by handleClientsBlockedOnKeys()
- * 当某些等待的key被设置后 进行相关处理
+ * 检测是否有某些client正在等待该key
  * */
 void signalKeyAsReady(redisDb *db, robj *key) {
     readyList *rl;
@@ -735,7 +734,9 @@ void signalKeyAsReady(redisDb *db, robj *key) {
     /* No clients blocking for this key? No need to queue it. */
     if (dictFind(db->blocking_keys,key) == NULL) return;
 
-    /* Key was already signaled? No need to queue it again. */
+    /* Key was already signaled? No need to queue it again.
+     * 如果已经存在与ready_keys 中了 就不需要重复处理
+     * */
     if (dictFind(db->ready_keys,key) != NULL) return;
 
     /* Ok, we need to queue this key into server.ready_keys. */

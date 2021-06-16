@@ -134,8 +134,13 @@ typedef struct clusterNode {
                                     may be NULL even if the node is a slave
                                     if we don't have the master node in our
                                     tables. */
+
+    // ping_sent/pong_received 只会存在一个
+    // 最近一次本节点发送到目标节点的心跳请求的时间戳
     mstime_t ping_sent;      /* Unix time we sent latest ping */
+    // 最近一次从目标节点收到pong消息的时间戳
     mstime_t pong_received;  /* Unix time we received the pong */
+    // 最近一次收到该节点消息包的时间戳
     mstime_t data_received;  /* Unix time we received any data */
     // 将该节点设置成fail的时间戳
     mstime_t fail_time;      /* Unix time when FAIL flag was set */
@@ -292,6 +297,7 @@ typedef struct {
                                slave. */
     uint64_t offset;    /* Master replication offset if node is a master or
                            processed replication offset if node is a slave. */
+    // 本条消息是由哪个节点发出的
     char sender[CLUSTER_NAMELEN]; /* Name of the sender node */
     unsigned char myslots[CLUSTER_SLOTS/8];
     char slaveof[CLUSTER_NAMELEN];

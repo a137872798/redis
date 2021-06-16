@@ -252,7 +252,7 @@ void feedReplicationBacklogWithObject(robj *o) {
  * the commands received by our clients in order to create the replication
  * stream. Instead if the instance is a slave and has sub-slaves attached,
  * we use replicationFeedSlavesFromMasterStream()
- * 将某个命令发往slaves中的所有节点
+ * 将本次操作同步到所有从节点
  * @param dictid 因为每个command都是以db为单位进行同步的 这里是当前要同步的db
  * */
 void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
@@ -2897,7 +2897,7 @@ int cancelReplicationHandshake(void) {
 }
 
 /* Set replication to the specified master address and port.
- * 设置master的ip/port
+ * 更新本节点感知到的master信息
  * */
 void replicationSetMaster(char *ip, int port) {
     int was_master = server.masterhost == NULL;
@@ -3587,7 +3587,7 @@ void processClientsWaitingReplicas(void) {
 
 /* Return the slave replication offset for this instance, that is
  * the offset for which we already processed the master replication stream.
- * 当本节点作为slave时 将自己的偏移量上报给master节点
+ * 将本节点记录的master的最近一次偏移量返回
  * */
 long long replicationGetSlaveOffset(void) {
     long long offset = 0;

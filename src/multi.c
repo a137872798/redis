@@ -132,10 +132,10 @@ void discardCommand(client *c) {
 
 /* Send a MULTI command to all the slaves and AOF file. Check the execCommand
  * implementation for more information.
- * 代表需要传播一个multi命令
+ * 代表开启了一个事务
  * */
 void execCommandPropagateMulti(client *c) {
-    propagate(server.multiCommand,c->db->id,&shared.multi,1,
+   server.multiCommand,c->db->id,&shared.multi,1,
               PROPAGATE_AOF|PROPAGATE_REPL);
 }
 
@@ -192,6 +192,9 @@ void execCommand(client *c) {
      * (technically it is not an error but a special behavior), while
      * in the second an EXECABORT error is returned.
      * 本次事务命令数据已经发生了变化 无法按照预期的情况运行了 丢弃本次所有命令
+     * 当key对应的redisObject发生了变化 对应的标记是CLIENT_DIRTY_CAS
+     * 在往本次事务队列中继续插入command时 如果command因为某些原因无法正常执行,(不同于redisObject被修改) 会加上CLIENT_DIRTY_EXEC标记
+     *
      * */
     if (c->flags & (CLIENT_DIRTY_CAS|CLIENT_DIRTY_EXEC)) {
         addReply(c, c->flags & CLIENT_DIRTY_EXEC ? shared.execaborterr :
@@ -201,7 +204,7 @@ void execCommand(client *c) {
     }
 
     /* Exec all the queued commands
-     * 这个时候可以取消对所有key的监控了 */
+     * 这个时候可以取消对所有key的监控了 因为是单线程模型 不需要考虑并发问题 (通过线程模型简化功能实现复杂度是很好的思路) */
     unwatchAllKeys(c); /* Unwatch ASAP otherwise we'll waste CPU cycles */
 
     // 记录此时所有参数信息
@@ -210,7 +213,7 @@ void execCommand(client *c) {
     orig_cmd = c->cmd;
     addReplyArrayLen(c,c->mstate.count);
 
-    // 当执行队列中的每个任务时  恢复参数信息
+    // 挨个执行之前事务中存储的所有任务 注意有关command的同步
     for (j = 0; j < c->mstate.count; j++) {
         c->argc = c->mstate.commands[j].argc;
         c->argv = c->mstate.commands[j].argv;
@@ -221,13 +224,14 @@ void execCommand(client *c) {
          * This way we'll deliver the MULTI/..../EXEC block as a whole and
          * both the AOF and the replication link will have the same consistency
          * and atomicity guarantees.
-         * 在非数据恢复阶段 并且本次操作不是只读操作或者系统级别操作(admin)  一般的命令在执行时如果发现是非只读命令 会自动的触发传播逻辑 而当这个command在multi中 为了不丢失事务的语义 要在command外包装一个multiCommand
-         * TODO 有关传播的逻辑需要梳理
+         * 本次事务正常执行 需要将所有command传播到其他节点 (在这里才触发子command的传播)
+         * 如果是只读/管理相关的命令之类的 就不传播了
          * */
         if (!must_propagate &&
             !server.loading &&
             !(c->cmd->flags & (CMD_READONLY|CMD_ADMIN)))
         {
+            // 先传播multiCommand
             execCommandPropagateMulti(c);
             // 在一个事务中该标识只需要设置一次
             must_propagate = 1;
@@ -247,13 +251,13 @@ void execCommand(client *c) {
                 "no permission to execute the command or subcommand" :
                 "no permission to touch the specified keys");
         } else {
-            // 执行command 非readonly/admin命令会触发传播逻辑
-            // TODO 有关执行command 以及传播的整套逻辑在之后整理
+            // 如果是在数据恢复阶段 就代表本次执行command是由aof触发的 不需要重复传播
+            // 在执行call的过程中 会间接同步到其他节点上 只有有必要同步的命令 比如非只读命令
             call(c,server.loading ? CMD_CALL_NONE : CMD_CALL_FULL);
         }
 
         /* Commands may alter argc/argv, restore mstate.
-         * 在执行过程中参数可能会被篡改 这里要进行恢复
+         * 某些command在执行后可能会修改参数 这里将最新的参数回填到mstate.commands上
          * */
         c->mstate.commands[j].argc = c->argc;
         c->mstate.commands[j].argv = c->argv;
@@ -268,7 +272,7 @@ void execCommand(client *c) {
 
     /* Make sure the EXEC command will be propagated as well if MULTI
      * was already propagated.
-     * 如果本次事务任务传播到了其他地方  那么应该还要传播一个exec命令来执行他们
+     * 因为这个exec方法本身就是在最外层的call中触发的 所以不需要在这里再传播一次了
      * */
     if (must_propagate) {
         int is_master = server.masterhost == NULL;
@@ -278,12 +282,10 @@ void execCommand(client *c) {
          * initial MULTI was propagated into the replication backlog, but the
          * rest was not. We need to make sure to at least terminate the
          * backlog with the final EXEC.
-         * TODO 在执行command的过程中会发生角色的变换么
+         * 如果执行的command中更换了master节点 TODO 下面的意图还没理解
          * */
         if (server.repl_backlog && was_master && !is_master) {
-            // 这个参数格式就是command的格式 第一个代表本command需要的参数总数 第二个4 代表第一个参数的长度 exec就是参数信息 与aof数据恢复时采用的解析逻辑一致
             char *execcmd = "*1\r\n$4\r\nEXEC\r\n";
-            // 将exec命令存储到repl_backlog中
             feedReplicationBacklog(execcmd,strlen(execcmd));
         }
     }
@@ -294,7 +296,7 @@ handle_monitor:
      * MUTLI, EXEC, ... commands inside transaction ...
      * Instead EXEC is flagged as CMD_SKIP_MONITOR in the command
      * table, and we do it here with correct ordering.
-     * TODO 每当执行exec命令时 需要发往monitor模块
+     * 先忽略监控模块
      * */
     if (listLength(server.monitors) && !server.loading)
         replicationFeedMonitors(c,server.monitors,c->db->id,c->argv,c->argc);

@@ -2070,7 +2070,9 @@ void commandProcessed(client *c) {
 int processCommandAndResetClient(client *c) {
     int deadclient = 0;
     server.current_client = c;
+    // 在这里已经执行完command了 并且还传播到了aof和副本上 针对由于某些key而阻塞的client 这里也会进行唤醒
     if (processCommand(c) == C_OK) {
+        // 后置处理都跟副本有关
         commandProcessed(c);
     }
     if (server.current_client == NULL) deadclient = 1;
@@ -3169,10 +3171,7 @@ void flushSlavesOutputBuffers(void) {
     while((ln = listNext(&li))) {
         client *slave = listNodeValue(ln);
 
-        // TODO 以下这些条件代表什么
-
-        // 首先只有注册了writeHandler的才代表还有数据未发出
-        // 在副本场景下 如果上一个数据还未收到ack 代表不确定数据是否写入slave成功 就不会发送新的数据 这种也会给client打上一个pending_write标记
+        // 代表有待发送的数据
         int can_receive_writes = connHasWriteHandler(slave->conn) ||
                                  (slave->flags & CLIENT_PENDING_WRITE);
 
@@ -3190,9 +3189,9 @@ void flushSlavesOutputBuffers(void) {
          *
          * 3. Obviously if the slave is not ONLINE.
          */
-        if (slave->replstate == SLAVE_STATE_ONLINE &&
-            can_receive_writes &&
-            !slave->repl_put_online_on_ack &&
+        if (slave->replstate == SLAVE_STATE_ONLINE &&   // 要求副本在线
+            can_receive_writes &&    // 要求有待发送的数据
+            !slave->repl_put_online_on_ack &&  // 这个条件是什么意思
             // 针对该client还有囤积的数据未发出
             clientHasPendingReplies(slave))
         {
