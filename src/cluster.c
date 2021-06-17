@@ -1629,7 +1629,7 @@ int clusterHandshakeInProgress(char *ip, int port, int cport) {
  *
  * EAGAIN - There is already a handshake in progress for this address.
  * EINVAL - IP or port are not valid.
- * 只是将 ip port信息包装成node后 填充到 cluster->nodes中 之后在clusterCron中会进行真正的连接
+ * 外部client通过调用clusterCommand命令 往集群中插入一个新的节点
  * */
 int clusterStartHandshake(char *ip, int port, int cport) {
     clusterNode *n;
@@ -1666,7 +1666,7 @@ int clusterStartHandshake(char *ip, int port, int cport) {
                   (void *) &(((struct sockaddr_in6 *) &sa)->sin6_addr),
                   norm_ip, NET_IP_STR_LEN);
 
-    // 如果当前已经存在该节点  不需要添加新节点
+    // 检测集群中是否已经存在该节点
     if (clusterHandshakeInProgress(norm_ip, port, cport)) {
         errno = EAGAIN;
         return 0;
@@ -1675,7 +1675,9 @@ int clusterStartHandshake(char *ip, int port, int cport) {
     /* Add the node with a random address (NULL as first argument to
      * createClusterNode()). Everything will be fixed during the
      * handshake.
-     * 握手成功后 填充node信息并加入到 nodes列表中
+     * 创建的节点包含handshake标记  注意这个时候节点的名称是未知的
+     * meet的作用实际上是与ping区分开 对端在接收到meet请求后会针对发送方创建一个没有名称 处于handshake状态的节点。之后探测发送节点并处理pong消息，回填nodename
+     * 而ping消息本身不具备这个功能
      * */
     n = createClusterNode(NULL, CLUSTER_NODE_HANDSHAKE | CLUSTER_NODE_MEET);
     memcpy(n->ip, norm_ip, sizeof(n->ip));
@@ -2043,7 +2045,7 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
         clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG |
                              CLUSTER_TODO_UPDATE_STATE |
                              CLUSTER_TODO_FSYNC_CONFIG);
-        // 剩下的这些slot内的数据已经不再数据本节点对应的主从群了  将这部分数据从节点中删除
+        // 剩下的这些slot内的数据已经不在数据本节点对应的主从群了  将这部分数据从节点中删除
     } else if (dirty_slots_count) {
         /* If we are here, we received an update message which removed
          * ownership for certain slots we still have keys about, but still
@@ -2192,7 +2194,7 @@ int clusterProcessPacket(clusterLink *link) {
     }
 
     /* Initial processing of PING and MEET requests replying with a PONG.
-     * 当本次收到的是一个心跳包时
+     * 当本次收到的是一个心跳包时 或者是一个meet包  meet包是用户执行clusterCommand插入的
      */
     if (type == CLUSTERMSG_TYPE_PING || type == CLUSTERMSG_TYPE_MEET) {
         serverLog(LL_DEBUG, "Ping packet received: %p", (void *) link->node);
@@ -2208,7 +2210,7 @@ int clusterProcessPacket(clusterLink *link) {
          * However if we don't have an address at all, we update the address
          * even with a normal PING packet. If it's wrong it will be fixed
          * by MEET later.
-         * TODO 先忽略 meet
+         * 如果本节点为设置自己的ip 在完成连接后 读取本节点ip
          * */
         if ((type == CLUSTERMSG_TYPE_MEET || myself->ip[0] == '\0') &&
             server.cluster_announce_ip == NULL) {
@@ -2226,10 +2228,14 @@ int clusterProcessPacket(clusterLink *link) {
         /* Add this node if it is new for us and the msg type is MEET.
          * In this stage we don't try to add the node with the right
          * flags, slaveof pointer, and so forth, as this details will be
-         * resolved when we'll receive PONGs from the node. */
+         * resolved when we'll receive PONGs from the node.
+         * 如果发送者没有被记录在本地 但是本次是一个meet命令 就为sender创建node并保存在本地
+         * */
         if (!sender && type == CLUSTERMSG_TYPE_MEET) {
             clusterNode *node;
 
+            // 被动创建的节点是CLUSTER_NODE_HANDSHAKE  注意这里没有设置nodename  之后该节点会主动发起心跳请求 因为对端在接收到之前的pong时已经记录了nodename
+            // 所以收到下次的ping请求可以匹配到对应节点 并返回pong 那段修改name的逻辑就可以fuyong6
             node = createClusterNode(NULL, CLUSTER_NODE_HANDSHAKE);
             nodeIp2String(node->ip, link, hdr->myip);
             node->port = ntohs(hdr->port);
@@ -2241,7 +2247,7 @@ int clusterProcessPacket(clusterLink *link) {
         /* If this is a MEET packet from an unknown node, we still process
          * the gossip section here since we have to trust the sender because
          * of the message type.
-         * 从未知的节点收到信息 直接处理gossip数据
+         * 尝试处理携带的其他节点的信息
          * */
         if (!sender && type == CLUSTERMSG_TYPE_MEET)
             clusterProcessGossipSection(hdr, link);
@@ -2262,10 +2268,11 @@ int clusterProcessPacket(clusterLink *link) {
 
         // 只有用于发送ping请求的link会维护node信息 此时就是接收到pong
         if (link->node) {
-            // 忽略ssl相关的
+            // handshake代表还没有确认节点名称的节点
             if (nodeInHandshake(link->node)) {
                 /* If we already have this node, try to change the
                  * IP/port of the node with the new one.
+                 * TODO
                  * */
                 if (sender) {
                     serverLog(LL_VERBOSE,
@@ -2284,6 +2291,7 @@ int clusterProcessPacket(clusterLink *link) {
 
                 /* First thing to do is replacing the random name with the
                  * right node name if this was a handshake stage.
+                 * 因为发送meet请求前还不知道node的名字 在收到pong结果后就可以知道名字了 这里修改后去除CLUSTER_NODE_HANDSHAKE标记
                  * */
                 clusterRenameNode(link->node, hdr->sender);
                 serverLog(LL_DEBUG, "Handshake with node %.40s completed.",
@@ -2719,6 +2727,8 @@ void clusterLinkConnectHandler(connection *conn) {
      * 一般情况下ping_sent 应该是null
      * */
     mstime_t old_ping_sent = node->ping_sent;
+
+    // 用户通过调用clusterCommand插入的node会设置一个meet标记
     clusterSendPing(link, node->flags & CLUSTER_NODE_MEET ?
                           CLUSTERMSG_TYPE_MEET : CLUSTERMSG_TYPE_PING);
 
@@ -4859,7 +4869,8 @@ void clusterUpdateState(void) {
  * The function also uses the logging facility in order to warn the user
  * about desynchronizations between the data we have in memory and the
  * cluster configuration.
- * 当某个节点以集群模式打开时 需要做数据校验
+ * 这里主要是自动分配slot
+ * 此时已经完成了数据恢复
  * */
 int verifyClusterConfigWithData(void) {
     int j;
@@ -4867,23 +4878,30 @@ int verifyClusterConfigWithData(void) {
 
     /* Return ASAP if a module disabled cluster redirections. In that case
      * every master can store keys about every possible hash slot.
-     * 如果集群不支持重定向 也就是每个master都要存储完整的路由表 这样才能定位到有数据的节点
+     * 如果集群不支持重定向 代表每个master都要存储全部数据
      * */
     if (server.cluster_module_flags & CLUSTER_MODULE_FLAG_NO_REDIRECTION)
         return C_OK;
 
     /* If this node is a slave, don't perform the check at all as we
-     * completely depend on the replication stream. 接下来的一些校验都是针对master的 */
+     * completely depend on the replication stream.
+     * slave节点不需要数据校验
+     * */
     if (nodeIsSlave(myself)) return C_OK;
 
-    /* Make sure we only have keys in DB0. */
+    /* Make sure we only have keys in DB0.
+     * master节点要求只能在db0存储数据
+     * */
     for (j = 1; j < server.dbnum; j++) {
         if (dictSize(server.db[j].dict)) return C_ERR;
     }
 
     /* Check that all the slots we see populated memory have a corresponding
-     * entry in the cluster table. Otherwise fix the table. */
+     * entry in the cluster table. Otherwise fix the table.
+     * 根据此时db中的数据 来反推当前master所占有的slots
+     * */
     for (j = 0; j < CLUSTER_SLOTS; j++) {
+        // 跳过没有数据的slot
         if (!countKeysInSlot(j)) continue; /* No keys in this slot. */
         /* Check if we are assigned to this slot or if we are importing it.
          * In both cases check the next slot as the configuration makes
@@ -4897,7 +4915,9 @@ int verifyClusterConfigWithData(void) {
          * assigned to this slot. Fix this condition. */
 
         update_config++;
-        /* Case A: slot is unassigned. Take responsibility for it. */
+        /* Case A: slot is unassigned. Take responsibility for it.
+         * 自动将这个slot划到本节点下
+         * */
         if (server.cluster->slots[j] == NULL) {
             serverLog(LL_WARNING, "I have keys for unassigned slot %d. "
                                   "Taking responsibility for it.", j);
@@ -5235,6 +5255,8 @@ void clusterReplyMultiBulkSlots(client *c) {
  * 所有集群相关的command都在里面 通过阅读内部逻辑可以大体知道cluster是做什么的
  */
 void clusterCommand(client *c) {
+
+    // 当前节点并没有以集群模式开启 无法执行集群命令
     if (server.cluster_enabled == 0) {
         addReplyError(c, "This instance has cluster support disabled");
         return;
@@ -5268,7 +5290,7 @@ void clusterCommand(client *c) {
                 NULL
         };
         addReplyHelp(c, help);
-        // 执行meet命令
+        // meet是用于集群中探测新节点的
     } else if (!strcasecmp(c->argv[1]->ptr, "meet") && (c->argc == 4 || c->argc == 5)) {
         /* CLUSTER MEET <ip> <port> [cport]
          * 4,5号参数 分别代表 port cport  cport是redis集群内节点通信使用的端口
@@ -5299,7 +5321,7 @@ void clusterCommand(client *c) {
         } else {
             addReply(c, shared.ok);
         }
-        // 查看本节点观测到的所有node信息 并转换成文本后返回
+        //
     } else if (!strcasecmp(c->argv[1]->ptr, "nodes") && c->argc == 2) {
         /* CLUSTER NODES */
         sds nodes = clusterGenNodesDescription(0);

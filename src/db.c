@@ -195,7 +195,7 @@ void dbAdd(redisDb *db, robj *key, robj *val) {
         val->type == OBJ_STREAM)
         signalKeyAsReady(db, key);
     // 将节点加入到路由表中
-    // TODO 在主从模型下 能够接收请求的必然是master节点 也就是master管理所有路由信息? 副本会管理路由信息么??
+    // 在集群模式下 master节点会根据key计算slot 并增加计数值
     if (server.cluster_enabled) slotToKeyAdd(key->ptr);
 }
 
