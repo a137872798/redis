@@ -146,6 +146,7 @@ typedef struct clusterNode {
     mstime_t fail_time;      /* Unix time when FAIL flag was set */
     mstime_t voted_time;     /* Last time we voted for a slave of this master */
     mstime_t repl_offset_time;  /* Unix time we received offset for this node */
+    // 本节点被认为是孤儿节点的时间戳
     mstime_t orphaned_time;     /* Starting time of orphaned master condition */
     long long repl_offset;      /* Last known repl offset for this node. */
     char ip[NET_IP_STR_LEN];  /* Latest known IP address of this node */
@@ -165,6 +166,7 @@ typedef struct clusterState {
     clusterNode *myself;  /* This node */
     uint64_t currentEpoch;
     int state;            /* CLUSTER_OK, CLUSTER_FAIL, ... */
+    // 只代表master节点数量
     int size;             /* Num of master nodes with at least one slot */
     // 存储所有节点的字典  key是节点名称
     dict *nodes;          /* Hash table of name -> clusterNode structures */
@@ -179,7 +181,7 @@ typedef struct clusterState {
     /* The following fields are used to take the slave state on elections. */
     mstime_t failover_auth_time; /* Time of previous or next election. */
 
-    // 本节点收到的投票数
+    // 某一轮选举中本节点收到的票数
     int failover_auth_count;    /* Number of votes received so far. */
     int failover_auth_sent;     /* True if we already asked for votes. */
     int failover_auth_rank;     /* This slave rank for current auth request. */

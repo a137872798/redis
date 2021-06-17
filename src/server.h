@@ -296,7 +296,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
                                     buffer configuration. Just the first
                                     three: normal, slave, pubsub. */
 
-/* Slave replication state. Used in server.repl_state for slaves to remember
+/* Slave replication state. Used in server. for slaves to remember
  * what to do next. */
 #define REPL_STATE_NONE 0 /* No active replication */
 #define REPL_STATE_CONNECT 1 /* Must connect to master */
@@ -1518,7 +1518,7 @@ struct redisServer {
     mstime_t cluster_node_timeout; /* Cluster node timeout. */
     char *cluster_configfile; /* Cluster auto-generated config file name. */
     struct clusterState *cluster;  /* State of the cluster */
-    // 当某个master下的slave数量小于该值时 无法进行数据迁移
+    // 当前master下有效的slave数量至少超过这个值才能进行迁移 (迁移到其他master下)
     int cluster_migration_barrier; /* Cluster replicas migration barrier. */
     int cluster_slave_validity_factor; /* Slave max data age for failover. */
 
@@ -1526,7 +1526,7 @@ struct redisServer {
     int cluster_require_full_coverage; /* If true, put the cluster down if
                                           there is at least an uncovered slot.*/
 
-    // 拒绝slave自发的进行故障转移  默认为false 也就是允许故障转移
+    // 不允许slave处理故障转移
     int cluster_slave_no_failover;  /* Prevent slave from starting a failover
                                        if the master is in failure state. */
     char *cluster_announce_ip;  /* IP address to announce on cluster bus. */
