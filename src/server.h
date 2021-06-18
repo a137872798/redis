@@ -1182,7 +1182,7 @@ struct redisServer {
     int clients_paused;         /* True if clients are currently paused */
     mstime_t clients_pause_end_time; /* Time when we undo clients_paused */
     char neterr[ANET_ERR_LEN];   /* Error buffer for anet.c */
-    // 迁移过程中缓存的socket 之后会在serverCron的主循环中被关闭
+    // 在发起migrateCommand后 会创建与目标节点的连接 并进行数据迁移 这些连接不会长时间存在
     dict *migrate_cached_sockets;/* MIGRATE cached sockets */
     _Atomic uint64_t next_client_id; /* Next client unique ID. Incremental. */
     int protected_mode;         /* Don't accept external connections. */

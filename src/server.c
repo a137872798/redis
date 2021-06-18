@@ -4091,25 +4091,30 @@ int processCommand(client *c) {
      * However we don't perform the redirection if:
      * 1) The sender of this command is our master.
      * 2) The command has no key arguments.
-     * TODO 这里涉及到请求在集群内的转发  有关集群的逻辑之后看
+     * 在集群模式下 可能会发现执行命令相关的key不在本节点上
      * */
     if (server.cluster_enabled &&
-        !(c->flags & CLIENT_MASTER) &&
+        !(c->flags & CLIENT_MASTER) &&  // 这个标记是在replica中设置的 也就是只有本slave的master节点才会携带这个标记 来自自身master的请求自然不能转发
         !(c->flags & CLIENT_LUA &&
-          server.lua_caller->flags & CLIENT_MASTER) &&
-        !(c->cmd->getkeys_proc == NULL && c->cmd->firstkey == 0 &&
+          server.lua_caller->flags & CLIENT_MASTER) && // 忽略lua标记
+        !(c->cmd->getkeys_proc == NULL && c->cmd->firstkey == 0 &&  // 等同于 c->cmd->getkeys_proc != NULL || c->cmd->firstkey != 0 || c->cmd->proc == execCommand
           c->cmd->proc != execCommand))
     {
         int hashslot;
         int error_code;
+        // 判断请求应该转发到哪个节点
         clusterNode *n = getNodeByQuery(c,c->cmd,c->argv,c->argc,
                                         &hashslot,&error_code);
+        // 表示本节点无法处理请求
         if (n == NULL || n != server.cluster->myself) {
+            // 本次转发的是exec命令 本地留存的所有之前的命令都可以丢弃了
             if (c->cmd->proc == execCommand) {
                 discardTransaction(c);
             } else {
+                // 因为某次事务中可能某个请求已经无法处理了 之前的事务都会失效
                 flagTransaction(c);
             }
+            // 返回信息提示用户访问其他client
             clusterRedirectClient(c,n,hashslot,error_code);
             return C_OK;
         }

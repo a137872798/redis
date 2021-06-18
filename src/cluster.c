@@ -706,7 +706,7 @@ void clusterReset(int hard) {
     for (j = 0; j < CLUSTER_SLOTS; j++) clusterDelSlot(j);
 
     /* Forget all the nodes, but myself.
-     * 将其他节点从cluster中移除
+     * 清空cluster->nodes 自己除外
      * */
     di = dictGetSafeIterator(server.cluster->nodes);
     while ((de = dictNext(di)) != NULL) {
@@ -718,7 +718,7 @@ void clusterReset(int hard) {
     dictReleaseIterator(di);
 
     /* Hard reset only: set epochs to 0, change node ID.
-     * 如果是硬重置 连同epoch 一起重置
+     * 如果是硬重置 连同epoch和nodename 一起重置
      * */
     if (hard) {
         sds oldname;
@@ -2023,7 +2023,7 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
     /* After updating the slots configuration, don't do any actual change
      * in the state of the server if a module disabled Redis Cluster
      * keys redirections.
-     * 如果此时不支持重定向的话 无法继续处理
+     * 不支持重定向的情况下 没有设置的必要了
      * */
     if (server.cluster_module_flags & CLUSTER_MODULE_FLAG_NO_REDIRECTION)
         return;
@@ -2454,6 +2454,7 @@ int clusterProcessPacket(clusterLink *link) {
          *    the set of slots it claims changed, scan the slots to see if we
          *    need to update our configuration.
          *    只有当master节点发送请求 并发现slots发生了变化 才会处理
+         *    slave更换master不会进入该方法
          *    */
         if (sender && nodeIsMaster(sender) && dirty_slots)
             // 当发现此时本节点缓存的某个master的slots信息 与从该master节点发来的slots信息不一致时 解决冲突
@@ -2590,24 +2591,23 @@ int clusterProcessPacket(clusterLink *link) {
              * we check ASAP. */
             clusterDoBeforeSleep(CLUSTER_TODO_HANDLE_FAILOVER);
         }
-
-        // 代表本次是某个slave 在执行非强制故障转移 先获取master的同意 如果是强制会直接设置start标识为true
+        // 某个slave节点申请进行故障转移 master在收到通知后 就会处于暂停状态 拒绝新的写入请求 并将同步偏移量返回 等到slave同步完数据后就会开始选票
     } else if (type == CLUSTERMSG_TYPE_MFSTART) {
         /* This message is acceptable only if I'm a master and the sender
          * is one of my slaves.
-         * 如果在本地请求节点的信息对不上 默认处理完成了
+         * 如果本地没有该slave的信息 或者显示该节点不是本节点的slave 不处理
          * */
         if (!sender || sender->slaveof != myself) return 1;
         /* Manual failover requested from slaves. Initialize the state
          * accordingly.
-         * 重置本节点故障转移相关的信息
+         * 重置本节点故障转移相关的信息 如果此时client已经处于暂停状态 先恢复
          * */
         resetManualFailover();
         // 设置选举时间上限
         server.cluster->mf_end = now + CLUSTER_MF_TIMEOUT;
-        // 设置发起节点
+        // 首推发起申请的节点为接任节点
         server.cluster->mf_slave = sender;
-        // 在这个时间内会暂停其他所有client TODO 如果是强制的呢 不会通知master 也就不会暂停这些client  副作用是什么???
+        // 暂停处理所有的client 并会在下一次心跳中将同步偏移量告诉slave 当slave准备完成时就会自主的发起投票
         pauseClients(now + (CLUSTER_MF_TIMEOUT * CLUSTER_MF_PAUSE_MULT));
         serverLog(LL_WARNING, "Manual failover requested by replica %.40s.",
                   sender->name);
@@ -2978,6 +2978,7 @@ void clusterBuildMessageHdr(clusterMsg *hdr, int type) {
 
     /* Set the message flags.
      * master节点正在进行手动故障转移  所有收到ping的slave节点会记录此时master的同步偏移量
+     * 发起手动故障转移的节点也会设置mf_end 但是它不需要将同步偏移量告诉其他节点 只需要把这个值作为判断手动故障转移是否过期的判断条件就可以了 所以这里要求必须是master节点
      * */
     if (nodeIsMaster(myself) && server.cluster->mf_end)
         hdr->mflags[0] |= CLUSTERMSG_FLAG0_PAUSED;
@@ -3452,7 +3453,8 @@ void clusterSendFailoverAuth(clusterNode *node) {
 }
 
 /* Send a MFSTART message to the specified node.
- * 非强制性的故障转移 会先向master节点发送一个通知  这样master会暂停所有的client
+ * 本节点作为slave 打算发起一次手动故障转移
+ * 需要通知master 让他暂停接收新的请求 同时把偏移量返回回来 等本节点同步完这些数据后 就可以开始故障转移了
  * */
 void clusterSendMFStart(clusterNode *node) {
     clusterMsg buf[1];
@@ -4156,7 +4158,9 @@ void clusterHandleSlaveMigration(int max_slaves) {
  * 重置手动故障转移相关的东西
  * */
 void resetManualFailover(void) {
+    // 如果此时client已经处于暂停状态了 解除暂停
     if (server.cluster->mf_end && clientsArePaused()) {
+        // 这里将暂停结束时间设置成0 再次调用clientsArePaused() 会从暂停状态解除
         server.clients_pause_end_time = 0;
         clientsArePaused(); /* Just use the side effect of the function. */
     }
@@ -4400,7 +4404,7 @@ void clusterCron(void) {
 
         /* Orphaned master check, useful only if the current instance
          * is a slave that may migrate to another master.
-         * 当本节点是slave 并且node是master节点时  TODO 如果myself和node都是master会怎么样?
+         * 这里是数据迁移相关的 就是本节点可能会转移到某个孤儿节点 只有本节点是slave时 才有判断的必要
          * */
         if (nodeIsSlave(myself) && nodeIsMaster(node) && !nodeFailed(node)) {
             // 检测该节点下是否有非fail的slave节点
@@ -4409,7 +4413,7 @@ void clusterCron(void) {
             /* A master is orphaned if it is serving a non-zero number of
              * slots, have no working slaves, but used to have at least one
              * slave, or failed over a master that used to have slaves.
-             * 孤儿节点要求此前必须分配了slot
+             * 孤儿节点要求此前必须分配了slot 否则就是无用功 (这个节点本身就不工作 没必要维护它下面的有效子节点数)
              * 当首次往master节点添加一个slave时 就会设置CLUSTER_NODE_MIGRATE_TO标记 也就是孤儿节点要求master之前挂载了slave 但是此时slave下线了
              * */
             if (okslaves == 0 && node->numslots > 0 &&
@@ -4684,7 +4688,7 @@ int clusterAddSlot(clusterNode *n, int slot) {
 /* Delete the specified slot marking it as unassigned.
  * Returns C_OK if the slot was assigned, otherwise if the slot was
  * already unassigned C_ERR is returned.
- * 代表此时某个slot下的数据无法确定在哪个节点
+ * 代表本节点不再占有这个slot
  * */
 int clusterDelSlot(int slot) {
     clusterNode *n = server.cluster->slots[slot];
@@ -4878,7 +4882,7 @@ int verifyClusterConfigWithData(void) {
 
     /* Return ASAP if a module disabled cluster redirections. In that case
      * every master can store keys about every possible hash slot.
-     * 如果集群不支持重定向 代表每个master都要存储全部数据
+     * 如果本身不支持重定向 直接可以忽略集群了
      * */
     if (server.cluster_module_flags & CLUSTER_MODULE_FLAG_NO_REDIRECTION)
         return C_OK;
@@ -5313,7 +5317,7 @@ void clusterCommand(client *c) {
             cport = port + CLUSTER_PORT_INCR;
         }
 
-        // 尝试与指定的地址进行连接
+        // 尝试与指定的地址进行连接   这里只需要将ip port包装成node 之后会在clusterCron中自动进行连接
         if (clusterStartHandshake(c->argv[2]->ptr, port, cport) == 0 &&
             errno == EINVAL) {
             addReplyErrorFormat(c, "Invalid node address specified: %s:%s",
@@ -5321,13 +5325,13 @@ void clusterCommand(client *c) {
         } else {
             addReply(c, shared.ok);
         }
-        //
+        // 返回当前节点观测到的其他节点信息
     } else if (!strcasecmp(c->argv[1]->ptr, "nodes") && c->argc == 2) {
         /* CLUSTER NODES */
         sds nodes = clusterGenNodesDescription(0);
         addReplyVerbatim(c, nodes, sdslen(nodes), "txt");
         sdsfree(nodes);
-        // 将本节点的id返回
+        // 将本节点的nodename返回
     } else if (!strcasecmp(c->argv[1]->ptr, "myid") && c->argc == 2) {
         /* CLUSTER MYID */
         addReplyBulkCBuffer(c, myself->name, CLUSTER_NAMELEN);
@@ -5335,20 +5339,20 @@ void clusterCommand(client *c) {
     } else if (!strcasecmp(c->argv[1]->ptr, "slots") && c->argc == 2) {
         /* CLUSTER SLOTS */
         clusterReplyMultiBulkSlots(c);
-        // 将分配到本节点上的所有slot都flush
+        // 这个flushslots实际上是要删除本节点下这些slot的数据
     } else if (!strcasecmp(c->argv[1]->ptr, "flushslots") && c->argc == 2) {
         /* CLUSTER FLUSHSLOTS
-         * 为什么只检查第一个db呢
+         * 要求db[0]必须为空
          * */
         if (dictSize(server.db[0].dict) != 0) {
             addReplyError(c, "DB must be empty to perform CLUSTER FLUSHSLOTS.");
             return;
         }
-        // 当清理后,该slot就变成了自由状态  TODO 并没有看到flush的逻辑啊
+        // 只有当本节点是master时 才会真正删除数据
         clusterDelNodeSlots(myself);
         clusterDoBeforeSleep(CLUSTER_TODO_UPDATE_STATE | CLUSTER_TODO_SAVE_CONFIG);
         addReply(c, shared.ok);
-        // 增加或删除某个slot
+        // 除了在初始化阶段会根据db中的数据 自动设置占有的slot 还可以手动指定某个节点此时拥有的slot
     } else if ((!strcasecmp(c->argv[1]->ptr, "addslots") ||
                 !strcasecmp(c->argv[1]->ptr, "delslots")) && c->argc >= 3) {
         /* CLUSTER ADDSLOTS <slot> [slot] ... */
@@ -5358,7 +5362,7 @@ void clusterCommand(client *c) {
         // 代表是删除操作
         int del = !strcasecmp(c->argv[1]->ptr, "delslots");
 
-        // 将这个新的slots内所有元素置零
+        // 先重置结果容器 c语言要求手动执行内存释放工作
         memset(slots, 0, CLUSTER_SLOTS);
         /* Check that all the arguments are parseable and that all the
          * slots are not already busy.
@@ -5367,7 +5371,7 @@ void clusterCommand(client *c) {
          * */
         for (j = 2; j < c->argc; j++) {
 
-            // 没有解析到 slot信息 本次操作终止
+            // 没有解析到 slot信息 本次操作终止  解析出来的应该是一个longlong类型的值
             if ((slot = getSlotOrReply(c, c->argv[j])) == -1) {
                 zfree(slots);
                 return;
@@ -5394,18 +5398,17 @@ void clusterCommand(client *c) {
 
         // 现在才是真正处理 cluster.slots 上面的逻辑只是做一些校验
         for (j = 0; j < CLUSTER_SLOTS; j++) {
-            // 代表对该slot进行了某种操作
             if (slots[j]) {
                 int retval;
 
                 /* If this slot was set as importing we can clear this
                  * state as now we are the real owner of the slot.
-                 * 这个标记什么时候会设置???
+                 * 如果该slot正在导入数据 清除这个标记
                  * */
                 if (server.cluster->importing_slots_from[j])
                     server.cluster->importing_slots_from[j] = NULL;
 
-                // 将操作作用到cluster->nodes上
+                // 更新node.slots信息  如果删除了slot 不需要在db中移除对应的数据吗
                 retval = del ? clusterDelSlot(j) :
                          clusterAddSlot(myself, j);
                 serverAssertWithInfo(c, NULL, retval == C_OK);
@@ -5416,7 +5419,7 @@ void clusterCommand(client *c) {
         zfree(slots);
         clusterDoBeforeSleep(CLUSTER_TODO_UPDATE_STATE | CLUSTER_TODO_SAVE_CONFIG);
         addReply(c, shared.ok);
-        // 本次是一次分配slot的命令 应该不是用户分配才对 谁在分配 基于什么原则
+        // 这个是数据迁移相关的
     } else if (!strcasecmp(c->argv[1]->ptr, "setslot") && c->argc >= 4) {
         /* SETSLOT 10 MIGRATING <node ID> */
         /* SETSLOT 10 IMPORTING <node ID> */
@@ -5425,54 +5428,58 @@ void clusterCommand(client *c) {
         int slot;
         clusterNode *n;
 
-        // slave节点无法分配slot
+        // 只有master节点可以处理这个command
         if (nodeIsSlave(myself)) {
             addReplyError(c, "Please use SETSLOT only with masters.");
             return;
         }
 
-        // 本次要设置的是哪个slot
+        // 本次操作涉及到的是哪个slot
         if ((slot = getSlotOrReply(c, c->argv[2])) == -1) return;
 
-        // 这个应该是迁出吧 那么要求此时该slot必然属于本节点
+        // 代表本次是迁出操作
         if (!strcasecmp(c->argv[3]->ptr, "migrating") && c->argc == 5) {
+
+            // 如果当前slot不属于本节点 无法迁出
             if (server.cluster->slots[slot] != myself) {
                 addReplyErrorFormat(c, "I'm not the owner of hash slot %u", slot);
                 return;
             }
-            // 找到要迁入的目标节点 如果当前节点未观测到该节点 无法执行本次命令 TODO 这里并没有看到数据的迁移 只要修改slot的位置就好了么 应该是先记录迁移方向 之后才进行真正的数据迁移
+            // 目标节点没有被本节点观测到 无法移动
             if ((n = clusterLookupNode(c->argv[4]->ptr)) == NULL) {
                 addReplyErrorFormat(c, "I don't know about node %s",
                                     (char *) c->argv[4]->ptr);
                 return;
             }
-            // 设置数据迁出的记录
+            // 设置数据迁出的记录  注意这里并没有立即进行迁移相关的操作
             server.cluster->migrating_slots_to[slot] = n;
-            // 记录从哪个slot中迁入数据
+            // 需要从某个节点迁入某个slot的数据
         } else if (!strcasecmp(c->argv[3]->ptr, "importing") && c->argc == 5) {
-            // 条件与之前相反 要求该slot必须不属于myself
+            // 此时该slot不能被本节点拥有
             if (server.cluster->slots[slot] == myself) {
                 addReplyErrorFormat(c,
                                     "I'm already the owner of hash slot %u", slot);
                 return;
             }
+            // 目标节点不存在 无法告知迁移请求
             if ((n = clusterLookupNode(c->argv[4]->ptr)) == NULL) {
                 addReplyErrorFormat(c, "I don't know about node %s",
                                     (char *) c->argv[4]->ptr);
                 return;
             }
             server.cluster->importing_slots_from[slot] = n;
-            // 代表数据已经完成迁移 清理之前的迁移标记
+            // 清理之前的迁移标记
         } else if (!strcasecmp(c->argv[3]->ptr, "stable") && c->argc == 4) {
             /* CLUSTER SETSLOT <SLOT> STABLE */
             server.cluster->importing_slots_from[slot] = NULL;
             server.cluster->migrating_slots_to[slot] = NULL;
+            // 代表将某个slot分配到该node下  不涉及数据迁移
         } else if (!strcasecmp(c->argv[3]->ptr, "node") && c->argc == 5) {
             /* CLUSTER SETSLOT <SLOT> NODE <NODE ID>
-             * 获取相关的节点
              * */
             clusterNode *n = clusterLookupNode(c->argv[4]->ptr);
 
+            // 本节点此时没有维护该节点信息 无法处理
             if (!n) {
                 addReplyErrorFormat(c, "Unknown node %s",
                                     (char *) c->argv[4]->ptr);
@@ -5480,7 +5487,7 @@ void clusterCommand(client *c) {
             }
             /* If this hash slot was served by 'myself' before to switch
              * make sure there are no longer local keys for this hash slot.
-             * 当slot被分配到本节点 并且本节点不是n时 如果slot内部有数据就返回错误
+             * 如果这个slot此时正在本节点下 并且内部还有数据 无法转移
              * */
             if (server.cluster->slots[slot] == myself && n != myself) {
                 if (countKeysInSlot(slot) != 0) {
@@ -5493,7 +5500,7 @@ void clusterCommand(client *c) {
             /* If this slot is in migrating status but we have no keys
              * for it assigning the slot to another node will clear
              * the migrating status.
-             * TODO
+             * node操作会影响到数据迁移 比如发现当前slot内没有数据 就清理掉迁移标记
              * */
             if (countKeysInSlot(slot) == 0 &&
                 server.cluster->migrating_slots_to[slot])
@@ -5501,7 +5508,9 @@ void clusterCommand(client *c) {
 
             /* If this node was importing this slot, assigning the slot to
              * itself also clears the importing status.
-             * 这里是清理importing_slots_from
+             * 只有当该slot不被本节点拥有时 才能在importing_slots_from中设置该slot
+             * migrating_slots_to则要求此时slot必然被本节点持有
+             * 这里就是取消迁入标记 直接把slot分配该myself
              * */
             if (n == myself &&
                 server.cluster->importing_slots_from[slot]) {
@@ -5520,10 +5529,11 @@ void clusterCommand(client *c) {
                     serverLog(LL_WARNING,
                               "configEpoch updated after importing slot %d", slot);
                 }
+                // 这里也是清除迁入标记
                 server.cluster->importing_slots_from[slot] = NULL;
             }
 
-            // 可以看到 "setslots","node" 最后就是将该slot分配给该node 但是省去了设置importing_slots_from/migrating_slots_to 区别是什么 这2个临时数组又是做什么的???
+            // 将slot分配到该节点
             clusterDelSlot(slot);
             clusterAddSlot(n, slot);
         } else {
@@ -5536,7 +5546,7 @@ void clusterCommand(client *c) {
         // 因为执行命令都会修改slots 所以这里要更新config
         clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG | CLUSTER_TODO_UPDATE_STATE);
         addReply(c, shared.ok);
-        // 如果epoch发生了碰撞 需要增加epoch
+        // 检测epoch是否碰撞 并返回结果
     } else if (!strcasecmp(c->argv[1]->ptr, "bumpepoch") && c->argc == 2) {
         /* CLUSTER BUMPEPOCH */
         int retval = clusterBumpConfigEpochWithoutConsensus();
@@ -5544,7 +5554,7 @@ void clusterCommand(client *c) {
                                  (retval == C_OK) ? "BUMPED" : "STILL",
                                  (unsigned long long) myself->configEpoch);
         addReplySds(c, reply);
-        // 获取集群信息
+        // 将本集群此时所有slot的状态信息返回 比如有多少个slot可用 有多少个未分配
     } else if (!strcasecmp(c->argv[1]->ptr, "info") && c->argc == 2) {
         /* CLUSTER INFO */
         char *statestr[] = {"ok", "fail", "needhelp"};
@@ -5620,7 +5630,7 @@ void clusterCommand(client *c) {
         /* Produce the reply protocol. */
         addReplyVerbatim(c, info, sdslen(info), "txt");
         sdsfree(info);
-        // 立即进行配置文件的持久化
+        // 立即对配置文件进行刷盘
     } else if (!strcasecmp(c->argv[1]->ptr, "saveconfig") && c->argc == 2) {
         int retval = clusterSaveConfig(1);
 
@@ -5629,14 +5639,14 @@ void clusterCommand(client *c) {
         else
             addReplyErrorFormat(c, "error saving the cluster node config: %s",
                                 strerror(errno));
-        // 根据传入的key 计算对应的slot 就是通过一致性hash算法
+        // 根据key 计算slot
     } else if (!strcasecmp(c->argv[1]->ptr, "keyslot") && c->argc == 3) {
         /* CLUSTER KEYSLOT <key> */
         sds key = c->argv[2]->ptr;
 
         addReplyLongLong(c, keyHashSlot(key, sdslen(key)));
 
-        // 返回某个slot下的key数量
+        // 获取指定slot下key的数量
     } else if (!strcasecmp(c->argv[1]->ptr, "countkeysinslot") && c->argc == 3) {
         /* CLUSTER COUNTKEYSINSLOT <slot> */
         long long slot;
@@ -5648,7 +5658,7 @@ void clusterCommand(client *c) {
             return;
         }
         addReplyLongLong(c, countKeysInSlot(slot));
-        // 返回某个slot下的key 有一个数量限制
+        // 返回某个slot下的key 需要指定key的数量 (避免key数量太大)
     } else if (!strcasecmp(c->argv[1]->ptr, "getkeysinslot") && c->argc == 4) {
         /* CLUSTER GETKEYSINSLOT <slot> <count> */
         long long maxkeys, slot;
@@ -5702,7 +5712,7 @@ void clusterCommand(client *c) {
                              CLUSTER_TODO_SAVE_CONFIG);
         addReply(c, shared.ok);
 
-        // 发起一次数据拷贝工作
+        // 这个命令是将当前节点变成某个节点的slave节点 并从它那里拷贝数据
     } else if (!strcasecmp(c->argv[1]->ptr, "replicate") && c->argc == 3) {
         /* CLUSTER REPLICATE <NODE ID> */
         clusterNode *n = clusterLookupNode(c->argv[2]->ptr);
@@ -5732,8 +5742,7 @@ void clusterCommand(client *c) {
         /* If the instance is currently a master, it should have no assigned
          * slots nor keys to accept to replicate some other node.
          * Slaves can switch to another master without issues.
-         * 当本节点作为master节点 并且内部的slot不为0 或者内部已经有数据 无法进行数据拷贝
-         * 也就是作为一个空的master允许从其他master拷贝数据 也暗示了redis是多master  应该是数据先按照slot分配到多个master上 然后每个master有多个slave 作为只读节点
+         * 本节点是要降级的 如果本节点此时作为一个master并且有数据了 那就不能随意降级了
          * */
         if (nodeIsMaster(myself) &&
             (myself->numslots != 0 || dictSize(server.db[0].dict) != 0)) {
@@ -5744,12 +5753,12 @@ void clusterCommand(client *c) {
         }
 
         /* Set the master.
-         * 将n作为myself的新的master节点
+         * 将n作为myself的新的master节点  注意此时没有删除之前master对应的slot下的数据
          * */
         clusterSetMaster(n);
         clusterDoBeforeSleep(CLUSTER_TODO_UPDATE_STATE | CLUSTER_TODO_SAVE_CONFIG);
         addReply(c, shared.ok);
-        // 代表本次操作是获取slave 或者副本信息
+        // 获取某个节点下所有slave节点
     } else if ((!strcasecmp(c->argv[1]->ptr, "slaves") ||
                 !strcasecmp(c->argv[1]->ptr, "replicas")) && c->argc == 3) {
         /* CLUSTER SLAVES <NODE ID>
@@ -5789,7 +5798,7 @@ void clusterCommand(client *c) {
         } else {
             addReplyLongLong(c, clusterNodeFailureReportsCount(n));
         }
-        // 手动触发故障转移 也就是手动触发选举
+        // 手动触发故障转移
     } else if (!strcasecmp(c->argv[1]->ptr, "failover") &&
                (c->argc == 2 || c->argc == 3)) {
         /* CLUSTER FAILOVER [FORCE|TAKEOVER] */
@@ -5816,11 +5825,11 @@ void clusterCommand(client *c) {
         if (nodeIsMaster(myself)) {
             addReplyError(c, "You should send CLUSTER FAILOVER to a replica");
             return;
-            // 如果一个游离的slave不能发起选举  为什么
+            // 游离的slave没有处理的必要
         } else if (myself->slaveof == NULL) {
             addReplyError(c, "I'm a replica but my master is unknown to me");
             return;
-            // 非强制模式下  此时还未连接到master 无法进行故障转移
+            // 当无法访问到master时 必须使用force模式
         } else if (!force &&
                    (nodeFailed(myself->slaveof) ||
                     myself->slaveof->link == NULL)) {
@@ -5831,21 +5840,21 @@ void clusterCommand(client *c) {
 
         // 因为本次是手动发起故障转移 需要先进行重置一些参数
         resetManualFailover();
-        // 手动故障转移有一个时间限制
+        // 手动故障转移有一个时间限制 并且当检测到该值被设置 就代表开启了手动故障转移
         server.cluster->mf_end = mstime() + CLUSTER_MF_TIMEOUT;
 
-        // 如果是接管模式 就是强制故障转移+跳过选举
+        // 如果是接管模式 就是跳过选举
         if (takeover) {
             /* A takeover does not perform any initial check. It just
              * generates a new configuration epoch for this node without
              * consensus, claims the master's slots, and broadcast the new
              * configuration. */
             serverLog(LL_WARNING, "Taking over the master (user request).");
-            // 增加cluster.currentEpoch
+            // 增加cluster.currentEpoch 这样其他master节点感知到信息后就会认可该节点的数据 (之前那个master就会被降级)
             clusterBumpConfigEpochWithoutConsensus();
             // 接管模式就是直接将该节点晋升成master
             clusterFailoverReplaceYourMaster();
-            // 如果是强制执行会设置一个标记 并且不需要通过master的同意
+            // 原本手动故障转移 需要等到slave与master的数据同步 当传入force参数时 会直接发起投票
         } else if (force) {
             /* If this is a forced failover, we don't need to talk with our
              * master to agree about the offset. We just failover taking over
@@ -5853,12 +5862,12 @@ void clusterCommand(client *c) {
             serverLog(LL_WARNING, "Forced failover user request accepted.");
             server.cluster->mf_can_start = 1;
         } else {
-            // 如果是非强制的故障转移  会先向master节点发送一个通知 这样master会暂停所有的client TODO 这里看到通知master后的流程就断掉了 后面是哪里在处理呢 ???
+            // 这里就是正常发起手动故障转移的场景
             serverLog(LL_WARNING, "Manual failover user request accepted.");
             clusterSendMFStart(myself->slaveof);
         }
         addReply(c, shared.ok);
-        // 如果发起的是强制指定 epoch的命令
+        // 强制设置当前configEpoch
     } else if (!strcasecmp(c->argv[1]->ptr, "set-config-epoch") && c->argc == 3) {
         /* CLUSTER SET-CONFIG-EPOCH <epoch>
          *
@@ -5918,7 +5927,7 @@ void clusterCommand(client *c) {
 
         /* Slaves can be reset while containing data, but not master nodes
          * that must be empty.
-         * 不能手动重置master
+         * 如果本节点是master节点 并且有数据 是不能重置的
          * */
         if (nodeIsMaster(myself) && dictSize(c->db->dict) != 0) {
             addReplyError(c, "CLUSTER RESET can't be called with "
@@ -5940,7 +5949,7 @@ void clusterCommand(client *c) {
 
 /* Generates a DUMP-format representation of the object 'o', adding it to the
  * io stream pointed by 'rio'. This function can't fail.
- * @param payload 存储结果
+ * @param payload 存放存储结果的容器
  * @param o 在某个db中通过key 定位到的redisObject
  * @param key 该对象对应的key
  * */
@@ -5953,7 +5962,7 @@ void createDumpPayload(rio *payload, robj *o, robj *key) {
      * 该rio流 底层是一个redisString
      * */
     rioInitWithBuffer(payload, sdsempty());
-    // 先存储redisObject的类型  在将redisObject按照rdb的方式存储
+    // 将数据按照rdb协议存储到容器中
     serverAssert(rdbSaveObjectType(payload, o));
     serverAssert(rdbSaveObject(payload, o, key));
 
@@ -6005,7 +6014,7 @@ int verifyDumpPayload(unsigned char *p, size_t len) {
 /* DUMP keyname
  * DUMP is actually not used by Redis Cluster but it is the obvious
  * complement of RESTORE and can be useful for different applications.
- * 转储命令
+ * 通过key查询到某个redisObject 并按照rdb协议存储到容器中
  * */
 void dumpCommand(client *c) {
     robj *o;
@@ -6030,7 +6039,7 @@ void dumpCommand(client *c) {
 }
 
 /* RESTORE key ttl serialized-value [REPLACE]
- * 执行恢复命令
+ * 将数据流还原成redisObject 并插入到db中
  * */
 void restoreCommand(client *c) {
     long long ttl, lfu_freq = -1, lru_idle = -1, lru_clock = -1;
@@ -6048,7 +6057,7 @@ void restoreCommand(client *c) {
             replace = 1;
         } else if (!strcasecmp(c->argv[j]->ptr, "absttl")) {
             absttl = 1;
-            // 看来idletime和freq是互斥的关系  分别代表该对象是使用lru/lfu算法进行清理的 内存淘汰策略则是内存不足时触发
+            // 本次读取到的是idletime 还需要额外读取一个参数作为lru_idle
         } else if (!strcasecmp(c->argv[j]->ptr, "idletime") && additional >= 1 &&
                    lfu_freq == -1) {
             // 读取额外参数
@@ -6062,6 +6071,7 @@ void restoreCommand(client *c) {
             }
             lru_clock = LRU_CLOCK();
             j++; /* Consume additional arg. */
+            // 同上 分别代表通过lru和lfu的淘汰策略
         } else if (!strcasecmp(c->argv[j]->ptr, "freq") && additional >= 1 &&
                    lru_idle == -1) {
             if (getLongLongFromObjectOrReply(c, c->argv[j + 1], &lfu_freq, NULL)
@@ -6095,14 +6105,13 @@ void restoreCommand(client *c) {
         return;
     }
 
-    // 应该是通过client携带的某些数据 进行恢复操作 上面是解析一些额外参数 从dumpCommand中可以看出 存储的只是某个redisObject的数据
-    /* Verify RDB version and data checksum. */
+    /* Verify RDB version and data checksum. 进行crc校验 */
     if (verifyDumpPayload(c->argv[3]->ptr, sdslen(c->argv[3]->ptr)) == C_ERR) {
         addReplyError(c, "DUMP payload version or checksum are wrong");
         return;
     }
 
-    // 初始化rio数据流
+    // 将客户端传入的数据还原成redisObject
     rioInitWithBuffer(&payload, c->argv[3]->ptr);
     // 还原redisObject
     if (((type = rdbLoadObjectType(&payload)) == -1) ||
@@ -6198,8 +6207,8 @@ migrateCachedSocket *migrateGetSocket(client *c, robj *host, robj *port, long ti
         return cs;
     }
 
-    /* No cached socket, create one. 无法复用之前的socket 创建一个新的
-     * 本次新创建的socket会顶掉之前某个旧的
+    /* No cached socket, create one.
+     * 需要新建连接 并且缓存的连接有一个上限
      * */
     if (dictSize(server.migrate_cached_sockets) == MIGRATE_SOCKET_CACHE_ITEMS) {
         /* Too many items, drop one at random. */
@@ -6286,7 +6295,7 @@ void migrateCloseTimedoutSockets(void) {
  *
  * MIGRATE host port "" dbid timeout [COPY | REPLACE | AUTH password |
  *         AUTH2 username password] KEYS key1 key2 ... keyN
- *         执行数据迁移的command
+ *         以key->obj为单位进行数据迁移
  *         */
 void migrateCommand(client *c) {
     migrateCachedSocket *cs;
@@ -6317,6 +6326,7 @@ void migrateCommand(client *c) {
             copy = 1;
         } else if (!strcasecmp(c->argv[j]->ptr, "replace")) {
             replace = 1;
+            // 如果需要认证 读取密码属性
         } else if (!strcasecmp(c->argv[j]->ptr, "auth")) {
             if (!moreargs) {
                 addReply(c, shared.syntaxerr);
@@ -6362,7 +6372,9 @@ void migrateCommand(client *c) {
      * the caller there was nothing to migrate. We don't return an error in
      * this case, since often this is due to a normal condition like the key
      * expiring in the meantime.
-     * 为需要进行迁移的key 分配空间
+     * 为需要进行迁移的数据 分配空间
+     * ov 存储redisObject
+     * kv 存储redisKey
      * */
     ov = zrealloc(ov, sizeof(robj *) * num_keys);
     kv = zrealloc(kv, sizeof(robj *) * num_keys);
@@ -6377,8 +6389,10 @@ void migrateCommand(client *c) {
             oi++;
         }
     }
-    // 本次尝试迁移的所有key都没有在db中找到 不需要处理了
+
+    // num_keys 代表实际找到了多少个
     num_keys = oi;
+    // 没有找到对象 直接返回
     if (num_keys == 0) {
         zfree(ov);
         zfree(kv);
@@ -6403,7 +6417,7 @@ void migrateCommand(client *c) {
     rioInitWithBuffer(&cmd, sdsempty());
 
     /* Authentication
-     * 代表需要进行权限校验
+     * 代表需要进行权限校验 追加一个authCommand
      * */
     if (password) {
         int arity = username ? 3 : 2;
@@ -6420,7 +6434,7 @@ void migrateCommand(client *c) {
 
     /* Send the SELECT command if the current DB is not already selected. */
     int select = cs->last_dbid != dbid; /* Should we emit SELECT? */
-    // 写入目标db
+    // db不匹配 要先执行selectCommand
     if (select) {
         serverAssertWithInfo(c, NULL, rioWriteBulkCount(&cmd, '*', 2));
         serverAssertWithInfo(c, NULL, rioWriteBulkString(&cmd, "SELECT", 6));
@@ -6459,7 +6473,6 @@ void migrateCommand(client *c) {
         serverAssertWithInfo(c, NULL,
                              rioWriteBulkCount(&cmd, '*', replace ? 5 : 4));
 
-        // 数据迁移可以不在cluster下么
         if (server.cluster_enabled)
             serverAssertWithInfo(c, NULL,
                                  rioWriteBulkString(&cmd, "RESTORE-ASKING", 14));
@@ -6472,7 +6485,9 @@ void migrateCommand(client *c) {
         serverAssertWithInfo(c, NULL, rioWriteBulkLongLong(&cmd, ttl));
 
         /* Emit the payload argument, that is the serialized object using
-         * the DUMP format. 将redisObject的相关信息写入到cmd中 这里还包含了rdbVersion,crc */
+         * the DUMP format.
+         * 将redisObject包装成rdb数据流后追加到cmd上
+         * */
         createDumpPayload(&payload, ov[j], kv[j]);
         serverAssertWithInfo(c, NULL,
                              rioWriteBulkString(&cmd, payload.io.buffer.ptr,
@@ -6499,7 +6514,6 @@ void migrateCommand(client *c) {
         size_t pos = 0, towrite;
         int nwritten = 0;
 
-        // 到对端是按照哪个command来处理???   应该是有一个映射的地方 比如module???
         while ((towrite = sdslen(buf) - pos) > 0) {
             towrite = (towrite > (64 * 1024) ? (64 * 1024) : towrite);
             nwritten = connSyncWrite(cs->conn, buf + pos, towrite, timeout);
@@ -6543,7 +6557,7 @@ void migrateCommand(client *c) {
             socket_error = 1;
             break;
         }
-        // 有任意一个结果以 "-" 开头 代表本次数据迁移无法继续执行
+        // 代表auth 或者select执行失败 或者插入k-v失败
         if ((password && buf0[0] == '-') ||
             (select && buf1[0] == '-') ||
             buf2[0] == '-') {
@@ -6591,7 +6605,7 @@ void migrateCommand(client *c) {
      * */
     if (socket_error) migrateCloseSocket(c->argv[1], c->argv[2]);
 
-    // 这里主要是更改command 并传播到副本上
+    // 这里主要是更改command 并传播到副本上 (副本相当于直接执行删除)
     if (!copy) {
         /* Translate MIGRATE as DEL for replication/AOF. Note that we do
          * this only for the keys for which we received an acknowledgement
@@ -6679,7 +6693,9 @@ void migrateCommand(client *c) {
 /* The ASKING command is required after a -ASK redirection.
  * The client should issue ASKING before to actually send the command to
  * the target instance. See the Redis Cluster specification for more
- * information. */
+ * information.
+ * 给调用该方法的client追加一个ask标记
+ * */
 void askingCommand(client *c) {
     if (server.cluster_enabled == 0) {
         addReplyError(c, "This instance has cluster support disabled");
@@ -6691,7 +6707,9 @@ void askingCommand(client *c) {
 
 /* The READONLY command is used by clients to enter the read-only mode.
  * In this mode slaves will not redirect clients as long as clients access
- * with read-only commands to keys that are served by the slave's master. */
+ * with read-only commands to keys that are served by the slave's master.
+ * 给client追加只读标记
+ * */
 void readonlyCommand(client *c) {
     if (server.cluster_enabled == 0) {
         addReplyError(c, "This instance has cluster support disabled");
@@ -6701,7 +6719,9 @@ void readonlyCommand(client *c) {
     addReply(c, shared.ok);
 }
 
-/* The READWRITE command just clears the READONLY command state. */
+/* The READWRITE command just clears the READONLY command state.
+ * 恢复成可读写
+ * */
 void readwriteCommand(client *c) {
     c->flags &= ~CLIENT_READONLY;
     addReply(c, shared.ok);
@@ -6739,7 +6759,7 @@ void readwriteCommand(client *c) {
  *
  * CLUSTER_REDIR_DOWN_STATE and CLUSTER_REDIR_DOWN_RO_STATE if the cluster is
  * down but the user attempts to execute a command that addresses one or more keys.
- * 确定本次command会在集群中的哪个节点执行
+ * 判断本次command相关的key是否在本节点上  是否需要转发到其他节点
  * */
 clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, int argc, int *hashslot, int *error_code) {
     clusterNode *n = NULL;
@@ -6750,7 +6770,7 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
     int i, slot = 0, migrating_slot = 0, importing_slot = 0, missing_keys = 0;
 
     /* Allow any key to be set if a module disabled cluster redirections.
-     * 当集群中不允许转发时 直接返回本节点
+     * 当集群中不允许转发时 直接在本节点处理
      * */
     if (server.cluster_module_flags & CLUSTER_MODULE_FLAG_NO_REDIRECTION)
         return myself;
@@ -6770,7 +6790,7 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
      * */
     if (cmd->proc == execCommand) {
         /* If CLIENT_MULTI flag is not set EXEC is just going to return an
-         * error. */
+         * error. 这个属于异常情况 exec必须在multi命令后执行 */
         if (!(c->flags & CLIENT_MULTI)) return myself;
         ms = &c->mstate;
     } else {
@@ -6801,12 +6821,12 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
         margv = ms->commands[i].argv;
 
         getKeysResult result = GETKEYS_RESULT_INIT;
-        // 获取cmd关联的key数量
+        // 抽取本次command相关的key
         numkeys = getKeysFromCommand(mcmd, margv, margc, &result);
         keyindex = result.keys;
 
+        // 遍历执行该command用到的所有key
         for (j = 0; j < numkeys; j++) {
-            // 内部存储的是command参数的下标
             robj *thiskey = margv[keyindex[j]];
             // 将key转换成slot
             int thisslot = keyHashSlot((char *) thiskey->ptr,
@@ -6825,7 +6845,7 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
                  * state. However the state is yet to be updated, so this was
                  * not trapped earlier in processCommand(). Report the same
                  * error to the client.
-                 * 只要某个slot未被分配 就认为集群处于不可用状态
+                 * 此时slot还没有被分配到某个节点 无法执行命令
                  * */
                 if (n == NULL) {
                     getKeysFreeResult(&result);
@@ -6839,29 +6859,33 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
                  * can safely serve the request, otherwise we return a TRYAGAIN
                  * error). To do so we set the importing/migrating state and
                  * increment a counter for every missing key.
-                 * 这2个下标的意义是 ???
+                 * slot分配到了本节点 同时本slot的数据即将迁出
                  * */
                 if (n == myself &&
                     server.cluster->migrating_slots_to[slot] != NULL) {
                     migrating_slot = 1;
+                    // 首先本节点是master节点 并且此时还没有该slot的数据 准备迁入
                 } else if (server.cluster->importing_slots_from[slot] != NULL) {
                     importing_slot = 1;
-                }
-                // 不是首次设置
+                } // 其余情况可能该节点是slave
             } else {
                 /* If it is not the first key, make sure it is exactly
                  * the same key as the first we saw.
-                 * key重复 */
+                 * 本次事务的所有cmd中 出现了不同的key
+                 * */
                 if (!equalStringObjects(firstkey, thiskey)) {
+                    // 所有key必须在同一slot下
                     if (slot != thisslot) {
-                        /* Error: multiple keys from different slots. */
+                        /* Error: multiple keys from different slots.
+                         * */
                         getKeysFreeResult(&result);
                         if (error_code)
                             *error_code = CLUSTER_REDIR_CROSS_SLOT;
                         return NULL;
                     } else {
                         /* Flag this request as one with multiple different
-                         * keys. 设置key重复的标识
+                         * keys.
+                         * 在整个事务中出现了多个key
                          * */
                         multiple_keys = 1;
                     }
@@ -6869,10 +6893,13 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
             }
 
             /* Migrating / Importing slot? Count keys we don't have.
-             * 虽然数据记录在slot中 但是发现已经从db中被移除了
+             * 代表本次要执行的key 不在本节点上
+             * migrating_slot || importing_slot 这2种情况是考虑数据迁移的 首先本节点必须是master 其次数据即将迁出 或者数据还没有迁入
+             * lookupKeyRead(&server.db[0], thiskey) 代表无论本节点是master还是slave 此时没有相关数据
              * */
             if ((migrating_slot || importing_slot) &&
                 lookupKeyRead(&server.db[0], thiskey) == NULL) {
+                // 每检测到一个key不存在就+1
                 missing_keys++;
             }
         }
@@ -6881,22 +6908,22 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
 
     /* No key at all in command? then we can serve the request
      * without redirections or errors in all the cases.
-     * 本次command中没有key 默认在本节点直接处理
+     * 代表所有命令都没有key 可以在本节点执行
      * */
     if (n == NULL) return myself;
 
     /* Cluster is globally down but we got keys? We only serve the request
      * if it is a read command and when allow_reads_when_down is enabled.
-     * 检查此时集群是否处于可用状态
+     * 如果此时集群不可用
      * */
     if (server.cluster->state != CLUSTER_OK){
-        // 如果当集群处于down时 无法读取数据 本次不会返回合适的节点
+        // 在集群不可用时 无法访问本节点 返回null 这样client的cmd就无法执行了
         if (!server.cluster_allow_reads_when_down) {
             /* The cluster is configured to block commands when the
              * cluster is down. */
             if (error_code) *error_code = CLUSTER_REDIR_DOWN_STATE;
             return NULL;
-            // 非只读操作 也就是写入操作 那么在集群不可用时 无法执行
+            // 集群不可用情况下无法执行写入任务
         } else if (!(cmd->flags & CMD_READONLY) && !(cmd->proc == evalCommand)
                    && !(cmd->proc == evalShaCommand)) {
             /* The cluster is configured to allow read only commands
@@ -6911,20 +6938,20 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
         }
     }
 
-    /* Return the hashslot by reference. 设置本次路由到的slot */
+    /* Return the hashslot by reference. 设置本次路由到的slot(必须是一个) */
     if (hashslot) *hashslot = slot;
 
     /* MIGRATE always works in the context of the local node if the slot
      * is open (migrating or importing state). We need to be able to freely
      * move keys among instances in this case.
-     * 当migrating_slot/importing_slot 不为空时 迁移命令总是在本节点执行 什么意思 为什么 ???
+     * 如果本次要执行的是迁移命令是允许的 TODO
      * */
     if ((migrating_slot || importing_slot) && cmd->proc == migrateCommand)
         return myself;
 
     /* If we don't have all the keys and we are migrating the slot, send
      * an ASK redirection.
-     * 只要本次请求中的任意一个key丢失 会需要获取redisObject被转移的目标节点
+     * 代表数据已经被迁移出去了 返回迁移的目标节点
      * */
     if (migrating_slot && missing_keys) {
         if (error_code) *error_code = CLUSTER_REDIR_ASK;
@@ -6935,7 +6962,7 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
      * request as "ASKING", we can serve the request. However if the request
      * involves multiple keys and we don't have them all, the only option is
      * to send a TRYAGAIN error.
-     * 接收到了其他节点的数据 应该是检测本次请求的key是否在本节点 对应上面的逻辑
+     * TODO
      * */
     if (importing_slot &&
         (c->flags & CLIENT_ASKING || cmd->flags & CMD_ASKING)) {
@@ -6950,10 +6977,11 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
     /* Handle the read-only client case reading from a slave: if this
      * node is a slave and the request is about a hash slot our master
      * is serving, we can reply without redirection.
-     * 如果是只读指令 且本节点作为目标节点的slave节点 可以帮忙处理请求 也就是起到负载的作用
+     * 本次命令是只读 或者本次事务全是只读事务
      * */
     int is_readonly_command = (c->cmd->flags & CMD_READONLY) ||
                               (c->cmd->proc == execCommand && !(c->mstate.cmd_inv_flags & CMD_READONLY));
+    // 本节点作为slave节点允许处理
     if (c->flags & CLIENT_READONLY &&
         (is_readonly_command || cmd->proc == evalCommand ||
          cmd->proc == evalShaCommand) &&
@@ -6964,7 +6992,7 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
 
     /* Base case: just return the right node. However if this node is not
      * myself, set error_code to MOVED since we need to issue a redirection.
-     * 否则将路由到的节点返回
+     * 本节点是master节点 并且本次slot不在本节点 将路由到的节点返回
      * */
     if (n != myself && error_code) *error_code = CLUSTER_REDIR_MOVED;
     return n;
@@ -7017,8 +7045,7 @@ void clusterRedirectClient(client *c, clusterNode *n, int hashslot, int error_co
  * If the client is found to be blocked into a hash slot this node no
  * longer handles, the client is sent a redirection error, and the function
  * returns 1. Otherwise 0 is returned and no operation is performed.
- *
- * 检测在某个client上阻塞的key 此时是否已经移动到集群中的其他节点 并将提示信息返回给client
+ * 当该client处于阻塞状态时 判断能否解除阻塞
  * */
 int clusterRedirectBlockedClientIfNeeded(client *c) {
     // 代表由于这3种类型导致的阻塞
@@ -7033,7 +7060,7 @@ int clusterRedirectBlockedClientIfNeeded(client *c) {
          * If the cluster is configured to allow reads on cluster down, we
          * still want to emit this error since a write will be required
          * to unblock them which may never come.
-         * 此时集群无法使用 将错误信息返回给client
+         * 此时本节点认为集群处于不可用状态 会解除阻塞
          * */
         if (server.cluster->state == CLUSTER_FAIL) {
             clusterRedirectClient(c, NULL, 0, CLUSTER_REDIR_DOWN_STATE);
@@ -7041,17 +7068,18 @@ int clusterRedirectBlockedClientIfNeeded(client *c) {
         }
 
         /* All keys must belong to the same slot, so check first key only.
-         * 检查key所在的节点是否发生了变化
+         * 被阻塞的所有key必然属于同一个slot 所以这里只要看一个slot就好
          * */
         di = dictGetIterator(c->bpop.keys);
         if ((de = dictNext(di)) != NULL) {
             robj *key = dictGetKey(de);
             int slot = keyHashSlot((char *) key->ptr, sdslen(key->ptr));
+            // 查看这些key此时应该存在于哪些节点上
             clusterNode *node = server.cluster->slots[slot];
 
             /* if the client is read-only and attempting to access key that our
              * replica can handle, allow it.
-             * 如果最近一次操作是只读操作 并且本节点是目标节点的子节点 允许用本节点处理请求
+             * 本节点作为拥有该slot的master的子节点 并且执行的是只读命令 就代表还是由本节点处理 不会发生重定向 原先阻塞的client会继续保持阻塞
              * */
             if ((c->flags & CLIENT_READONLY) &&
                 (c->lastcmd->flags & CMD_READONLY) &&
@@ -7062,7 +7090,8 @@ int clusterRedirectBlockedClientIfNeeded(client *c) {
             /* We send an error and unblock the client if:
              * 1) The slot is unassigned, emitting a cluster down error.
              * 2) The slot is not handled by this node, nor being imported.
-             * 将节点已经被移动的信息返回给client
+             * 此时key已经被转移到其他节点了 继续阻塞client也没有意义
+             * 并且本节点并没有打算从其他节点拉取该slot的数据
              * */
             if (node != myself &&
                 server.cluster->importing_slots_from[slot] == NULL) {
