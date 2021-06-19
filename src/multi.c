@@ -95,7 +95,7 @@ void discardTransaction(client *c) {
     initClientMultiState(c);
     // 清理multi相关的所有标记
     c->flags &= ~(CLIENT_MULTI|CLIENT_DIRTY_CAS|CLIENT_DIRTY_EXEC);
-    // 取消对这些key的监控
+    // 事务结束 取消对这些key的监控  (监控应该发生在一个事务开始前，并在事务结束后取消监控)
     unwatchAllKeys(c);
 }
 

@@ -65,12 +65,10 @@ char *replicationGetSlaveName(client *c) {
     ip[0] = '\0';
     buf[0] = '\0';
 
-    // TODO
     if (c->slave_ip[0] != '\0' ||
         connPeerToString(c->conn,ip,sizeof(ip),NULL) != -1)
     {
         /* Note that the 'ip' buffer is always larger than 'c->slave_ip'
-         *
          * */
         if (c->slave_ip[0] != '\0') memcpy(ip,c->slave_ip,sizeof(c->slave_ip));
 
@@ -3610,13 +3608,12 @@ long long replicationGetSlaveOffset(void) {
 /* --------------------------- REPLICATION CRON  ---------------------------- */
 
 /* Replication cron function, called 1 time per second.
- * 在server的主循环中会触发 每隔一秒执行一次  主要是执行副本相关的定时任务
+ * 作为整个副本的入口
  * */
 void replicationCron(void) {
     static long long replication_cron_loops = 0;
 
     /* Non blocking connection timeout?
-     * TODO 忽略握手请求
      * */
     if (server.masterhost &&
         (server.repl_state == REPL_STATE_CONNECTING ||

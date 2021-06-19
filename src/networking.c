@@ -2109,16 +2109,16 @@ void processInputBuffer(client *c) {
      * c->qb_pos记录上次处理到的偏移量
      * */
     while(c->qb_pos < sdslen(c->querybuf)) {
-        /* Return if clients are paused. 此时client处于暂停状态 不需要处理 */
+        /* Return if clients are paused. 此时server拒绝处理任务 */
         if (!(c->flags & CLIENT_SLAVE) && 
             !(c->flags & CLIENT_PENDING_READ) && 
             clientsArePaused()) break;
 
-        /* Immediately abort if the client is in the middle of something. 如果client处于阻塞状态也不需要处理 */
+        /* Immediately abort if the client is in the middle of something. 当前client处于阻塞状态 不需要处理囤积的数据 */
         if (c->flags & CLIENT_BLOCKED) break;
 
         /* Don't process more buffers from clients that have already pending
-         * commands to execute in c->argv. 此时有待执行的command时 也不需要处理新数据 */
+         * commands to execute in c->argv. 已经有解析出来的command了 并且还没有执行 必须先执行(消耗)完之前的参数后才能解析新的数据 */
         if (c->flags & CLIENT_PENDING_COMMAND) break;
 
         /* Don't process input from the master while there is a busy script
@@ -3249,7 +3249,8 @@ int clientsArePaused(void) {
 
             /* Don't touch slaves and blocked clients.
              * The latter pending requests will be processed when unblocked.
-             * paused的client 与这些被阻塞的client或者slave无关
+             * 这里忽略slave 或者blocked节点
+             * blocked代表手动要求暂停的client 与被动暂停不同 当server处于paused状态时client会被动暂停
              * */
             if (c->flags & (CLIENT_SLAVE|CLIENT_BLOCKED)) continue;
             queueClientForReprocessing(c);
@@ -3689,7 +3690,7 @@ int handleClientsWithPendingReadsUsingThreads(void) {
          * so we need to check in between each command. If a pause was
          * executed, we still remove the command and it will get picked up
          * later when clients are unpaused and we re-queue all clients.
-         * 如果此时该client被暂停 跳过
+         * 如果此时server暂停处理任务 跳过
          * */
         if (clientsArePaused()) continue;
 

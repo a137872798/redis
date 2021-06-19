@@ -96,7 +96,7 @@ void blockClient(client *c, int btype) {
 /* This function is called in the beforeSleep() function of the event loop
  * in order to process the pending input buffer of clients that were
  * unblocked after a blocking operation.
- * 处理未阻塞的client command
+ * 重新处理之前被阻塞的client
  * */
 void processUnblockedClients(void) {
     listNode *ln;
@@ -108,6 +108,7 @@ void processUnblockedClients(void) {
          * 如果此时server暂停了所有client  忽略本次处理
          * */
         if (clientsArePaused()) return;
+        // 此时server没有处于暂停状态 将本节点从unblocked中移除 避免重复处理
         ln = listFirst(server.unblocked_clients);
         serverAssert(ln != NULL);
         c = ln->value;
@@ -128,9 +129,9 @@ void processUnblockedClients(void) {
                 continue;
             }
             /* Then process client if it has more data in it's buffer.
+             * 可能client的缓冲区中还有数据 继续解析并执行
              * */
             if (c->querybuf && sdslen(c->querybuf) > 0) {
-                // 将querybuf中的数据 转换成command 以及相关参数 并执行command
                 processInputBuffer(c);
             }
         }
@@ -188,6 +189,7 @@ void unblockClient(client *c) {
      * we'll process new commands in its query buffer ASAP. */
     server.blocked_clients--;
     server.blocked_clients_by_type[c->btype]--;
+    // 此时满足了阻塞条件 可以去除阻塞标记了
     c->flags &= ~CLIENT_BLOCKED;
     c->btype = BLOCKED_NONE;
     // 将client 从timeout容器中移除
@@ -223,7 +225,7 @@ void replyToBlockedClientTimedOut(client *c) {
  *
  * The semantics is to send an -UNBLOCKED error to the client, disconnecting
  * it at the same time.
- * 解除所有处于block状态的client
+ * 与所有处于阻塞状态的client断开连接
  * */
 void disconnectAllBlockedClients(void) {
     listNode *ln;

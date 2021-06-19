@@ -2250,7 +2250,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
     /* Clear the paused clients flag if needed.
-     * 检测某些client是否可以从暂停状态中解除 惰性检测 同时这些client会被加入到 unblocked_clients 链表中
+     * 判断此时是否可以解除暂停状态了 pause有时间限制
      * */
     clientsArePaused(); /* Don't check return value, just use the side effect.*/
 
@@ -2413,7 +2413,8 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     if (moduleCount()) moduleHandleBlockedClients();
 
     /* Try to process pending commands for clients that were just unblocked.
-     * 针对所有未阻塞的client 尝试执行他们存储的command
+     * 处理此时已经从阻塞状态解除的client
+     * 当server处于暂停状态时 所有client都会被阻塞 当暂停状态结束后这些client就会被加入到unblocked队列中 这时重新执行任务
      * */
     if (listLength(server.unblocked_clients))
         processUnblockedClients();

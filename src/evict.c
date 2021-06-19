@@ -556,8 +556,7 @@ int freeMemoryIfNeeded(void) {
     /* When clients are paused the dataset should be static not just from the
      * POV of clients not being able to write, but also from the POV of
      * expires and evictions of keys not being performed.
-     * 如果此时client都被暂停 此时不会发生新的写入操作 就认为内存是够用的
-     * TODO 发现在集群模块中会将某个client暂停 先搁置
+     * 在server处于暂停状态时 不需要进行内存淘汰
      * */
     if (clientsArePaused()) return C_OK;
 

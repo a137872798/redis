@@ -168,7 +168,7 @@ void activeExpireCycle(int type) {
     /* When clients are paused the dataset should be static not just from the
      * POV of clients not being able to write, but also from the POV of
      * expires and evictions of keys not being performed.
-     * 如果此时server暂停了所有client 不进行过期检测
+     * 此时server处于暂停状态不进行处理
      * */
     if (clientsArePaused()) return;
 
