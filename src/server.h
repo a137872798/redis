@@ -233,6 +233,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_MASTER_FORCE_REPLY (1<<13)  /* Queue replies even if is master */
 #define CLIENT_FORCE_AOF (1<<14)   /* Force AOF propagation of current cmd. */
 #define CLIENT_FORCE_REPL (1<<15)  /* Force replication of current cmd. */
+// 该实例不支持部分数据同步
 #define CLIENT_PRE_PSYNC (1<<16)   /* Instance don't understand PSYNC. */
 #define CLIENT_READONLY (1<<17)    /* Cluster client is in read-only state. */
 #define CLIENT_PUBSUB (1<<18)      /* Client is in Pub/Sub mode. */
@@ -299,11 +300,16 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 /* Slave replication state. Used in server. for slaves to remember
  * what to do next. */
 #define REPL_STATE_NONE 0 /* No active replication */
+// 代表待连接状态
 #define REPL_STATE_CONNECT 1 /* Must connect to master */
+// 正在发起连接
 #define REPL_STATE_CONNECTING 2 /* Connecting to master */
-/* --- Handshake states, must be ordered --- */
+/* --- Handshake states, must be ordered ---
+ * 连接上master，正在等待master的pong请求
+ * */
 #define REPL_STATE_RECEIVE_PONG 3 /* Wait for PING reply */
 #define REPL_STATE_SEND_AUTH 4 /* Send AUTH to master */
+// 等待验权结果
 #define REPL_STATE_RECEIVE_AUTH 5 /* Wait for AUTH reply */
 #define REPL_STATE_SEND_PORT 6 /* Send REPLCONF listening-port */
 #define REPL_STATE_RECEIVE_PORT 7 /* Wait for REPLCONF reply */
@@ -311,10 +317,11 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define REPL_STATE_RECEIVE_IP 9 /* Wait for REPLCONF reply */
 #define REPL_STATE_SEND_CAPA 10 /* Send REPLCONF capa */
 #define REPL_STATE_RECEIVE_CAPA 11 /* Wait for REPLCONF reply */
+// 发送请求尝试同步部分数据
 #define REPL_STATE_SEND_PSYNC 12 /* Send PSYNC */
 #define REPL_STATE_RECEIVE_PSYNC 13 /* Wait for PSYNC reply */
 /* --- End of handshake states --- */
-// 此时处于等待master发送的全量rdb数据的阶段
+// 正在接收master发送的全量数据
 #define REPL_STATE_TRANSFER 14 /* Receiving .rdb from master */
 #define REPL_STATE_CONNECTED 15 /* Connected to master */
 
@@ -322,11 +329,12 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
  * In SEND_BULK and ONLINE state the slave receives new updates
  * in its output queue. In the WAIT_BGSAVE states instead the server is waiting
  * to start the next background saving in order to send updates to it. */
-#define SLAVE_STATE_WAIT_BGSAVE_START 6 /* We need to produce a new RDB file. 某个slave开始与master的全量数据同步工作 */
+
+// 代表刚确定某个slave需要同步全量数据
+#define SLAVE_STATE_WAIT_BGSAVE_START 6 /* We need to produce a new RDB file. */
 #define SLAVE_STATE_WAIT_BGSAVE_END 7 /* Waiting RDB file creation to finish. */
 // 将rdb文件流传输到slave节点上 注意是从rdb文件中  还有种socket类型是将数据暂存在内存中 直接传输给slave
 #define SLAVE_STATE_SEND_BULK 8 /* Sending RDB file to slave. */
-// 此时server可以探测到此slave
 #define SLAVE_STATE_ONLINE 9 /* RDB file transmitted, sending just updates. */
 
 /* Slave capabilities. */
@@ -860,7 +868,7 @@ typedef struct client {
     int replstate;          /* Replication state if this is a slave. */
     int repl_put_online_on_ack; /* Install slave write handler on first ACK. */
 
-    // 当通过读取rdb文件 完成slave的数据同步时 用于记录文件id
+    // 对应副本的rdb文件句柄
     int repldbfd;           /* Replication DB file descriptor. */
     // 在数据同步阶段 master生成rdb数据并开始传输时 可能会遇到一批数据无法一次发送 这是每个slave需要维护自己的偏移量 避免重复写入 同时也不会影响到其他slave
     off_t repldboff;        /* Replication DB file offset. */
@@ -876,6 +884,7 @@ typedef struct client {
                                        copying this slave output buffer
                                        should use. */
     char replid[CONFIG_RUN_ID_SIZE+1]; /* Master replication ID (if master). */
+    // 副本中使用的特殊端口
     int slave_listening_port; /* As configured with: REPLCONF listening-port */
     char slave_ip[NET_IP_STR_LEN]; /* Optionally given by REPLCONF ip-address */
     int slave_capa;         /* Slave capabilities: SLAVE_CAPA_* bitwise OR. */
@@ -1357,10 +1366,10 @@ struct redisServer {
     int rdb_pipe_write;             /* RDB pipes used to transfer the rdb */
     int rdb_pipe_read;              /* data to the parent process in diskless repl. */
 
-    // rdb数据流会通过这里连接传播到slave节点上
     connection **rdb_pipe_conns;    /* Connections which are currently the */
     int rdb_pipe_numconns;          /* target of diskless rdb fork child. */
     int rdb_pipe_numconns_writing;  /* Number of rdb conns with pending writes. */
+    // 在repl模块中使用 读取子进程生成的rdb数据流 并通过socket直接发送到目标slave
     char *rdb_pipe_buff;            /* In diskless replication, this buffer holds data */
     int rdb_pipe_bufflen;           /* that was read from the the rdb pipe. */
     int rdb_key_save_delay;         /* Delay in microseconds between keys while
@@ -1409,10 +1418,11 @@ struct redisServer {
     int repl_min_slaves_to_write;   /* Min number of slaves to write. */
     int repl_min_slaves_max_lag;    /* Max lag of <count> slaves to write. */
     int repl_good_slaves_count;     /* Number of slaves with lag <= max_lag. */
-    // 在slave的数据恢复阶段 无法从磁盘加载数据
+    // master通过socket直接发送rdb数据流给slave
     int repl_diskless_sync;         /* Master send RDB to slaves sockets directly. */
     int repl_diskless_load;         /* Slave parse RDB directly from the socket.
                                      * see REPL_DISKLESS_LOAD_* enum */
+    // 代表需要延迟发送
     int repl_diskless_sync_delay;   /* Delay to start a diskless repl BGSAVE. */
     /* Replication (slave) */
     char *masteruser;               /* AUTH with this user and masterauth with master */
@@ -1427,6 +1437,7 @@ struct redisServer {
     client *cached_master; /* Cached master to be reused for PSYNC. */
     int repl_syncio_timeout; /* Timeout for synchronous I/O calls */
     int repl_state;          /* Replication status if the instance is a slave */
+    // 本次传输的同步数据用的rdb文件总大小
     off_t repl_transfer_size; /* Size of RDB to read from master during sync. */
     off_t repl_transfer_read; /* Amount of RDB read from master during sync. */
     off_t repl_transfer_last_fsync_off; /* Offset when we fsync-ed last time. */
@@ -1435,6 +1446,7 @@ struct redisServer {
     connection *repl_transfer_s;     /* Slave -> Master SYNC connection */
     int repl_transfer_fd;    /* Slave -> Master SYNC temp file descriptor */
     char *repl_transfer_tmpfile; /* Slave-> master SYNC temp file name */
+    // 针对master全量数据同步，在传输rdb数据流时 最后一次收到master数据的时间 用于判断是否超时
     time_t repl_transfer_lastio; /* Unix time of the latest read, for timeout */
     int repl_serve_stale_data; /* Serve stale data when link is down? */
     int repl_slave_ro;          /* Slave is read only? */

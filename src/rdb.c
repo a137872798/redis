@@ -2668,7 +2668,7 @@ void killRDBChild(void) {
 
 /* Spawn an RDB child that writes the RDB to the sockets of the slaves
  * that are currently in SLAVE_STATE_WAIT_BGSAVE_START state.
- * 创建子进程 将rdb的数据传输到 slave节点上
+ * 生成rdb数据 并通过socket发送给slave
  * */
 int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
     listNode *ln;
@@ -2676,17 +2676,20 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
     pid_t childpid;
     int pipefds[2];
 
+    // 此时不能有其他正在运行的子进程 在调用该方法前 已经做过判断了
     if (hasActiveChildProcess()) return C_ERR;
 
     /* Even if the previous fork child exited, don't start a new one until we
-     * drained the pipe. */
+     * drained the pipe.
+     * 代表上一批slave的数据还未发送 不能重复调用该方法
+     * */
     if (server.rdb_pipe_conns) return C_ERR;
 
     /* Before to fork, create a pipe that is used to transfer the rdb bytes to
      * the parent, we can't let it write directly to the sockets, since in case
      * of TLS we must let the parent handle a continuous TLS state when the
      * child terminates and parent takes over.
-     * 生成master rdb快照 并写入到pipeline中
+     * 创建管道 可以跨进程传输数据
      * */
     if (pipe(pipefds) == -1) return C_ERR;
     server.rdb_pipe_read = pipefds[0];
@@ -2695,7 +2698,7 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
 
     /* Collect the connections of the replicas we want to transfer
      * the RDB to, which are i WAIT_BGSAVE_START state.
-     * 为每个节点创建自己的conn
+     * 获取每个slave的conn 并设置到rdb_pipe_conns
      * */
     server.rdb_pipe_conns = zmalloc(sizeof(connection *)*listLength(server.slaves));
     server.rdb_pipe_numconns = 0;
@@ -2703,32 +2706,33 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
     listRewind(server.slaves,&li);
     while((ln = listNext(&li))) {
         client *slave = ln->value;
-        // 当某个节点发起了同步数据的请求时 会将状态修改成 start 这里就是在寻找申请数据同步的节点
+        // 找到所有还未开始同步全量数据的节点 将他们的连接设置到conns中
         if (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_START) {
             server.rdb_pipe_conns[server.rdb_pipe_numconns++] = slave->conn;
-            // 此时已经完成了准备工作 会发送一个特殊的头部信息给client
+            // 给所有slave返回一个 需要进行全量数据同步的响应值  同时这里会将replstate修改成SLAVE_STATE_WAIT_BGSAVE_END
             replicationSetupSlaveForFullResync(slave,getPsyncInitialOffset());
         }
     }
 
     /* Create the child process.
-     * 打开 server.child_info 管道
+     * 打开server.child_info管道
      * */
     openChildInfoPipe();
-    // 此时分离出的子进程
+    // 子进程开始生成rdb数据
     if ((childpid = redisFork(CHILD_TYPE_RDB)) == 0) {
         /* Child */
         int retval;
         rio rdb;
 
-        // 产生的rio流对接 的是管道
+        // 数据是写往管道的
         rioInitWithFd(&rdb,server.rdb_pipe_write);
 
         redisSetProcTitle("redis-rdb-to-slaves");
         redisSetCpuAffinity(server.bgsave_cpulist);
 
-        // 此时数据都已经写入到了 pipe中
+        // 将数据存储到缓冲区中
         retval = rdbSaveRioWithEOFMark(&rdb,NULL,rsi);
+        // rioFlush会将数据写入到管道
         if (retval == C_OK && rioFlush(&rdb) == 0)
             retval = C_ERR;
 
@@ -2756,6 +2760,7 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
             listRewind(server.slaves,&li);
             while((ln = listNext(&li))) {
                 client *slave = ln->value;
+                // 所有在start的slave节点 在执行replicationSetupSlaveForFullResync后都会变成end状态
                 if (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_END) {
                     slave->replstate = SLAVE_STATE_WAIT_BGSAVE_START;
                 }
@@ -2770,18 +2775,17 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
             server.rdb_pipe_numconns_writing = 0;
             closeChildInfoPipe();
         } else {
-            // 设置rdb的类型
+            // 子进程创建成功
             serverLog(LL_NOTICE,"Background RDB transfer started by pid %d",
                 childpid);
             server.rdb_save_time_start = time(NULL);
             // 将本次子进程id设置到 rdb_child_pid上
             server.rdb_child_pid = childpid;
-            // 代表本次子进程的工作类型是 socket 也就是为了slave的数据同步 主要是进行数据传输工作
-            // 如果是disk类型就是将rdb数据持久化到磁盘
+            // 本方法对应的传输方式是socket
             server.rdb_child_type = RDB_CHILD_TYPE_SOCKET;
             updateDictResizePolicy();
             close(server.rdb_pipe_write); /* close write in parent so that it can detect the close on the child. */
-            // 这个就是利用pipe实现跨进程通信么 使用子进程往pipe_write中写入数据 当写入完毕后关闭pipe_write 此时pipe_read就会收到数据 主进程就可以开始处理结果了
+            // 作为父进程监听子进程管道数据
             if (aeCreateFileEvent(server.el, server.rdb_pipe_read, AE_READABLE, rdbPipeReadHandler,NULL) == AE_ERR) {
                 serverPanic("Unrecoverable error creating server.rdb_pipe_read file event.");
             }
@@ -2876,19 +2880,27 @@ rdbSaveInfo *rdbPopulateSaveInfo(rdbSaveInfo *rsi) {
      * scenario the replication info is useless, because when a slave
      * connects to us, the NULL repl_backlog will trigger a full
      * synchronization, at the same time we will use a new replid and clear
-     * replid2. */
+     * replid2.
+     * master进入这个分支
+     * */
     if (!server.masterhost && server.repl_backlog) {
         /* Note that when server.slaveseldb is -1, it means that this master
          * didn't apply any write commands after a full synchronization.
          * So we can let repl_stream_db be 0, this allows a restarted slave
          * to reload replication ID/offset, it's safe because the next write
-         * command must generate a SELECT statement. */
+         * command must generate a SELECT statement.
+         * 记录最近一次同步的db
+         * */
         rsi->repl_stream_db = server.slaveseldb == -1 ? 0 : server.slaveseldb;
         return rsi;
     }
 
+    // 下面都是slave的情况
+
     /* If the instance is a slave we need a connected master
-     * in order to fetch the currently selected DB. */
+     * in order to fetch the currently selected DB.
+     * 当前节点已经连接上master的情况下 返回master->db->id
+     * */
     if (server.master) {
         rsi->repl_stream_db = server.master->db->id;
         return rsi;
@@ -2898,7 +2910,9 @@ rdbSaveInfo *rdbPopulateSaveInfo(rdbSaveInfo *rsi) {
      * replication selected DB info inside the RDB file: the slave can
      * increment the master_repl_offset only from data arriving from the
      * master, so if we are disconnected the offset in the cached master
-     * is valid. */
+     * is valid.
+     * 如果只有cached_master 也返回对应的数据
+     * */
     if (server.cached_master) {
         rsi->repl_stream_db = server.cached_master->db->id;
         return rsi;

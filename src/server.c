@@ -4200,7 +4200,6 @@ int processCommand(client *c) {
     /* Don't accept write commands if there are not enough good slaves and
      * user configured the min-slaves-to-write option.
      * 当前可以正常工作的slave节点数量低于要求的最小值， 无法执行命令 对最小可用slave数量有所限制是为了保障高可用性
-     * TODO 有关集群/副本/分片的逻辑之后梳理
      * */
     if (server.masterhost == NULL &&
         server.repl_min_slaves_to_write &&
@@ -4496,9 +4495,7 @@ int writeCommandsDeniedByDiskError(void) {
 
 /* The PING command. It works in a different way if the client is in
  * in Pub/Sub mode.
- * 处理ping命令
- * slave 会每隔一段时间向master发送一条ping命令
- * 还有当slave首次连接上master时 也会发送一条ping命令
+ * 当slave节点连接到master后 就会发送一个ping命令
  * */
 void pingCommand(client *c) {
     /* The command takes zero or one arguments. */
@@ -4508,7 +4505,7 @@ void pingCommand(client *c) {
         return;
     }
 
-    // 将pong写入到对端
+    // CLIENT_PUBSUB 代表当前client作为一个订阅者
     if (c->flags & CLIENT_PUBSUB && c->resp == 2) {
         addReply(c,shared.mbulkhdr[2]);
         addReplyBulkCBuffer(c,"pong",4);
@@ -4516,6 +4513,7 @@ void pingCommand(client *c) {
             addReplyBulkCBuffer(c,"",0);
         else
             addReplyBulk(c,c->argv[1]);
+    // replication模块对应的是这种情况
     } else {
         if (c->argc == 1)
             addReply(c,shared.pong);

@@ -87,7 +87,9 @@ int listMatchObjects(void *a, void *b) {
 }
 
 /* This function links the client to the global linked list of clients.
- * unlinkClient() does the opposite, among other things. */
+ * unlinkClient() does the opposite, among other things.
+ * 将新接收到的conn包装成client 并加入到列表中
+ * */
 void linkClient(client *c) {
     listAddNodeTail(server.clients,c);
     /* Note that we remember the linked list node where the client is stored,
@@ -265,7 +267,7 @@ int prepareClientToWrite(client *c) {
 
     /* Masters don't receive replies, unless CLIENT_MASTER_FORCE_REPLY flag
      * is set.
-     * 一般情况下 如果client是master 它是不需要回复信息的 除非设置了强制回复标识
+     * 如果client是master 一般是无法主动推送消息的，除非加了这个特殊标记
      * */
     if ((c->flags & CLIENT_MASTER) &&
         !(c->flags & CLIENT_MASTER_FORCE_REPLY)) return C_ERR;
