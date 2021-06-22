@@ -2710,6 +2710,7 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
         if (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_START) {
             server.rdb_pipe_conns[server.rdb_pipe_numconns++] = slave->conn;
             // 给所有slave返回一个 需要进行全量数据同步的响应值  同时这里会将replstate修改成SLAVE_STATE_WAIT_BGSAVE_END
+            // 对端则会将readHandler修改成能够接收rdb数据流的函数
             replicationSetupSlaveForFullResync(slave,getPsyncInitialOffset());
         }
     }
@@ -2743,6 +2744,7 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi) {
         rioFreeFd(&rdb);
         // 关闭写通道后 读通道才会被唤醒
         close(server.rdb_pipe_write); /* wake up the reader, tell it we're done. */
+        // 虽然这里就调用了exit 但是子进程会在管道数据被读取完后才回收
         exitFromChild((retval == C_OK) ? 0 : 1);
     } else {
         /* Parent

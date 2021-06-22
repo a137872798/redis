@@ -1928,12 +1928,12 @@ void checkChildrenDone(void) {
      * as long as we didn't finish to drain the pipe, since then we're at risk
      * of starting a new fork and a new pipe before we're done with the previous
      * one.
-     * 如果此时的子进程是向slave节点传输数据  那么可以不等待
+     * 在与slave的数据同步过程中 子进程的数据还没有被全部读取和发送 不能回收子进程
      * */
     if (server.rdb_child_pid != -1 && server.rdb_pipe_conns)
         return;
 
-    // 等待子进程被彻底关闭
+    // 检测是否有已经完成的子进程  非阻塞
     // exit只是将子进程变成僵尸进程(也可能会自动清理?内核级别不太了解) WNOHANG代表当没有子进程时立即返回，而不是继续阻塞 返回值是收集到的子进程id 如果没有收集到进程则返回0
     // 第三个参数就是获取采集到的子进程信息 这里传入null代表不需要采集
     if ((pid = wait3(&statloc,WNOHANG,NULL)) != 0) {
@@ -4242,10 +4242,10 @@ int processCommand(client *c) {
     /* Only allow commands with flag "t", such as INFO, SLAVEOF and so on,
      * when slave-serve-stale-data is no and we are a slave with a broken
      * link with master.
-     * 当前slave节点处于游离状态时 是否允许执行命令 (游离状态就代表此时本节点的数据不是最新的  因为缺少了同步数据的目标节点)
+     * 副本状态不为REPL_STATE_CONNECTED 代表数据同步还未完成
      * */
     if (server.masterhost && server.repl_state != REPL_STATE_CONNECTED &&
-    // repl_serve_stale_data 默认为1，也就是允许在游离节点上执行命令 在生产环境下为保证一致性应该将该配置设置成0
+    // repl_serve_stale_data 默认为1，也就是允许在尚未同步完数据的节点上执行命令 在生产环境下为保证一致性应该将该配置设置成0
         server.repl_serve_stale_data == 0 &&
         is_denystale_command)
     {

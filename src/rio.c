@@ -310,7 +310,7 @@ static const rio rioConnIO = {
 
 /* Create an RIO that implements a buffered read from an fd
  * read_limit argument stops buffering when the reaching the limit.
- * 使用conn 和一个read限制量初始化一个rio对象
+ * read_limit代表本次准备接收的数据流总长度
  * */
 void rioInitWithConn(rio *r, connection *conn, size_t read_limit) {
     *r = rioConnIO;

@@ -123,7 +123,7 @@ void aofChildWriteDiffData(aeEventLoop *el, int fd, void *privdata, int mask) {
                              block->buf,block->used);
             // 无法写入数据时 返回
             if (nwritten <= 0) return;
-            memmove(block->buf,block->buf+nwritten,block->used-nwritten);s
+            memmove(block->buf,block->buf+nwritten,block->used-nwritten);
             block->used -= nwritten;
             block->free += nwritten;
         }

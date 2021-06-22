@@ -332,6 +332,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 
 // 代表刚确定某个slave需要同步全量数据
 #define SLAVE_STATE_WAIT_BGSAVE_START 6 /* We need to produce a new RDB file. */
+// 代表已经将需要同步全量数据的信息通知到slave了
 #define SLAVE_STATE_WAIT_BGSAVE_END 7 /* Waiting RDB file creation to finish. */
 // 将rdb文件流传输到slave节点上 注意是从rdb文件中  还有种socket类型是将数据暂存在内存中 直接传输给slave
 #define SLAVE_STATE_SEND_BULK 8 /* Sending RDB file to slave. */
@@ -339,6 +340,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 
 /* Slave capabilities. */
 #define SLAVE_CAPA_NONE 0
+// 代表支持通过socket直接发送rdb流
 #define SLAVE_CAPA_EOF (1<<0)    /* Can parse the RDB EOF streaming format. */
 #define SLAVE_CAPA_PSYNC2 (1<<1) /* Supports PSYNC2 protocol. */
 
