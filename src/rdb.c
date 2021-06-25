@@ -2870,7 +2870,6 @@ void bgsaveCommand(client *c) {
  * pointer if the instance has a valid master client, otherwise NULL
  * is returned, and the RDB saving will not persist any replication related
  * information.
- * 填充rdb存储信息  主要是设置db
  * */
 rdbSaveInfo *rdbPopulateSaveInfo(rdbSaveInfo *rsi) {
     rdbSaveInfo rsi_init = RDB_SAVE_INFO_INIT;

@@ -2290,7 +2290,7 @@ void readQueryFromClient(connection *conn) {
     // 更新与本client最近一次交互时间
     c->lastinteraction = server.unixtime;
 
-    // TODO
+    // 如果本次收到的是master发来的请求 会更新已读取到的同步偏移量
     if (c->flags & CLIENT_MASTER) c->read_reploff += nread;
     server.stat_net_input_bytes += nread;
 

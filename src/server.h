@@ -878,7 +878,7 @@ typedef struct client {
     sds replpreamble;       /* Replication DB preamble. */
     long long read_reploff; /* Read replication offset if this is a master. */
     long long reploff;      /* Applied replication offset if this is a master. */
-    // 在进行主副本数据同步时使用 表示数据同步的进度
+    // 描述副本此时的数据同步偏移量
     long long repl_ack_off; /* Replication ack offset, if this is a slave. */
     // 某个slave最后一次上报进度的时间戳
     long long repl_ack_time;/* Replication ack time, if this is a slave. */
@@ -1398,7 +1398,8 @@ struct redisServer {
     /* Replication (master) */
     char replid[CONFIG_RUN_ID_SIZE+1];  /* My current replication ID. */
     char replid2[CONFIG_RUN_ID_SIZE+1]; /* replid inherited from master*/
-    // 本节点作为master时才会保存  用于主副本数据同步
+
+    // 本节点此时同步到的偏移量 作为master就是最新的偏移量 作为slave就是与master同步到的偏移量  也是rdb持久化的偏移量
     long long master_repl_offset;   /* My current replication offset */
     long long second_replid_offset; /* Accept offsets up to this for replid2. */
 

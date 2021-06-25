@@ -592,7 +592,7 @@ int replicationSetupSlaveForFullResync(client *slave, long long offset) {
     char buf[128];
     int buflen;
 
-    // 设置部分数据同步的起始偏移量
+    // 记录明确这个slave将采用全量数据同步时 此时master的数据偏移量 赶上同一份rdb数据的其他slave也会以该offset作为同步数据偏移量
     slave->psync_initial_offset = offset;
     // 标记准备完成
     slave->replstate = SLAVE_STATE_WAIT_BGSAVE_END;
@@ -607,6 +607,7 @@ int replicationSetupSlaveForFullResync(client *slave, long long offset) {
      * */
     if (!(slave->flags & CLIENT_PRE_PSYNC)) {
         buflen = snprintf(buf,sizeof(buf),"+FULLRESYNC %s %lld\r\n",
+                          // 要将此时的副本id 和此时master的最新偏移量发送过去
                           server.replid,offset);
         if (connWrite(slave->conn,buf,buflen) != buflen) {
             freeClientAsync(slave);
@@ -1095,7 +1096,7 @@ void replconfCommand(client *c) {
                 c->slave_capa |= SLAVE_CAPA_EOF;
             else if (!strcasecmp(c->argv[j+1]->ptr,"psync2"))
                 c->slave_capa |= SLAVE_CAPA_PSYNC2;
-            // 每个slave完成连接上master后 在repliaCron中都会及时的上报 此时的数据同步偏移量 以及上报时间 这样master就可以清楚每个slave的数据同步状态
+            // 在slave节点至少同步了master的rdb数据后 (只剩下backlog数据未同步) 会开始定期向master上报自己的同步偏移量
         } else if (!strcasecmp(c->argv[j]->ptr,"ack")) {
             /* REPLCONF ACK is used by slave to inform the master the amount
              * of replication stream that it processed so far. It is an
@@ -1113,7 +1114,7 @@ void replconfCommand(client *c) {
              * confirms slave is online and ready to get more data). This
              * allows for simpler and less CPU intensive EOF detection
              * when streaming RDB files.
-             * TODO online应该是确定数据同步完成后才会设置的
+             * 针对直接通过socket发送rdb数据流的情况 当slave发起ack请求才能确定它已经消化完这部分数据了 之后就可以发送backlog数据
              * */
             if (c->repl_put_online_on_ack && c->replstate == SLAVE_STATE_ONLINE)
                 putSlaveOnline(c);
@@ -1683,7 +1684,7 @@ void replicationCreateMasterClient(connection *conn, int dbid) {
     server.master->flags |= CLIENT_MASTER;
     server.master->authenticated = 1;
     // 填充master属性
-    // slave节点此时认为master的总偏移量 通过这个可以判断是否需要同步数据
+    // slave节点此时认为master的总偏移量也是本节点刚刚同步完rdb数据对应的偏移量 通过这个可以判断是否需要同步全量数据
     server.master->reploff = server.master_initial_offset;
     server.master->read_reploff = server.master->reploff;
     server.master->user = NULL; /* This client can do everything. */
@@ -2170,6 +2171,8 @@ void readSyncBulkPayload(connection *conn) {
      * offset of the master. The secondary ID / offset are cleared since
      * we are starting a new history. */
     memcpy(server.replid,server.master->replid,sizeof(server.replid));
+
+    // 注意在这里设置了master_repl_offset  rdb文件中持久化的是这个偏移量
     server.master_repl_offset = server.master->reploff;
     // 在同步了master的偏移量以及副本id后 清理副本2的数据
     clearReplicationId2();
@@ -2349,13 +2352,14 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
          * a FULL resync using the PSYNC command we'll set the offset at the
          * right value, so that this information will be propagated to the
          * client structure representing the master into server.master.
-         * 此时作为slave还不清楚要从哪里开始同步数据
+         * 在没有发送同步请求探测master的偏移量时 是不知道master此时的偏移量的
          * */
         server.master_initial_offset = -1;
 
-        // 如果之前缓存了这部分信息 发送缓存的偏移量
+        // 存在一个旧的master信息 可能是在重启redis时从rdb文件中恢复的 会记录副本id 以及偏移量 只有当副本id匹配的时候才可以通过偏移量去判断需要同步多少数据
         if (server.cached_master) {
             psync_replid = server.cached_master->replid;
+            // 这个reploff代表作为副本此时已经与master同步到了这个位置
             snprintf(psync_offset,sizeof(psync_offset),"%lld", server.cached_master->reploff+1);
             serverLog(LL_NOTICE,"Trying a partial resynchronization (request %s:%s).", psync_replid, psync_offset);
         } else {
@@ -2418,7 +2422,7 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
         } else {
             memcpy(server.master_replid, replid, offset-replid-1);
             server.master_replid[CONFIG_RUN_ID_SIZE] = '\0';
-            // 该值对应master节点上的 master_repl_offset
+            // 代表本次同步的rdb数据对应master的偏移量 只有当数据恢复完成才会将这个值设置到master_repl_offset上 因为本节点的rdb持久化是保存master_repl_offset
             server.master_initial_offset = strtoll(offset,NULL,10);
             serverLog(LL_NOTICE,"Full resync from master: %s:%lld",
                 server.master_replid,
@@ -2461,7 +2465,7 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
                 serverLog(LL_WARNING,"Master replication ID changed to %s",new);
 
                 /* Set the old ID as our ID2, up to the current offset+1.
-                 * 将replid转移到了replid2
+                 * 将之前的副本id/offset都存储到2号副本信息上
                  * */
                 memcpy(server.replid2,server.cached_master->replid,
                     sizeof(server.replid2));
@@ -2469,7 +2473,9 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
                 server.second_replid_offset = server.master_repl_offset+1;
 
                 /* Update the cached master ID and our own primary ID to the
-                 * new one. 拷贝最新的replid 并加入到缓存中 */
+                 * new one.
+                 * 将最新的副本id 同时设置到replid和cached_master_replid 上
+                 * */
                 memcpy(server.replid,new,sizeof(server.replid));
                 memcpy(server.cached_master->replid,new,sizeof(server.replid));
 
@@ -3212,13 +3218,13 @@ void roleCommand(client *c) {
 /* Send a REPLCONF ACK command to the master to inform it about the current
  * processed offset. If we are not connected with a master, the command has
  * no effects.
- * 作为副本将当前同步偏移量发送给master
+ * 副本会定期上报自己的同步偏移量
  * */
 void replicationSendAck(void) {
     client *c = server.master;
 
     if (c != NULL) {
-        // 加上标记才能向master发送消息
+        // 加上标记才能向master发送消息  正常情况下slave是不能向master发送消息的
         c->flags |= CLIENT_MASTER_FORCE_REPLY;
         addReplyArrayLen(c,3);
         addReplyBulkCString(c,"REPLCONF");
@@ -3294,7 +3300,7 @@ void replicationCacheMaster(client *c) {
  * the new master will accept its replication ID, and potentiall also the
  * current offset if no data was lost during the failover. So we use our
  * current replication ID and offset in order to synthesize a cached master.
- * 缓存master节点的相关信息 在没有与master节点建立连接的情况下 通过这种方式获取第一手数据
+ * 在重启slave节点时 会通过加载rdb的数据发现上一次副本相关的repl_id/repl_offset 通过这些指标可以快速判断怎样与本次连接的master同步数据 全量同步还是部分同步
  * */
 void replicationCacheMasterUsingMyself(void) {
     serverLog(LL_NOTICE,
@@ -3306,22 +3312,21 @@ void replicationCacheMasterUsingMyself(void) {
      * by replicationCreateMasterClient(). We'll later set the created
      * master as server.cached_master, so the replica will use such
      * offset for PSYNC.
-     * 将此时server中存储的master偏移量作为 master的初始偏移量
+     * 设置初始偏移量
      * */
     server.master_initial_offset = server.master_repl_offset;
 
     /* The master client we create can be set to any DBID, because
      * the new master will start its replication stream with SELECT.
-     * 此时连接还没完成 先创建一个空的client作为master节点
+     * 生成的master最后是要设置到 cached_master上的
      * */
     replicationCreateMasterClient(NULL,-1);
 
     /* Use our own ID / offset. 拷贝replid */
     memcpy(server.master->replid, server.replid, sizeof(server.replid));
 
-    /* Set as cached master. 断开与master节点的连接 */
+    /* Set as cached master. */
     unlinkClient(server.master);
-    // 将该master设置成cache_master
     server.cached_master = server.master;
     server.master = NULL;
 }
@@ -3733,7 +3738,7 @@ void replicationCron(void) {
     /* Send ACK to master from time to time.
      * Note that we do not send periodic acks to masters that don't
      * support PSYNC and replication offsets.
-     * 作为slave节点 会时不时的将自身偏移量发送给master
+     * 作为slave节点 会时不时的将自身偏移量发送给master  (当server.master被设置时就代表至少完成了rdb的数据同步 或者只需要同步部分数据)
      * 携带CLIENT_PRE_PSYNC标记 代表此时不确定master的偏移量 不发送ack信息
      * */
     if (server.masterhost && server.master &&
@@ -3765,7 +3770,7 @@ void replicationCron(void) {
             server.cluster->mf_end &&
             clientsArePaused();
 
-        // 这是正常情况 也就是不处于故障转移状态 会定期向所有slave节点发送ping请求
+        // 这是正常情况 也就是不处于故障转移状态 会定期向所有slave节点发送ping请求 主要是为了更新最后一次与master交互的时间 避免被认为是断开连接了
         if (!manual_failover_in_progress) {
             ping_argv[0] = createStringObject("PING",4);
             replicationFeedSlaves(server.slaves, server.slaveseldb,

@@ -504,6 +504,7 @@ void loadServerConfigFromString(char *config) {
             if (server.masterport < 0 || server.masterport > 65535 || *ptr != '\0') {
                 err = "Invalid master port"; goto loaderr;
             }
+            // 设置master地址后 会在replCron中进行连接
             server.repl_state = REPL_STATE_CONNECT;
         } else if (!strcasecmp(argv[0],"requirepass") && argc == 2) {
             if (strlen(argv[1]) > CONFIG_AUTHPASS_MAX_LEN) {
@@ -1125,17 +1126,16 @@ void rewriteConfigAppendLine(struct rewriteConfigState *state, sds line) {
 }
 
 /* Populate the option -> list of line numbers map.
- * 解析本行的参数信息
+ * 针对不同的配置信息 将所在的行数存储起来
  * */
 void rewriteConfigAddLineNumberToOption(struct rewriteConfigState *state, sds option, int linenum) {
-    // 以option作为dict的key
     list *l = dictFetchValue(state->option_to_line,option);
 
     if (l == NULL) {
         l = listCreate();
         dictAdd(state->option_to_line,sdsdup(option),l);
     }
-    // 代表该 option 出现在第几行 同一个option可能出现多次 所以这是一个list结构
+    // 存储行数
     listAddNodeTail(l,(void*)(long)linenum);
 }
 
@@ -1143,7 +1143,7 @@ void rewriteConfigAddLineNumberToOption(struct rewriteConfigState *state, sds op
  * This is useful as only unused lines of processed options will be blanked
  * in the config file, while options the rewrite process does not understand
  * remain untouched.
- * 标记哪些option会被rewrite
+ * 记录被重新改写的option  并且这里改写的值是NULL
  * */
 void rewriteConfigMarkAsProcessed(struct rewriteConfigState *state, const char *option) {
     sds opt = sdsnew(option);
@@ -1156,7 +1156,7 @@ void rewriteConfigMarkAsProcessed(struct rewriteConfigState *state, const char *
  *
  * If it is impossible to read the old file, NULL is returned.
  * If the old file does not exist at all, an empty state is returned.
- * 先从文件中加载数据到内存中
+ * 读取配置文件中的数据 并设置到state上
  * */
 struct rewriteConfigState *rewriteConfigReadOldFile(char *path) {
     // 以只读方式打开文件
@@ -1166,13 +1166,14 @@ struct rewriteConfigState *rewriteConfigReadOldFile(char *path) {
     char buf[CONFIG_MAX_LINE+1];
     int linenum = -1;
     struct rewriteConfigState *state = zmalloc(sizeof(*state));
-    // 初始化state的相关容器
+    // 初始化state的相关属性
     state->option_to_line = dictCreate(&optionToLineDictType,NULL);
     state->rewritten = dictCreate(&optionSetDictType,NULL);
     state->numlines = 0;
     state->lines = NULL;
     state->has_tail = 0;
     state->force_all = 0;
+    // 空文件 返回空的state对象
     if (fp == NULL) return state;
 
     /* Read the old file line by line, populate the state.
@@ -1190,17 +1191,21 @@ struct rewriteConfigState *rewriteConfigReadOldFile(char *path) {
         if (line[0] == '#' || line[0] == '\0') {
             if (!state->has_tail && !strcmp(line,REDIS_CONFIG_REWRITE_SIGNATURE))
                 state->has_tail = 1;
-            // 将本行记录存储到lines中
+            // 将该行信息存储到state中
             rewriteConfigAppendLine(state,line);
             continue;
         }
 
-        /* Not a comment, split into arguments. */
+        /* Not a comment, split into arguments.
+         * 解析该行数据
+         * */
         argv = sdssplitargs(line,&argc);
         if (argv == NULL) {
             /* Apparently the line is unparsable for some reason, for
              * instance it may have unbalanced quotes. Load it as a
-             * comment. */
+             * comment.
+             * 这行信息无法解析出有效参数 追加一个注释前缀后 添加到state中
+             * */
             sds aux = sdsnew("# ??? ");
             aux = sdscatsds(aux,line);
             sdsfree(line);
@@ -1212,25 +1217,25 @@ struct rewriteConfigState *rewriteConfigReadOldFile(char *path) {
 
         /* Now we populate the state according to the content of this line.
          * Append the line and populate the option -> line numbers map.
+         * 存储本行的原始信息
          * */
         rewriteConfigAppendLine(state,line);
 
         /* Translate options using the word "slave" to the corresponding name
          * "replica", before adding such option to the config name -> lines
          * mapping.
-         * 哨兵文件内会记录此时所有的slave信息
+         * 如果本行使用的是 slave作为前缀， 修改成replica (应该是采用了新的叫法)
          * */
         char *p = strstr(argv[0],"slave");
         if (p) {
             sds alt = sdsempty();
-            // 就是在  slave之前插入一个 replica字符串
             alt = sdscatlen(alt,argv[0],p-argv[0]);;
             alt = sdscatlen(alt,"replica",7);
             alt = sdscatlen(alt,p+5,strlen(p+5));
             sdsfree(argv[0]);
             argv[0] = alt;
         }
-        // 将本行设置到state结构体中
+        // 根据本行的类型 存储到state的不同属性中
         rewriteConfigAddLineNumberToOption(state,argv[0],linenum);
         sdsfreesplitres(argv,argc);
     }
@@ -1254,16 +1259,18 @@ struct rewriteConfigState *rewriteConfigReadOldFile(char *path) {
  *
  * "line" is either used, or freed, so the caller does not need to free it
  * in any way.
- * 使用line替代原本的option
+ * 使用line改写原本option对应的配置值
  * */
 void rewriteConfigRewriteLine(struct rewriteConfigState *state, const char *option, sds line, int force) {
     sds o = sdsnew(option);
+
+    // 通过option 可以检索相关的配置值出现在哪几行
     list *l = dictFetchValue(state->option_to_line,o);
 
     // 记录该option已经被修改过
     rewriteConfigMarkAsProcessed(state,option);
 
-    // 如果此时option已经不存在与state中了 且非force模式 忽略本次请求
+    // 如果原本不存在  且本次没有设置force 就代表无法插入 (也就是期望是覆盖配置 而不是插入新配置)
     if (!l && !force && !state->force_all) {
         /* Option not used previously, and we are not forced to use it. */
         sdsfree(line);
@@ -1272,20 +1279,21 @@ void rewriteConfigRewriteLine(struct rewriteConfigState *state, const char *opti
     }
 
     if (l) {
+        // 替换配置项
         listNode *ln = listFirst(l);
         int linenum = (long) ln->value;
 
         /* There are still lines in the old configuration file we can reuse
          * for this option. Replace the line with the new one. */
         listDelNode(l,ln);
-        // 代表每条option 都已经被使用过 可以从option_to_line中移除数据
+        // 如果此时该option相关的所有配置都已经被改写完 就可以删除这条关联关系
         if (listLength(l) == 0) dictDelete(state->option_to_line,o);
         // 使用line去替换option (原本lines中存储的是option)
         sdsfree(state->lines[linenum]);
         state->lines[linenum] = line;
     } else {
-        /* Append a new line. 无法替换option 在force情况下会增加新行 用于存储line
-         * has_tail 相当于一个增加了新行的标记 REDIS_CONFIG_REWRITE_SIGNATURE 是用于标记下一行是通过rewrite产生的
+        /* Append a new line.
+         * 代表追加新的配置
          * */
         if (!state->has_tail) {
             rewriteConfigAppendLine(state,
@@ -1386,12 +1394,15 @@ void rewriteConfigEnumOption(struct rewriteConfigState *state, const char *optio
     rewriteConfigRewriteLine(state,option,line,force);
 }
 
-/* Rewrite the save option. 读取此时server.saveparams并替换sentinel中的"save" */
+/* Rewrite the save option.
+ * 读取saveparam信息并替换配置文件中的配置项 */
 void rewriteConfigSaveOption(struct rewriteConfigState *state) {
     int j;
     sds line;
 
-    /* In Sentinel mode we don't need to rewrite the save parameters */
+    /* In Sentinel mode we don't need to rewrite the save parameters
+     * 在哨兵模式下不应该设置这个参数
+     * */
     if (server.sentinel_mode) {
         rewriteConfigMarkAsProcessed(state,"save");
         return;
@@ -1536,30 +1547,35 @@ void rewriteConfigOOMScoreAdjValuesOption(struct rewriteConfigState *state) {
     rewriteConfigRewriteLine(state,option,line,force);
 }
 
-/* Rewrite the bind option. 基于当前server的bind配置 替换option的数据 */
+/* Rewrite the bind option.
+ * 更新有关bind的配置信息
+ * */
 void rewriteConfigBindOption(struct rewriteConfigState *state) {
     int force = 1;
     sds line, addresses;
 
-    // 如果sentinel配置文件中包含bind 尝试使用server的配置进行替换
+    // bind相关的配置信息 以bind作为前缀
     char *option = "bind";
 
     /* Nothing to rewrite if we don't have bind addresses.
-     * 没有声明bindAddress的话 就不需要rewritten了 将该option加入到state.rewritten容器中
+     * 代表此时没有设置额外要绑定的地址
      * */
     if (server.bindaddr_count == 0) {
+        // 这里就是将option修改成 NULL
         rewriteConfigMarkAsProcessed(state,option);
         return;
     }
 
-    /* Rewrite as bind <addr1> <addr2> ... <addrN> 将地址信息连接起来 */
+    /* Rewrite as bind <addr1> <addr2> ... <addrN>
+     * 代表设置了 bindaddr 将他们拼接起来后存储到 state中
+     * */
     addresses = sdsjoin(server.bindaddr,server.bindaddr_count," ");
     line = sdsnew(option);
     line = sdscatlen(line, " ", 1);
     line = sdscatsds(line, addresses);
     sdsfree(addresses);
 
-    // 使用line替换option的数据
+    // 将option原本的配置改写成 line
     rewriteConfigRewriteLine(state,option,line,force);
 }
 
@@ -1726,14 +1742,15 @@ cleanup:
  * written. This is currently only used for testing purposes.
  *
  * On error -1 is returned and errno is set accordingly, otherwise 0.
- * 将此时哨兵相关的所有信息写入到配置文件中
+ * 基于当前哨兵信息 更新配置文件
  * */
 int rewriteConfig(char *path, int force_all) {
     struct rewriteConfigState *state;
     sds newcontent;
     int retval;
 
-    /* Step 1: read the old config into our rewrite state. 先从配置文件中读取旧数据 */
+    /* Step 1: read the old config into our rewrite state.
+     * 先从配置文件中读取旧数据 并填充到state结构体中 */
     if ((state = rewriteConfigReadOldFile(path)) == NULL) return -1;
     if (force_all) state->force_all = 1;
 
@@ -1741,19 +1758,21 @@ int rewriteConfig(char *path, int force_all) {
      * the rewrite state. */
 
     /* Iterate the configs that are standard
-     * 此时的state会影响到之前的标准配置
+     * 尝试更新配置信息
      * */
     for (standardConfig *config = configs; config->name != NULL; config++) {
         config->interface.rewrite(config->data, config->name, state);
     }
 
-    // 这里对一些特殊的配置项进行rewrite
+    // 以下方法 将根据本节点信息更新state
+
+    // 使用当前bind地址 替换bind配置
     rewriteConfigBindOption(state);
-    // 读取 unixsocket参数 并替换 unixsocketperm
+    // 替换unixsocketperm
     rewriteConfigOctalOption(state,"unixsocketperm",server.unixsocketperm,CONFIG_DEFAULT_UNIX_SOCKET_PERM);
-    // 替换string类型的配置
+    // 替换logfile
     rewriteConfigStringOption(state,"logfile",server.logfile,CONFIG_DEFAULT_LOGFILE);
-    // 使用server.saveparam 替换sentinel配置中的"save"参数
+    // 替换saveparam
     rewriteConfigSaveOption(state);
     // 获取用户信息
     rewriteConfigUserOption(state);

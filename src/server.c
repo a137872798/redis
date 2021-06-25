@@ -5765,12 +5765,11 @@ void loadDataFromDisk(void) {
                 (float)(ustime()-start)/1000000);
 
             /* Restore the replication ID / offset from the RDB file.
-             * 当本节点作为集群的slave节点时 在通过rdb文件恢复数据时 可能会写入replicaId 等信息
+             * 当本节点作为集群的slave节点时 在通过rdb文件恢复数据时 可能会写入replId/replOffset 等信息
              * */
             if ((server.masterhost ||
                 (server.cluster_enabled &&
                 nodeIsSlave(server.cluster->myself))) &&
-                // 代表rdb文件中确实有相关数据 并且已经设置到rsi中了
                 rsi.repl_id_is_set &&
                 rsi.repl_offset != -1 &&
                 /* Note that older implementations may save a repl_stream_db
@@ -5778,15 +5777,17 @@ void loadDataFromDisk(void) {
                  * information in function rdbPopulateSaveInfo. */
                 rsi.repl_stream_db != -1)
             {
-                // 将相关属性转移到server上
+                // 恢复副本信息
                 memcpy(server.replid,rsi.repl_id,sizeof(server.replid));
-                // 本节点作为slave会记录之前master的数据偏移量 这样好判断数据同步是否完成
+                // 通过判断之前与master同步数据的偏移量 来判断本次能否进行部分数据同步
                 server.master_repl_offset = rsi.repl_offset;
                 /* If we are a slave, create a cached master from this
                  * information, in order to allow partial resynchronizations
-                 * with masters. 生成一个临时的master 并设置到 server.cached_master*/
+                 * with masters.
+                 * 生成一个临时的master 并设置到 server.cached_master
+                 * */
                 replicationCacheMasterUsingMyself();
-                // 指定cached_master的db
+                // 切换到最近一次使用的db
                 selectDb(server.cached_master,rsi.repl_stream_db);
             }
             // 数据恢复失败 结束进程
