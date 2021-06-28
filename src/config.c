@@ -1416,7 +1416,9 @@ void rewriteConfigSaveOption(struct rewriteConfigState *state) {
             (long) server.saveparams[j].seconds, server.saveparams[j].changes);
         rewriteConfigRewriteLine(state,"save",line,1);
     }
-    /* Mark "save" as processed in case server.saveparamslen is zero. */
+    /* Mark "save" as processed in case server.saveparamslen is zero.
+     * 因为新的saveparam可能比旧的要少  这里就是将剩余的旧的清空
+     * */
     rewriteConfigMarkAsProcessed(state,"save");
 }
 
@@ -1637,7 +1639,6 @@ void rewriteConfigReleaseState(struct rewriteConfigState *state) {
  *
  * This function does just this, iterating all the option names and
  * blanking all the lines still associated.
- * 移除孤儿配置
  * */
 void rewriteConfigRemoveOrphaned(struct rewriteConfigState *state) {
     dictIterator *di = dictGetIterator(state->option_to_line);
@@ -1774,30 +1775,30 @@ int rewriteConfig(char *path, int force_all) {
     rewriteConfigStringOption(state,"logfile",server.logfile,CONFIG_DEFAULT_LOGFILE);
     // 替换saveparam
     rewriteConfigSaveOption(state);
-    // 获取用户信息
+    // 替换用户信息
     rewriteConfigUserOption(state);
-    // 获取当前主目录 并替换 "dir"
+    // 替换"dir"
     rewriteConfigDirOption(state);
-    // 获取本节点认可的master节点
+    // 替换master地址
     rewriteConfigSlaveofOption(state,"replicaof");
-    // 读取 requirepass
+    // 替换密码信息
     rewriteConfigRequirepassOption(state,"requirepass");
     rewriteConfigBytesOption(state,"client-query-buffer-limit",server.client_max_querybuf_len,PROTO_MAX_QUERYBUF_LEN);
     rewriteConfigStringOption(state,"cluster-config-file",server.cluster_configfile,CONFIG_DEFAULT_CLUSTER_CONFIG_FILE);
-    // 也是获取配置项 并修改成字符串
+    // 替换notify_keyspace_events
     rewriteConfigNotifykeyspaceeventsOption(state);
     rewriteConfigClientoutputbufferlimitOption(state);
     rewriteConfigOOMScoreAdjValuesOption(state);
 
     /* Rewrite Sentinel config if in Sentinel mode.
-     * 根据哨兵相关配置填充rewriteConfigState
+     * 改写哨兵相关的配置
      * */
     if (server.sentinel_mode) rewriteConfigSentinelOption(state);
 
     /* Step 3: remove all the orphaned lines in the old file, that is, lines
      * that were used by a config option and are no longer used, like in case
      * of multiple "save" options or duplicated options.
-     * 移除一些孤儿配置
+     * 剩余的旧配置信息会被移除
      * */
     rewriteConfigRemoveOrphaned(state);
 
