@@ -71,7 +71,9 @@ typedef long long ssize_t;
 /* Flag that is set when an async callback is executed. */
 #define REDIS_IN_CALLBACK 0x10
 
-/* Flag that is set when the async context has one or more subscriptions. */
+/* Flag that is set when the async context has one or more subscriptions.
+ * 当这个上下文关联的连接是针对订阅发布创建的  需要增加这个标识
+ * */
 #define REDIS_SUBSCRIBED 0x20
 
 /* Flag that is set when monitor mode is active */
@@ -241,6 +243,7 @@ typedef struct redisContext {
     // 记录的是套接字句柄
     redisFD fd;
     int flags;
+    // 待发送的数据会写入到这个缓冲区中
     char *obuf; /* Write buffer */
     redisReader *reader; /* Protocol reader */
 

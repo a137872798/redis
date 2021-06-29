@@ -99,6 +99,7 @@ static dictType callbackDict = {
 };
 
 /**
+ * 将一个普通的上下文对象包装成异步上下文
  * @param c
  * @return
  */
@@ -125,7 +126,9 @@ static redisAsyncContext *redisAsyncInitialize(redisContext *c) {
 
     /* The regular connect functions will always set the flag REDIS_CONNECTED.
      * For the async API, we want to wait until the first write event is
-     * received up before setting this flag, so reset it here. */
+     * received up before setting this flag, so reset it here.
+     * 因为本次采用的是异步连接 可以看到在基于异步模式的连接下 会先设置REDIS_CONNECTED标记 此时就要清理掉该标记
+     * */
     c->flags &= ~REDIS_CONNECTED;
 
     // 这里都是一些属性初始化
@@ -171,7 +174,7 @@ static void __redisAsyncCopyError(redisAsyncContext *ac) {
 }
 
 /**
- * 基于options 建立异步连接
+ * 基于options 建立异步连接  options中包含了连接方式 options.endpoint中包含了以及ip/port
  * @param options
  * @return
  */
@@ -185,11 +188,12 @@ redisAsyncContext *redisAsyncConnectWithOptions(const redisOptions *options) {
      * 设置成no_push
      * */
     myOptions.push_cb = NULL;
-    myOptions.options |= REDIS_OPT_NO_PUSH_AUTOFREE;
 
-    // 追加nonblock标识
+    // 设置options
+    myOptions.options |= REDIS_OPT_NO_PUSH_AUTOFREE;
+    // 注意本次发起的是非阻塞连接
     myOptions.options |= REDIS_OPT_NONBLOCK;
-    // 生成上下文对象  这里同时还基于该context进行网络连接
+    // 生成上下文对象  这里同时还基于该context发起连接
     c = redisConnectWithOptions(&myOptions);
     if (c == NULL) {
         return NULL;
@@ -203,7 +207,7 @@ redisAsyncContext *redisAsyncConnectWithOptions(const redisOptions *options) {
     }
 
     /* Set any configured async push handler
-     * 根据options设置push回调  先假设没有携带回调函数吧
+     * 设置ac->push_cb 先假设options中没有携带回调信息
      * */
     redisAsyncSetPushCallback(ac, myOptions.async_push_cb);
 
@@ -227,7 +231,7 @@ redisAsyncContext *redisAsyncConnect(const char *ip, int port) {
 redisAsyncContext *redisAsyncConnectBind(const char *ip, int port,
                                          const char *source_addr) {
     redisOptions options = {0};
-    // 填充options的 ip/port/type
+    // 填充options的 ip/port 以及连接方式
     REDIS_OPTIONS_SET_TCP(&options, ip, port);
     // 本机绑定的地址
     options.endpoint.tcp.source_addr = source_addr;
@@ -858,23 +862,22 @@ void redisAsyncHandleTimeout(redisAsyncContext *ac) {
 
 /* Sets a pointer to the first argument and its length starting at p. Returns
  * the number of bytes to skip to get to the following argument.
- * 这里的解析逻辑对应redisvFormatCommand的写入逻辑
- * 返回的字符串是下一个参数的起始位置
+ * 找到下一个参数的起始位置
  * */
 static const char *nextArgument(const char *start, const char **str, size_t *len) {
     const char *p = start;
 
-    // 在字符串中匹配 $ 应该是某个参数的开头
+    // 如果存在$ 代表有一个描述参数长度的信息
     if (p[0] != '$') {
         p = strchr(p,'$');
         if (p == NULL) return NULL;
     }
 
-    // $ 之后是一个长度信息
+    // 获取长度信息
     *len = (int)strtol(p+1,NULL,10);
     p = strchr(p,'\r');
     assert(p);
-    // 对应参数的起始位置
+    // 这里会更新字符串的起始位置
     *str = p+2;
     return p+2+(*len)+2;
 }
@@ -908,22 +911,24 @@ static int __redisAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void 
      * 这里生成一个回调对象专门用来处理接收到的reply对象
      * */
     cb.fn = fn;
+
+    // 因为存在连接被共用的情况 通过设置privdata 来判断这个回调是针对哪个实例设置的
     cb.privdata = privdata;
     cb.pending_subs = 1;
 
     /* Find out which command will be appended.
-     * 解析首个参数的起始位置 长度 返回的是下一个参数的起始位置
+     * 获取下一个参数的起始位置
      * */
     p = nextArgument(cmd,&cstr,&clen);
     assert(p != NULL);
     // 判断是否存在下一个参数
     hasnext = (p[0] == '$');
-    // 该参数是否以 p 开头 如果以p开头 那么有效的参数长度要变小
+    // p开头就代表本次传入的是一个正则表达式
     pvariant = (tolower(cstr[0]) == 'p') ? 1 : 0;
     cstr += pvariant;
     clen -= pvariant;
 
-    // 此时有下一个参数 并且本次执行的是一个subscribe命令
+    // sentinel会与其他master/slave建立一个专门用于订阅发布的连接 会进入这个分支
     if (hasnext && strncasecmp(cstr,"subscribe\r\n",11) == 0) {
         c->flags |= REDIS_SUBSCRIBED;
 
@@ -933,6 +938,7 @@ static int __redisAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void 
             if (sname == NULL)
                 goto oom;
 
+            // 根据是否是正则表达式 将channel添加到不同的容器
             if (pvariant)
                 cbdict = ac->sub.patterns;
             else
@@ -961,8 +967,10 @@ static int __redisAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void 
          /* Set monitor flag and push callback */
          c->flags |= REDIS_MONITORING;
          __redisPushCallback(&ac->replies,&cb);
-         // 此时执行的是一个其他的命令 比如auth  这些命令没有拆分数据 直接一股脑写入到buf中
+
+         // 那些特殊的command先忽略 假设本次执行的是一个auth命令 (哨兵连接到其他节点前可能需要验证)
     } else {
+        // 当本次连接是用于订阅发布的时候 会将回调对象设置到一个特殊的列表中
         if (c->flags & REDIS_SUBSCRIBED)
             /* This will likely result in an error reply, but it needs to be
              * received and passed to the callback. */
@@ -1000,7 +1008,7 @@ int redisvAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void *privdat
     int len;
     int status;
 
-    // 将参数转换成格式化文本 len代表文本总长度
+    // 原本要传输的数据流可能包含了一些占位符 这里通过填充ap的数据 生成完整字符信息
     len = redisvFormatCommand(&cmd,format,ap);
 
     /* We don't want to pass -1 or -2 to future functions as a length. */
@@ -1014,10 +1022,10 @@ int redisvAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void *privdat
 }
 
 /**
- * 通过异步方式执行command的模板
+ * 通过异步的方式执行一个command 因为此时连接可能还未完成  (这里允许提前指定要执行的命令)
  * @param ac
  * @param fn 处理收到的reply的函数
- * @param privdata 一般是redisInstance对象
+ * @param privdata sentinel中代表每个节点的实例对象
  * @param format
  * @param ... 一般来说第一个参数是真正的command
  * @return

@@ -70,11 +70,15 @@ typedef struct redisAsyncContext {
     int err;
     char *errstr;
 
-    /* Not used by hiredis */
+    /* Not used by hiredis
+     * 一般绑定的就是link对象 也就是该context关联的link
+     * */
     void *data;
     void (*dataCleanup)(void *privdata);
 
-    /* Event library data and hooks */
+    /* Event library data and hooks
+     * 通过ev对象 关联与网络通信的相关函数
+     * */
     struct {
         void *data;
 
@@ -102,9 +106,14 @@ typedef struct redisAsyncContext {
     struct sockaddr *saddr;
     size_t addrlen;
 
-    /* Subscription callbacks */
+    /* Subscription callbacks
+     * 存储一组有关订阅发布的数据
+     * */
     struct {
+        // 存储订阅发布相关的回调
         redisCallbackList invalid;
+
+        // 当前上下文已经订阅的通道名称或者正则名称
         struct dict *channels;
         struct dict *patterns;
     } sub;

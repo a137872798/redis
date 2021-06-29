@@ -47,6 +47,9 @@
 extern int redisContextUpdateConnectTimeout(redisContext *c, const struct timeval *timeout);
 extern int redisContextUpdateCommandTimeout(redisContext *c, const struct timeval *timeout);
 
+/**
+ * 存储了hiredis模块网络交互的默认函数
+ */
 static redisContextFuncs redisContextDefaultFuncs = {
     .free_privctx = NULL,
     .async_read = redisAsyncRead,
@@ -778,11 +781,12 @@ static redisContext *redisContextInit(void) {
     if (c == NULL)
         return NULL;
 
+    // 设置默认函数 用于读取/写出数据
     c->funcs = &redisContextDefaultFuncs;
 
-    // 上下文对象内部也需要一个缓冲区
+    // 存储待发送的数据
     c->obuf = hi_sdsempty();
-    // 初始化reader对象
+    // 通过reader读取准备好的数据
     c->reader = redisReaderCreate();
     c->fd = REDIS_INVALID_FD;
 
@@ -872,16 +876,17 @@ int redisReconnect(redisContext *c) {
 }
 
 /**
- * 基于options生成上下文对象
+ * 基于options生成context
  * @param options
  * @return
  */
 redisContext *redisConnectWithOptions(const redisOptions *options) {
-    // 初始化上下文对象 内部有一个缓冲区一些函数和一个reader对象
+    // 创建上下文对象 内部定义了与网络交互的函数 以及存储数据的缓冲区和处理数据的reader
     redisContext *c = redisContextInit();
     if (c == NULL) {
         return NULL;
     }
+    // 默认情况下是阻塞连接 如果包含REDIS_OPT_NONBLOCK标记 代表是非阻塞连接 会影响到后面的connect()的调用
     if (!(options->options & REDIS_OPT_NONBLOCK)) {
         c->flags |= REDIS_BLOCK;
     }
@@ -894,7 +899,7 @@ redisContext *redisConnectWithOptions(const redisOptions *options) {
 
     /* Set any user supplied RESP3 PUSH handler or use freeReplyObject
      * as a default unless specifically flagged that we don't want one.
-     * 先忽略设置push回调的情况  在异步建立连接时 不会设置push相关的参数
+     * TODO 默认情况下 创建异步上下文不会携带下面的标记
      * */
     if (options->push_cb != NULL)
         redisSetPushCallback(c, options->push_cb);
@@ -912,7 +917,7 @@ redisContext *redisConnectWithOptions(const redisOptions *options) {
         return c;
     }
 
-    // 代表创建的是tcp连接   进行异步连接
+    // 代表创建的是tcp连接 进行异步连接
     if (options->type == REDIS_CONN_TCP) {
         redisContextConnectBindTcp(c, options->endpoint.tcp.ip,
                                    options->endpoint.tcp.port, options->connect_timeout,
@@ -930,7 +935,6 @@ redisContext *redisConnectWithOptions(const redisOptions *options) {
         return NULL;
     }
 
-    // 设置tcp层数据收发的超时时间  超时会丢弃数据么 ???
     if (options->command_timeout != NULL && (c->flags & REDIS_BLOCK) && c->fd != REDIS_INVALID_FD) {
         redisContextSetTimeout(c, *options->command_timeout);
     }

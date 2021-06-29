@@ -479,6 +479,8 @@ addrretry:
             continue;
 
         c->fd = s;
+
+        // 默认情况下设置成非阻塞
         if (redisSetBlocking(c,0) != REDIS_OK)
             goto error;
         if (c->tcp.source_addr) {
@@ -525,12 +527,12 @@ addrretry:
         memcpy(c->saddr, p->ai_addr, p->ai_addrlen);
         c->addrlen = p->ai_addrlen;
 
-        // 使用创建的套接字去连接目标地址 这些都是内核级别函数 先不看
+        // 这里尝试连接到目标地址
         if (connect(s,p->ai_addr,p->ai_addrlen) == -1) {
             if (errno == EHOSTUNREACH) {
                 redisNetClose(c);
                 continue;
-                // 代表采用的是异步连接 (非阻塞模式)
+                // 代表此时连接还在进行中
             } else if (errno == EINPROGRESS) {
                 if (blocking) {
                     goto wait_for_ready;
@@ -547,6 +549,7 @@ addrretry:
                     goto addrretry;
                 }
             } else {
+                // 本次连接事件尚未准备成功 在这里会调用poll函数 确保连接成功
                 wait_for_ready:
                 if (redisContextWaitReady(c,timeout_msec) != REDIS_OK)
                     goto error;
@@ -557,7 +560,7 @@ addrretry:
         if (blocking && redisSetBlocking(c,1) != REDIS_OK)
             goto error;
 
-        // 如果采用异步连接会打上 connected标记
+        // 这里有2种可能 一种是通过阻塞方式连接成功 一种是采用异步连接 本次会先返回
         c->flags |= REDIS_CONNECTED;
         rv = REDIS_OK;
         goto end;

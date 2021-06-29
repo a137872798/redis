@@ -2265,6 +2265,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
     /* Run the Sentinel timer if we are in sentinel mode.
+     * 作为哨兵节点 会执行定时任务
      * */
     if (server.sentinel_mode) sentinelTimer();
 
@@ -2277,7 +2278,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* Stop the I/O threads if we don't have enough pending work.
      * 检查是否要暂停其他的io线程 默认情况下只使用一个io线程 但是当与其他client的交互工作加重的时候 就会需要使用额外的线程组
-     * 在暂停线程前会进尽可能处理完剩余任务
+     * 在暂停线程前会尽可能处理完剩余任务
      * */
     stopThreadedIOIfNeeded();
 

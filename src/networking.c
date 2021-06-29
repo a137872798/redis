@@ -2197,7 +2197,7 @@ void processInputBuffer(client *c) {
             }
 
             /* We are finally ready to execute the command.
-             * 执行command 并清理数据  TODO 有关command的执行先忽略
+             * 执行command 并清理数据
              * */
             if (processCommandAndResetClient(c) == C_ERR) {
                 /* If the client is no longer valid, we avoid exiting this

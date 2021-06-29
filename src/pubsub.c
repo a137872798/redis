@@ -76,14 +76,15 @@ void addReplyPubsubPatMessage(client *c, robj *pat, robj *channel, robj *msg) {
 }
 
 /* Send the pubsub subscription notification to the client.
- * 当client订阅某个channel成功时 返回响应结果
+ * 返回所有已经被订阅的信息
  * */
 void addReplyPubsubSubscribed(client *c, robj *channel) {
+    // 可以看到在创建client时 使用的协议版本是2
     if (c->resp == 2)
         addReply(c,shared.mbulkhdr[3]);
     else
         addReplyPushLen(c,3);
-    // 代表协议类型是bulk 还有一种是inline
+    // 对应 $9subscribe
     addReply(c,shared.subscribebulk);
     // 将channel信息写入到缓冲区中
     addReplyBulk(c,channel);
@@ -181,7 +182,7 @@ int clientSubscriptionsCount(client *c) {
 
 /* Subscribe a client to a channel. Returns 1 if the operation succeeded, or
  * 0 if the client was already subscribed to that channel.
- * 某个client 订阅了本节点的某种事件
+ * 某个client订阅了本节点的某种事件  实际上client就是某个哨兵节点
  * */
 int pubsubSubscribeChannel(client *c, robj *channel) {
     dictEntry *de;
@@ -209,7 +210,7 @@ int pubsubSubscribeChannel(client *c, robj *channel) {
         listAddNodeTail(clients,c);
     }
     /* Notify the client
-     * 代表该client订阅该server的channel成功 返回响应结果
+     * 将本server本订阅的所有信息返回给client
      * */
     addReplyPubsubSubscribed(c,channel);
     return retval;
@@ -427,7 +428,8 @@ int pubsubPublishMessage(robj *channel, robj *message) {
  *----------------------------------------------------------------------------*/
 
 /**
- * 处理订阅命令
+ * 哨兵在启动后会往监控的master/slave节点发送订阅请求
+ * 一开始会订阅一个 SENTINEL_HELLO_CHANNEL channel
  * @param c
  */
 void subscribeCommand(client *c) {
@@ -436,6 +438,7 @@ void subscribeCommand(client *c) {
     // 某个client订阅了本节点的各种事件(channel)  每种事件对应一种通道
     for (j = 1; j < c->argc; j++)
         pubsubSubscribeChannel(c,c->argv[j]);
+    // 只要发起过订阅请求 这个client(或者说创建的这个连接) 就会被标记成pubsub 代表这个client专门用于处理订阅发布消息
     c->flags |= CLIENT_PUBSUB;
 }
 
