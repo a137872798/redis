@@ -2492,6 +2492,9 @@ int clientSetNameOrReply(client *c, robj *name) {
     return C_OK;
 }
 
+/**
+ * @param c
+ */
 void clientCommand(client *c) {
     listNode *ln;
     listIter li;
@@ -2552,6 +2555,8 @@ NULL
             addReply(c,shared.syntaxerr);
             return;
         }
+        // 在sentinel模块中 针对某个节点修改它的slaveOf时 (可能更改master/可能晋升成master/可能降级成slave)
+        // 在发送完slaveOf后 会执行2个kill命令 先后传入normal/pubsub
     } else if (!strcasecmp(c->argv[1]->ptr,"kill")) {
         /* CLIENT KILL <ip:port>
          * CLIENT KILL <option> [value] ... <option> [value] */
@@ -2579,6 +2584,7 @@ NULL
                     if (getLongLongFromObjectOrReply(c,c->argv[i+1],&tmp,NULL)
                         != C_OK) return;
                     id = tmp;
+                    // 哨兵的场景对应这里
                 } else if (!strcasecmp(c->argv[i]->ptr,"type") && moreargs) {
                     type = getClientTypeByName(c->argv[i+1]->ptr);
                     if (type == -1) {
@@ -2616,7 +2622,9 @@ NULL
             return;
         }
 
-        /* Iterate clients killing all the matching clients. */
+        /* Iterate clients killing all the matching clients.
+         * 这里遍历所有的client 并将type匹配的client关闭
+         * */
         listRewind(server.clients,&li);
         while ((ln = listNext(&li)) != NULL) {
             client *client = listNodeValue(ln);
@@ -2624,6 +2632,7 @@ NULL
             if (type != -1 && getClientType(client) != type) continue;
             if (id != 0 && client->id != id) continue;
             if (user && client->user != user) continue;
+            // 默认情况下会跳过自己
             if (c == client && skipme) continue;
 
             /* Kill it. */

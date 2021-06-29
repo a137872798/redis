@@ -1743,7 +1743,7 @@ cleanup:
  * written. This is currently only used for testing purposes.
  *
  * On error -1 is returned and errno is set accordingly, otherwise 0.
- * 基于当前哨兵信息 更新配置文件
+ * 基于当前节点信息 更新配置文件
  * */
 int rewriteConfig(char *path, int force_all) {
     struct rewriteConfigState *state;

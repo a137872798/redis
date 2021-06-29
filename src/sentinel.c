@@ -2652,7 +2652,7 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
             }
 
             /* master_link_status:<status>
-             * 作为slave此时是否已经连接上master
+             * 作为slave此时是否已经连接上master (包含数据同步，只有当数据同步完成后才认为连接真正完成)
              * */
             if (sdslen(l) >= 19 && !memcmp(l, "master_link_status:", 19)) {
                 ri->slave_master_link_status =
@@ -2778,7 +2778,7 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
                 sentinelRedisInstanceNoDownFor(ri, wait_time) &&
                 mstime() - ri->role_reported_time > wait_time) {
 
-                // 将slave重新挂在master下
+                // 将slave重新挂在master下 会涉及到replication模块
                 int retval = sentinelSendSlaveOf(ri,
                                                  ri->master->addr->ip,
                                                  ri->master->addr->port);
@@ -2790,7 +2790,7 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
     }
 
     /* Handle slaves replicating to a different master address.
-     * 如果本节点此时是一个slave 并且master地址发生了变化
+     * 如果发现slave节点的master地址发生了变化
      * */
     if ((ri->flags & SRI_SLAVE) &&
         role == SRI_SLAVE &&
@@ -2800,7 +2800,7 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
 
         /* Make sure the master is sane before reconfiguring this instance
          * into a slave.
-         * 确定之前master处于正常状态的情况 指定master的地址信息
+         * 因为原本的master还有效 所以将地址改回去
          * */
         if (sentinelMasterLooksSane(ri->master) &&
             sentinelRedisInstanceNoDownFor(ri, wait_time) &&
@@ -2815,12 +2815,13 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
 
     /* Detect if the slave that is in the process of being reconfigured
      * changed state.
-     * 前后还是slave的情况下  并且此时已经通知它master发生了变更
+     * 如果当前slave 处于SRI_RECONF_SENT或者SRI_RECONF_INPROG状态 要进行处理
      * */
     if ((ri->flags & SRI_SLAVE) && role == SRI_SLAVE &&
         (ri->flags & (SRI_RECONF_SENT | SRI_RECONF_INPROG))) {
         /* SRI_RECONF_SENT -> SRI_RECONF_INPROG. */
         if ((ri->flags & SRI_RECONF_SENT) &&
+            // 此时该slave已经认可了 本轮选举成功的节点 可以将状态修改成SRI_RECONF_INPROG
             ri->slave_master_host &&
             strcmp(ri->slave_master_host,
                    ri->master->promoted_slave->addr->ip) == 0 &&
@@ -2831,7 +2832,8 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
         }
 
         /* SRI_RECONF_INPROG -> SRI_RECONF_DONE
-         * 代表reconf完成
+         * 在本slave实例已经被标记成inprog后 再收到info信息时 检测slave节点是否已经连接上master了 连接上后修改成reconf_done
+         * 从slave修改master地址 到与master建立连接有时间差 只有当连接建立完成后才认为reconf完成
          */
         if ((ri->flags & SRI_RECONF_INPROG) &&
             ri->slave_master_link_status == SENTINEL_MASTER_LINK_STATUS_UP) {
@@ -4714,7 +4716,7 @@ char *sentinelGetLeader(sentinelRedisInstance *master, uint64_t epoch) {
  * The command returns C_OK if the SLAVEOF command was accepted for
  * (later) delivery otherwise C_ERR. The command replies are just
  * discarded.
- * 通知某个节点  此时最新的master的 host/port
+ * 修改本实例的 slaveOf
  * */
 int sentinelSendSlaveOf(sentinelRedisInstance *ri, char *host, int port) {
     char portstr[32];
@@ -4723,7 +4725,9 @@ int sentinelSendSlaveOf(sentinelRedisInstance *ri, char *host, int port) {
     ll2string(portstr, sizeof(portstr), port);
 
     /* If host is NULL we send SLAVEOF NO ONE that will turn the instance
-     * into a master. */
+     * into a master.
+     * 代表本节点变成了master节点
+     * */
     if (host == NULL) {
         host = "NO";
         memcpy(portstr, "ONE", 4);
@@ -4739,7 +4743,7 @@ int sentinelSendSlaveOf(sentinelRedisInstance *ri, char *host, int port) {
      *
      * Note that we don't check the replies returned by commands, since we
      * will observe instead the effects in the next INFO output.
-     * 开启一个事务
+     * 向该实例发起一组command 使其变成master的slave节点
      * */
     retval = redisAsyncCommand(ri->link->cc,
                                sentinelDiscardReplyCallback, ri, "%s",
@@ -4754,6 +4758,7 @@ int sentinelSendSlaveOf(sentinelRedisInstance *ri, char *host, int port) {
     if (retval == C_ERR) return retval;
     ri->link->pending_commands++;
 
+    // 更新配置文件
     retval = redisAsyncCommand(ri->link->cc,
                                sentinelDiscardReplyCallback, ri, "%s REWRITE",
                                sentinelInstanceMapCommand(ri, "CONFIG"));
@@ -4765,7 +4770,7 @@ int sentinelSendSlaveOf(sentinelRedisInstance *ri, char *host, int port) {
      * an issue because CLIENT is variadic command, so Redis will not
      * recognized as a syntax error, and the transaction will not fail (but
      * only the unsupported command will fail).
-     * 发起2个client 命令
+     * 之后针对该节点关闭普通节点连接以及pubsub连接
      * */
     for (int type = 0; type < 2; type++) {
         retval = redisAsyncCommand(ri->link->cc,

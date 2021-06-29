@@ -226,6 +226,7 @@ void replyToBlockedClientTimedOut(client *c) {
  * The semantics is to send an -UNBLOCKED error to the client, disconnecting
  * it at the same time.
  * 与所有处于阻塞状态的client断开连接
+ * 目前只在replication中看到  当本节点降级成slave后 无法阻塞key
  * */
 void disconnectAllBlockedClients(void) {
     listNode *ln;

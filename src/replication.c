@@ -1616,7 +1616,7 @@ void clearReplicationId2(void) {
  * This should be used when an instance is switched from slave to master
  * so that it can serve PSYNC requests performed using the master
  * replication ID.
- * 切换此时使用的副本id
+ * 重新生成一个replid 之前的数据会存储到replid2
  * */
 void shiftReplicationId(void) {
     memcpy(server.replid2,server.replid,sizeof(server.replid));
@@ -2194,7 +2194,7 @@ void readSyncBulkPayload(connection *conn) {
     /* Restart the AOF subsystem now that we finished the sync. This
      * will trigger an AOF rewrite, and when done will start appending
      * to the new file.
-     * 重启aof  (在数据未同步完成时启动aof没有意义)
+     * 重启aof  因为之前可能正在数据传输，而那个时候aof是无意义的 就会被关闭
      * */
     if (server.aof_enabled) restartAOFAfterSYNC();
     return;
@@ -2978,7 +2978,7 @@ void replicationSetMaster(char *ip, int port) {
     if (server.master) {
         freeClient(server.master);
     }
-    // 断开所有处于阻塞状态的client  为什么 什么情况下client会阻塞 等待某个key ???
+    // 只有master节点会阻塞key 此时本节点已经降级了 不应该阻塞key
     disconnectAllBlockedClients(); /* Clients blocked in master, now slave. */
 
     /* Update oom_score_adj */
@@ -2986,17 +2986,18 @@ void replicationSetMaster(char *ip, int port) {
 
     /* Force our slaves to resync with us as well. They may hopefully be able
      * to partially resync with us, but we can notify the replid change.
-     * 是因为发现了master节点么 本节点就要放弃所有的slave 也就是cluster中 还是只有一个master节点 ???
+     * 因为本节点已经降级了 应当释放之前的slave
      * */
     disconnectSlaves();
-    // 当发现此时保持着与master的连接 这条连接主要是用于传输数据的
+    // 如果此时处于连接中 或者数据传输阶段 终止
     cancelReplicationHandshake();
     /* Before destroying our master state, create a cached master using
      * our own parameters, to later PSYNC with the new master.
-     * 之前已经有master数据了 这里缓存一份master数据
+     * 代表本节点是降级 而不是简单的更改master
      * */
     if (was_master) {
         replicationDiscardCachedMaster();
+        // 将自己作为cacheMaster
         replicationCacheMasterUsingMyself();
     }
 
@@ -3011,17 +3012,20 @@ void replicationSetMaster(char *ip, int port) {
                               REDISMODULE_SUBEVENT_MASTER_LINK_DOWN,
                               NULL);
 
+    // 因为修改了master的地址 在主循环中会重新发起连接
     server.repl_state = REPL_STATE_CONNECT;
 }
 
 /* Cancel replication, setting the instance as a master itself.
- * 因为master节点发生了替换 清理原来的数据
+ * 本节点变成了master节点 清理之前的master信息
  * */
 void replicationUnsetMaster(void) {
-    // 代表之前没有设置master相关信息
+    // 代表master信息已经被清理
     if (server.masterhost == NULL) return; /* Nothing to do. */
 
-    /* Fire the master link modules event. */
+    /* Fire the master link modules event.
+     * 忽略module
+     * */
     if (server.repl_state == REPL_STATE_CONNECTED)
         moduleFireServerEvent(REDISMODULE_EVENT_MASTER_LINK_CHANGE,
                               REDISMODULE_SUBEVENT_MASTER_LINK_DOWN,
@@ -3029,9 +3033,11 @@ void replicationUnsetMaster(void) {
 
     sdsfree(server.masterhost);
     server.masterhost = NULL;
-    // 释放连接
+    // 本节点不再需要连接到其他节点了 释放原来的连接
     if (server.master) freeClient(server.master);
+    // 清理缓存的数据
     replicationDiscardCachedMaster();
+    // 如果此时处于连接中 或者数据传输中的状态 终止操作
     cancelReplicationHandshake();
     /* When a slave is turned into a master, the current replication ID
      * (that was inherited from the master at synchronization time) is
@@ -3041,14 +3047,14 @@ void replicationUnsetMaster(void) {
      * NOTE: this function MUST be called after we call
      * freeClient(server.master), since there we adjust the replication
      * offset trimming the final PINGs. See Github issue #7320.
-     * TODO 切换 replicaid 切换了会怎么样呢 ???
+     * 本节点作为一个新的master节点 相当于主从结构更代了  需要重新生成replId
      * */
     shiftReplicationId();
     /* Disconnecting all the slaves is required: we need to inform slaves
      * of the replication ID change (see shiftReplicationId() call). However
      * the slaves will be able to partially resync with us, so it will be
      * a very fast reconnection.
-     * 释放所有的slave连接 为什么 应该不会有影响啊 切换master会影响到该节点之前维护的slave么 如果本节点晋升成master呢
+     * 避免有残留 先释放所有slave连接
      * */
     disconnectSlaves();
     server.repl_state = REPL_STATE_NONE;
@@ -3068,7 +3074,7 @@ void replicationUnsetMaster(void) {
      * slaves (that is used to count the replication backlog time to live) as
      * starting from now. Otherwise the backlog will be freed after a
      * failover if slaves do not connect immediately.
-     * 每当某个时刻slave节点被清空时 就会更新该时间戳
+     * 更新没有slave的时间戳
      * */
     server.repl_no_slaves_since = server.unixtime;
 
@@ -3079,7 +3085,7 @@ void replicationUnsetMaster(void) {
 
     /* Restart the AOF subsystem in case we shut it down during a sync when
      * we were still a slave.
-     * 重启aof aof和replica是冲突的么 那么在数据同步的时候 aof还能工作么  还能同步新接入的请求么
+     * 尝试重启aof
      * */
     if (server.aof_enabled && server.aof_state == AOF_OFF) restartAOFAfterSYNC();
 }
@@ -3104,16 +3110,24 @@ void replicationHandleMasterDisconnection(void) {
      * the slaves only if we'll have to do a full resync with our master. */
 }
 
+/**
+ * 将该节点变成某个master的slave节点
+ * @param c
+ */
 void replicaofCommand(client *c) {
     /* SLAVEOF is not allowed in cluster mode as replication is automatically
-     * configured using the current address of the master node. */
+     * configured using the current address of the master node.
+     * 看来集群模式和哨兵模式是互斥的 在集群模式下节点的更替是自动的
+     * */
     if (server.cluster_enabled) {
         addReplyError(c,"REPLICAOF not allowed in cluster mode.");
         return;
     }
 
     /* The special host/port combination "NO" "ONE" turns the instance
-     * into a master. Otherwise the new master address is set. */
+     * into a master. Otherwise the new master address is set.
+     * 代表本节点变成了master
+     * */
     if (!strcasecmp(c->argv[1]->ptr,"no") &&
         !strcasecmp(c->argv[2]->ptr,"one")) {
         if (server.masterhost) {
@@ -3124,6 +3138,7 @@ void replicaofCommand(client *c) {
             sdsfree(client);
         }
     } else {
+        // 更新本节点跟随的master节点
         long port;
 
         if (c->flags & CLIENT_SLAVE)
@@ -3138,7 +3153,9 @@ void replicaofCommand(client *c) {
         if ((getLongFromObjectOrReply(c, c->argv[2], &port, NULL) != C_OK))
             return;
 
-        /* Check if we are already attached to the specified slave */
+        /* Check if we are already attached to the specified slave
+         * 与此时已经跟随的master一致 不需要处理
+         * */
         if (server.masterhost && !strcasecmp(server.masterhost,c->argv[1]->ptr)
             && server.masterport == port) {
             serverLog(LL_NOTICE,"REPLICAOF would result into synchronization "
