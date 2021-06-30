@@ -496,6 +496,9 @@ void redisAsyncDisconnect(redisAsyncContext *ac) {
         __redisAsyncDisconnect(ac);
 }
 
+/**
+ * 从特殊容器中获取回调对象
+ */
 static int __redisGetSubscribeCallback(redisAsyncContext *ac, redisReply *reply, redisCallback *dstcb) {
     redisContext *c = &(ac->c);
     dict *callbacks;
@@ -506,7 +509,9 @@ static int __redisGetSubscribeCallback(redisAsyncContext *ac, redisReply *reply,
     hisds sname;
 
     /* Custom reply functions are not supported for pub/sub. This will fail
-     * very hard when they are used... */
+     * very hard when they are used...
+     * TODO 先忽略复杂的情况
+     * */
     if (reply->type == REDIS_REPLY_ARRAY || reply->type == REDIS_REPLY_PUSH) {
         assert(reply->elements >= 2);
         assert(reply->element[0]->type == REDIS_REPLY_STRING);
@@ -553,7 +558,9 @@ static int __redisGetSubscribeCallback(redisAsyncContext *ac, redisReply *reply,
         }
         hi_sdsfree(sname);
     } else {
-        /* Shift callback for invalid commands. */
+        /* Shift callback for invalid commands.
+         * 就是从特殊链表中找到回调对象
+         * */
         __redisShiftCallback(&ac->sub.invalid,dstcb);
     }
     return REDIS_OK;
@@ -637,7 +644,7 @@ void redisProcessCallbacks(redisAsyncContext *ac) {
 
         /* Even if the context is subscribed, pending regular
          * callbacks will get a reply before pub/sub messages arrive.
-         * 代表此时没有回调对象
+         * 无法从replies中取出回调对象 可能是因为此连接是针对订阅发布的  这样回调会存储到特殊的链表中
          * */
         if (__redisShiftCallback(&ac->replies,&cb) != REDIS_OK) {
             /*
@@ -664,15 +671,14 @@ void redisProcessCallbacks(redisAsyncContext *ac) {
                 return;
             }
             /* No more regular callbacks and no errors, the context *must* be subscribed or monitoring.
-             * 如果回调对象不在replies中 本次必然是订阅请求或者监控请求 他们存储回调的容器不一样
+             * 此时context必然已经被标记成订阅模式
              * */
             assert((c->flags & REDIS_SUBSCRIBED || c->flags & REDIS_MONITORING));
-            // TODO
             if(c->flags & REDIS_SUBSCRIBED)
+                // 根据reply信息从特殊列表中找到匹配的回调对象
                 __redisGetSubscribeCallback(ac,reply,&cb);
         }
 
-        // 这里找到了回调对象 准备执行  这里的回调对象逻辑应该是什么???
         if (cb.fn != NULL) {
             __redisRunCallback(ac,&cb,reply);
             // 执行完毕后释放reply
@@ -865,19 +871,31 @@ void redisAsyncHandleTimeout(redisAsyncContext *ac) {
 
 /* Sets a pointer to the first argument and its length starting at p. Returns
  * the number of bytes to skip to get to the following argument.
+ * 发送的数据格式为
+ * *总长度
+ * $第一个参数长度
+ * 第一个参数
+ * $第二个参数长度
+ * 第二个参数
+ * ...
  * */
 static const char *nextArgument(const char *start, const char **str, size_t *len) {
     const char *p = start;
 
+    // 直接定位到$的位置 对应描述某个参数的长度
     if (p[0] != '$') {
         p = strchr(p,'$');
         if (p == NULL) return NULL;
     }
 
+    // 读取参数长度
     *len = (int)strtol(p+1,NULL,10);
+    // 定位到长度后面的换行符
     p = strchr(p,'\r');
     assert(p);
+    // 切换到了参数的起点
     *str = p+2;
+    // 返回的是参数的终点
     return p+2+(*len)+2;
 }
 
@@ -917,11 +935,13 @@ static int __redisAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void 
     cb.pending_subs = 1;
 
     /* Find out which command will be appended.
-     * 移动到第一个参数的位置
+     * p对应的是某个参数的终点
+     * cstr对应参数的起始位置
+     * clen对应参数的长度
      * */
     p = nextArgument(cmd,&cstr,&clen);
     assert(p != NULL);
-    // 判断是否存在下一个参数
+    // 代表还有下一个参数
     hasnext = (p[0] == '$');
     // p开头就代表本次传入的是一个正则表达式
     pvariant = (tolower(cstr[0]) == 'p') ? 1 : 0;
@@ -929,54 +949,67 @@ static int __redisAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void 
     clen -= pvariant;
 
     // sentinel会与其他master/slave建立一个专门用于订阅发布的连接 会进入这个分支
+    // 这里代表发起的是一个订阅命令 同时后面还有其他参数 实际上就是订阅的管道 而且隐含信息就是每次执行subscribe命令 都只能发送一个channel
     if (hasnext && strncasecmp(cstr,"subscribe\r\n",11) == 0) {
+        // 一旦发送过订阅请求 就代表这个context对应的连接是专门用于订阅发布的
         c->flags |= REDIS_SUBSCRIBED;
 
-        /* Add every channel/pattern to the list of subscription callbacks. */
+        /* Add every channel/pattern to the list of subscription callbacks.
+         * 本哨兵此时对某个client发起了一个订阅命令 有关订阅了什么channel会被保存在这里
+         * 这里是遍历所有订阅的管道
+         * */
         while ((p = nextArgument(p,&astr,&alen)) != NULL) {
             sname = hi_sdsnewlen(astr,alen);
             if (sname == NULL)
                 goto oom;
 
-            // 根据是否是正则表达式 将channel添加到不同的容器
+            // 找到之前存储callback的容器
             if (pvariant)
                 cbdict = ac->sub.patterns;
             else
                 cbdict = ac->sub.channels;
 
+            // 找到之前针对这个channel/pattern的回调对象
             de = dictFind(cbdict,sname);
 
+            // 原本存在callback的情况下 增加计数值 使用新的callback替换原对象
             if (de != NULL) {
                 existcb = dictGetEntryVal(de);
                 cb.pending_subs = existcb->pending_subs + 1;
             }
 
+            // 如果是首次插入 等同于add
             ret = dictReplace(cbdict,sname,&cb);
 
             if (ret == 0) hi_sdsfree(sname);
         }
+        // 取消订阅不需要注册回调对象
     } else if (strncasecmp(cstr,"unsubscribe\r\n",13) == 0) {
         /* It is only useful to call (P)UNSUBSCRIBE when the context is
-         * subscribed to one or more channels or patterns. */
+         * subscribed to one or more channels or patterns.
+         * 去除标记
+         * */
         if (!(c->flags & REDIS_SUBSCRIBED)) return REDIS_ERR;
 
         /* (P)UNSUBSCRIBE does not have its own response: every channel or
          * pattern that is unsubscribed will receive a message. This means we
-         * should not append a callback function for this command. */
+         * should not append a callback function for this command.
+         * 一旦执行过监控命令 增加监控标记
+         * */
      } else if(strncasecmp(cstr,"monitor\r\n",9) == 0) {
          /* Set monitor flag and push callback */
          c->flags |= REDIS_MONITORING;
          __redisPushCallback(&ac->replies,&cb);
 
-         // 那些特殊的command先忽略 假设本次执行的是一个auth命令 (哨兵连接到其他节点前可能需要验证)
+         // 本次执行的是一个普通命令 (哨兵连接到其他节点前可能需要验证)
     } else {
-        // 当本次连接是用于订阅发布的时候 会将回调对象设置到一个特殊的列表中
+        // 针对用于订阅发布的连接 使用特殊的列表存储回调函数
         if (c->flags & REDIS_SUBSCRIBED)
             /* This will likely result in an error reply, but it needs to be
              * received and passed to the callback. */
             __redisPushCallback(&ac->sub.invalid,&cb);
         else
-            // 处理正常命令时 就将回调对象加入到列表中 等待对端的reply
+            // 其余情况都是使用 replies存储回调函数
             __redisPushCallback(&ac->replies,&cb);
     }
 
@@ -1008,7 +1041,7 @@ int redisvAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void *privdat
     int len;
     int status;
 
-    // 原本执行command传入的参数就是简单的格式化参数 但是要对它进行修改 使得满足redis的编解码规则
+    // 将format拼接上可变参数后 还会加工成满足redis协议的格式
     len = redisvFormatCommand(&cmd,format,ap);
 
     /* We don't want to pass -1 or -2 to future functions as a length. */

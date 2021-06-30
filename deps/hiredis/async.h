@@ -107,13 +107,13 @@ typedef struct redisAsyncContext {
     size_t addrlen;
 
     /* Subscription callbacks
-     * 存储一组有关订阅发布的数据
+     * 当发现该上下文关联的连接是用于订阅发布的时候 使用下面这个结构体存储相关信息
      * */
     struct {
-        // 存储订阅发布相关的回调
+        // 存储callback的列表
         redisCallbackList invalid;
 
-        // 当前上下文已经订阅的通道名称或者正则名称
+        // 当前上下文已经订阅的通道名称或者正则名称  value对应的是callback
         struct dict *channels;
         struct dict *patterns;
     } sub;

@@ -162,7 +162,7 @@ typedef struct instanceLink {
     redisAsyncContext *pc; /* Hiredis context for Pub / Sub. */
     mstime_t cc_conn_time; /* cc connection time. */
     mstime_t pc_conn_time; /* pc connection time. */
-    // 有关pc绑定的连接最后一次确认有效的时间
+    // 对于订阅发布专用的连接 最后一次收到消息的时间
     mstime_t pc_last_activity; /* Last time we received any message. */
     mstime_t last_avail_time; /* Last time the instance replied to ping with
                                  a reply we consider valid. */
@@ -1297,7 +1297,7 @@ int sentinelTryConnectionSharing(sentinelRedisInstance *ri) {
  * will be updated.
  *
  * Return the number of updated Sentinel addresses.
- * @param ri 某个sentinel
+ * @param ri 当某个哨兵的地址发生了更新时触发
  * */
 int sentinelUpdateSentinelAddressInAllMasters(sentinelRedisInstance *ri) {
     serverAssert(ri->flags & SRI_SENTINEL);
@@ -1305,19 +1305,21 @@ int sentinelUpdateSentinelAddressInAllMasters(sentinelRedisInstance *ri) {
     dictEntry *de;
     int reconfigured = 0;
 
-    // 遍历本节点监控的所有master
+    // 遍历本节点此时监控的所有master
     di = dictGetIterator(sentinel.masters);
     while ((de = dictNext(di)) != NULL) {
         sentinelRedisInstance *master = dictGetVal(de), *match;
-        // 反查 master下的sentinel记录
+        // 通过runid 找到master下维护的所有哨兵实例中匹配的那个
         match = getSentinelRedisInstanceByAddrAndRunID(master->sentinels,
                                                        NULL, 0, ri->runid);
         /* If there is no match, this master does not know about this
-         * Sentinel, try with the next one. */
+         * Sentinel, try with the next one.
+         * 此时master下并没有维护这个哨兵 不需要处理
+         * */
         if (match == NULL) continue;
 
         /* Disconnect the old links if connected.
-         * 因为这些哨兵的地址发生了变化 要断开连接
+         * 因为这个哨兵的地址已经过期 所以要断开与该实例的连接 之后会在主循环中按照新的地址重新建立连接
          * */
         if (match->link->cc != NULL)
             instanceLinkCloseConnection(match->link, match->link->cc);
@@ -1328,7 +1330,7 @@ int sentinelUpdateSentinelAddressInAllMasters(sentinelRedisInstance *ri) {
 
         /* Update the address of the matching Sentinel by copying the address
          * of the Sentinel object that received the address update.
-         * 更新地址
+         * 更新这个哨兵实例的地址
          * */
         releaseSentinelAddr(match->addr);
         match->addr = dupSentinelAddr(ri->addr);
@@ -2475,7 +2477,7 @@ void sentinelReconnectInstance(sentinelRedisInstance *ri) {
                                             sentinelDisconnectCallback);
             sentinelSendAuthIfNeeded(ri, link->pc);
 
-            // 以上都和建立普通的管道一样 这里会将本节点信息发送过去，并表示这是跟发布订阅有关的
+            // 以上都和建立普通的管道一样 这里会将本节点信息发送过去，并表示本条连接是跟发布订阅有关的
             sentinelSetClientName(ri, link->pc, "pubsub");
             /* Now we subscribe to the Sentinels "Hello" channel.
              * 发起一条订阅请求 本次订阅的通道是SENTINEL_HELLO_CHANNEL
@@ -2957,46 +2959,49 @@ void sentinelPublishReplyCallback(redisAsyncContext *c, void *reply, void *privd
  *
  * If the master name specified in the message is not known, the message is
  * discarded.
+ * 处理某个哨兵发出的hello信息
+ * 该方法只能由哨兵实例触发
  * */
 void sentinelProcessHelloMessage(char *hello, int hello_len) {
     /* Format is composed of 8 tokens:
      * 0=ip,1=port,2=runid,3=current_epoch,4=master_name,
-     * 5=master_ip,6=master_port,7=master_config_epoch. */
+     * 5=master_ip,6=master_port,7=master_config_epoch.
+     * 哨兵发出的hellow消息由8个部分组成
+     * */
     int numtokens, port, removed, master_port;
     uint64_t current_epoch, master_config_epoch;
-    // 将消息体通过 ","进行拆分
+    // 将消息拆分成多个片段
     char **token = sdssplitlen(hello, hello_len, ",", 1, &numtokens);
     sentinelRedisInstance *si, *master;
 
-    // 代表数据体由8个片段组成
+    // 将各个片段填充到对应的位置
     if (numtokens == 8) {
         /* Obtain a reference to the master this hello message is about
-         * 发出的消息只针对某个master么
-         * 检测该sentinel是否监控了该master
+         * 判断在本哨兵上是否监控了这个master 如果本哨兵没有监控这个master就不需要处理这个消息了
          * */
         master = sentinelGetMasterByName(token[4]);
         if (!master) goto cleanup; /* Unknown master, skip the message. */
 
         /* First, try to see if we already have this sentinel.
-         * 本次是期望将某个哨兵观测master的信息同步到本节点 这里先查看是否已经记录了这样的信息
-         * 匹配runid/addr
          * */
         port = atoi(token[1]);
         master_port = atoi(token[6]);
+        // 因为这个哨兵也是监控master的 要将这个关联关系同步到本节点
         si = getSentinelRedisInstanceByAddrAndRunID(
                 master->sentinels, token[0], port, token[2]);
+        // 获取该哨兵的任期
         current_epoch = strtoull(token[3], NULL, 10);
         master_config_epoch = strtoull(token[7], NULL, 10);
 
-        // 代表在本节点还没有维护这样的映射关系 或者说本节点此时不知道 某个sentinel观测了某个master
+        // 添加映射关系
         if (!si) {
             /* If not, remove all the sentinels that have the same runid
              * because there was an address change, and add the same Sentinel
              * with the new address back.
-             * 如果能用runid匹配成功 就代表之前sentinel是存在的 但是此时addr发生了变化 发出相关事件
+             * 如果runid能够匹配到就代表是哨兵的地址发生了变化
              * */
             removed = removeMatchingSentinelFromMaster(master, token[2]);
-            // 发出一个哨兵地址发生变化的事件
+            // 发出相关事件
             if (removed) {
                 sentinelEvent(LL_NOTICE, "+sentinel-address-switch", master,
                               "%@ ip %s port %d for %s", token[0], port, token[2]);
@@ -3005,23 +3010,22 @@ void sentinelProcessHelloMessage(char *hello, int hello_len) {
                  * new one is reporting. What we do if this happens is to set its
                  * port to 0, to signal the address is invalid. We'll update it
                  * later if we get an HELLO message.
-                 * 如果能用地址匹配成功 就代表之前之前的sentinel地址过期了
+                 * 如果这个地址指向了另一个实例 这是异常情况
                  * */
                 sentinelRedisInstance *other =
                         getSentinelRedisInstanceByAddrAndRunID(
                                 master->sentinels, token[0], port, NULL);
                 if (other) {
-                    // 发出一个地址无效的事件
                     sentinelEvent(LL_NOTICE, "+sentinel-invalid-addr", other, "%@");
-                    // 修改实例的端口号
+                    // 将另一个哨兵的地址重置 此时认为这个哨兵是不合法的
                     other->addr->port = 0; /* It means: invalid address. */
-                    // 因为某个哨兵的变化会影响到所有相关的master (每个master下都会记录自己被哪些sentinel观测 并与他们保持连接 如果某个sentinel地址已经发生了变化就要断开连接)
+                    // 与旧的哨兵断开连接 更新地址并在之后重连
                     sentinelUpdateSentinelAddressInAllMasters(other);
                 }
             }
 
             /* Add the new sentinel.
-             * 将相关参数包装成sentinel实例 并建立映射关系
+             * 因为感应到了新的哨兵 需要创建对应的实例 增加映射关系
              * */
             si = createSentinelRedisInstance(token[2], SRI_SENTINEL,
                                              token[0], port, master->quorum, master);
@@ -3035,7 +3039,7 @@ void sentinelProcessHelloMessage(char *hello, int hello_len) {
                  * 设置runid
                  * */
                 si->runid = sdsnew(token[2]);
-                // 检测当前是否有某个master已经建立了与该sentinel的连接 并打算复用连接
+                // 该哨兵可能同时监控多个master 每个关联关系都会创建一个对应的实例 这些实例需要共享连接
                 sentinelTryConnectionSharing(si);
                 // 更新原master下有关该sentinel的地址信息
                 if (removed) sentinelUpdateSentinelAddressInAllMasters(si);
@@ -3092,7 +3096,6 @@ void sentinelProcessHelloMessage(char *hello, int hello_len) {
 
 /* This is our Pub/Sub callback for the Hello channel. It's useful in order
  * to discover other sentinels attached at the same master.
- * 针对订阅请求 收到的结果是本次订阅的channel 以及此时该server被订阅的channel/pattern总数
  * */
 void sentinelReceiveHelloMessages(redisAsyncContext *c, void *reply, void *privdata) {
     sentinelRedisInstance *ri = privdata;
@@ -3110,7 +3113,9 @@ void sentinelReceiveHelloMessages(redisAsyncContext *c, void *reply, void *privd
     ri->link->pc_last_activity = mstime();
 
     /* Sanity check in the reply we expect, so that the code that follows
-     * can avoid to check for details. */
+     * can avoid to check for details.
+     * 收到的结果总计是3个 第一个是message 代表收到的是订阅消息 第二个是channel 代表是因为订阅了哪个channel收到的消息 第三个是发送的消息体
+     * */
     if (r->type != REDIS_REPLY_ARRAY ||
         r->elements != 3 ||
         r->element[0]->type != REDIS_REPLY_STRING ||
@@ -3119,7 +3124,9 @@ void sentinelReceiveHelloMessages(redisAsyncContext *c, void *reply, void *privd
         strcmp(r->element[0]->str, "message") != 0)
         return;
 
-    /* We are not interested in meeting ourselves */
+    /* We are not interested in meeting ourselves
+     * 实际上就是每个哨兵会定期将自身的信息通过订阅发布的方式推送到其他节点上   如果本节点收到了自身发出的信息 不需要处理
+     * */
     if (strstr(r->element[2]->str, sentinel.myid) != NULL) return;
 
     sentinelProcessHelloMessage(r->element[2]->str, r->element[2]->len);
@@ -4298,7 +4305,8 @@ void sentinelSetCommand(client *c) {
  *
  * Because we have a Sentinel PUBLISH, the code to send hello messages is the same
  * for all the three kind of instances: masters, slaves, sentinels.
- * 作为哨兵节点 它的publish 与普通节点的publish触发的command不一样
+ * 作为哨兵节点 它的publish 与普通节点的publish触发的command不一样  会直接处理收到的消息
+ * 实际上针对hellow消息只有sentinel能处理 因为其他的slave/master并没有订阅这个消息
  * */
 void sentinelPublishCommand(client *c) {
     if (strcmp(c->argv[1]->ptr, SENTINEL_HELLO_CHANNEL)) {

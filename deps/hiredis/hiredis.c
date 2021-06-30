@@ -349,7 +349,7 @@ static size_t bulklen(size_t len) {
 }
 
 /**
- * 将本次要发送的信息格式化  原本的格式 command param1 param2 param3 ...
+ * 将本次要发送的信息格式化  比如传入的是 "%s %s %s" 以及 ap内的3个参数
  * @param target
  * @param format
  * @param ap
@@ -368,7 +368,7 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
     int j;
 
     /* Abort if there is not target to set
-     * target不能为null
+     * target是用于存储结果字符串的 不能为NULL
      * */
     if (target == NULL)
         return -1;
@@ -378,43 +378,45 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
     if (curarg == NULL)
         return -1;
 
-    // 代表本次格式化文本还没有读取到末尾
+    // 代表此时还没有读取到末尾
     while(*c != '\0') {
-        // 第一个字符不是 % 或者 第二个字符为终止符   如果格式化数据以占位符作为开头 比如%s 那么进入第二个分支
+        // 此时扫描到的不是占位符  或者最后是 %'\0'  代表这个百分号不是占位符的意思
         if (*c != '%' || c[1] == '\0') {
-            // 这时候已经解析完 %s 下面会遇到一个空格
+            // 当扫描到空格时 可能是处理完了一个占位符
             if (*c == ' ') {
-                // 空格代表已经解析完一个参数
+                // 代表之前解析到了一个字符
                 if (touched) {
+                    // curargv 是一个数组
                     newargv = hi_realloc(curargv,sizeof(char*)*(argc+1));
                     if (newargv == NULL) goto memory_err;
                     curargv = newargv;
-                    // 将第一个参数填充到数组中
+                    // 将解析出来的字符串添加到数组中 这些字符串通过' '来分隔
                     curargv[argc++] = curarg;
                     totlen += bulklen(hi_sdslen(curarg));
 
                     /* curarg is put in argv so it can be overwritten.
-                     * 重置当前参数 并准备解析下一个参数
+                     * 因为当前字符串已经处理完了 清空curarg 之后解析出来的字符串又会临时存放在这里
                      * */
                     curarg = hi_sdsempty();
                     if (curarg == NULL) goto memory_err;
                     touched = 0;
                 }
-                // 这里解析到普通字符串 就是不断拼接后 原封不动的写入
+                // 直接拼接这个字符就好 如果是最后一个百分号也是进入这个分支
             } else {
                 newarg = hi_sdscatlen(curarg,c,1);
                 if (newarg == NULL) goto memory_err;
                 curarg = newarg;
                 touched = 1;
             }
+            // 先假设扫描到的是占位符
         } else {
-            // 此时fmt以占位符开头
             char *arg;
             size_t size;
 
             /* Set newarg so it can be checked even if it is not touched. */
             newarg = curarg;
 
+            // 此时c[0]是'%'
             switch(c[1]) {
                 // 代表第一个参数应该是一个字符串
             case 's':
@@ -422,7 +424,7 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
                 arg = va_arg(ap,char*);
                 size = strlen(arg);
                 if (size > 0)
-                    // 将参数追加到newarg上
+                    // 追加参数到curarg上
                     newarg = hi_sdscatlen(curarg,arg,size);
                 break;
             case 'b':
@@ -431,11 +433,14 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
                 if (size > 0)
                     newarg = hi_sdscatlen(curarg,arg,size);
                 break;
+                // 如果连续遇到2个% 直接添加就好
             case '%':
                 newarg = hi_sdscat(curarg,"%");
                 break;
             default:
-                /* Try to detect printf format */
+                /* Try to detect printf format
+                 * 下面的则是将可变参数转换成不同的类型
+                 * */
                 {
                     static const char intfmts[] = "diouxX";
                     static const char flags[] = "#0-+ ";
@@ -533,17 +538,21 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
             }
 
             if (newarg == NULL) goto memory_err;
+
+            // 更新此时的字符串
             curarg = newarg;
 
             // 代表此时已经解析了某种格式化数据
             touched = 1;
+            // 当解析到 类似 %s 的时候 c要移动2步
             c++;
         }
+        // 非占位符的情况要移动一步
         c++;
     }
 
     /* Add the last argument if needed
-     * 如果还有参数没有设置到数组中 进行设置
+     * 最后的参数不需要' '来终结
      * */
     if (touched) {
         newargv = hi_realloc(curargv,sizeof(char*)*(argc+1));
@@ -559,22 +568,26 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
     curarg = NULL;
 
     /* Add bytes needed to hold multi bulk count
-     * 计算总长度时 还需要加上一个特殊值
      * */
     totlen += 1+countDigits(argc)+2;
 
-    /* Build the command at protocol level */
+    /* Build the command at protocol level
+     * 这里又额外申请了一个byte空间
+     * */
     cmd = hi_malloc(totlen+1);
     if (cmd == NULL) goto memory_err;
 
+    // 以*开头后写入参数总数 之后是回车   这个好像是bulk协议
     pos = sprintf(cmd,"*%d\r\n",argc);
+    // 之后每行对应一个参数信息
     for (j = 0; j < argc; j++) {
-        // 将每个参数填充到格式化字符串中
+        // 将每个参数填充到格式化字符串中  这里是先看到参数长度信息 %zu 代表unsigned int $长度信息\r\n
         pos += sprintf(cmd+pos,"$%zu\r\n",hi_sdslen(curargv[j]));
+        // 之后将参数拷贝到最终的容器 cmd中
         memcpy(cmd+pos,curargv[j],hi_sdslen(curargv[j]));
         pos += hi_sdslen(curargv[j]);
         hi_sdsfree(curargv[j]);
-        // 每写入一行就插入一个换行符
+        // 最后还要插入换行符
         cmd[pos++] = '\r';
         cmd[pos++] = '\n';
     }

@@ -45,13 +45,13 @@ int clientSubscriptionsCount(client *c);
 void addReplyPubsubMessage(client *c, robj *channel, robj *msg) {
     // 代表返回体协议版本号 可能是2 也可能是3
     if (c->resp == 2)
+       // 对应bulk协议 *%d\r\n
         addReply(c,shared.mbulkhdr[3]);
     else
-        // 如果是3 会先写入数据的长度
+        // 写入参数总数
         addReplyPushLen(c,3);
-    // 这里写入协议类型 是bulk 还有一种是inline
     addReply(c,shared.messagebulk);
-    // 写入本次channel的信息
+    // 通知接收到本次是收到哪个channel的信息
     addReplyBulk(c,channel);
     // 将消息体写入到client中
     if (msg) addReplyBulk(c,msg);
@@ -84,7 +84,7 @@ void addReplyPubsubSubscribed(client *c, robj *channel) {
         addReply(c,shared.mbulkhdr[3]);
     else
         addReplyPushLen(c,3);
-    // 对应 $9subscribe
+    // 对应 $9\r\nsubscribe\r\n
     addReply(c,shared.subscribebulk);
     // 将channel信息写入到缓冲区中
     addReplyBulk(c,channel);
@@ -480,6 +480,7 @@ void punsubscribeCommand(client *c) {
 
 /**
  * 哨兵会定期发送一个hello请求到其他所有实例的hello_channel上 就是通过publish
+ * 当哨兵节点作为消息发布源时 调用的command不同
  * @param c
  */
 void publishCommand(client *c) {
