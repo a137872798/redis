@@ -253,15 +253,14 @@ static char *readLine(redisReader *r, int *_len) {
 }
 
 /**
- * 读取同一个task的下一个ele  如果该task下所有ele都访问完毕后 读取前一个task
+ * 单次可能会收到大量数据，拆分成多个数据包
  * @param r
  */
 static void moveToNextTask(redisReader *r) {
     redisReadTask *cur, *prv;
-    // 这是从后往前么
     while (r->ridx >= 0) {
         /* Return a.s.a.p. when the stack is now empty.
-         * 代表没有数据可以读取了
+         * 当数据栈中没有元素了 直接返回 同时将ridx-1
          * */
         if (r->ridx == 0) {
             r->ridx--;
@@ -274,7 +273,6 @@ static void moveToNextTask(redisReader *r) {
                prv->type == REDIS_REPLY_MAP ||
                prv->type == REDIS_REPLY_SET ||
                prv->type == REDIS_REPLY_PUSH);
-        // 每个task 下面还有一组数据 这里idx就是这组数据的下标  当该task下所有的ele都处理过后 就可以转到前一个task
         if (cur->idx == prv->elements-1) {
             r->ridx--;
         } else {
@@ -301,9 +299,9 @@ static int processLineItem(redisReader *r) {
     char *p;
     int len;
 
-    // p作为新行数据的起始指针
+    // 读取一行新数据
     if ((p = readLine(r,&len)) != NULL) {
-        // 根据类型创建对象并存储数据
+        // 按照类型解析并存储数据
         if (cur->type == REDIS_REPLY_INTEGER) {
             if (r->fn && r->fn->createInteger) {
                 long long v;
@@ -371,7 +369,7 @@ static int processLineItem(redisReader *r) {
         }
 
         /* Set reply if this is the root object.
-         * 如果此时读取的task是第一个 将reader->reply 指向该task封装后的object对象
+         * 解析成功后 将reply指针指向结果
          * */
         if (r->ridx == 0) r->reply = obj;
         // 读取下一个对象
@@ -602,7 +600,7 @@ static int processAggregateItem(redisReader *r) {
 }
 
 /**
- * 处理某个task对象
+ * 解析数据流 并产生task
  * @param r
  * @return
  */
@@ -612,7 +610,7 @@ static int processItem(redisReader *r) {
     char *p;
 
     /* check if we need to read type
-     * 如果type为0代表还未解析类型
+     * 代表此时还没有读取到有关类型的信息
      * */
     if (cur->type < 0) {
         // 读取类型
@@ -802,27 +800,29 @@ oom:
  * @return
  */
 int redisReaderGetReply(redisReader *r, void **reply) {
-    /* Default target pointer to NULL. */
+    /* Default target pointer to NULL.
+     * 传入的reply应该是空 等下会进行设置
+     * */
     if (reply != NULL)
         *reply = NULL;
 
     /* Return early when this reader is in an erroneous state.
-     * 如果已经出现了异常 直接返回
+     * 如果之前读取已经出现了异常 就不需要继续处理了
      * */
     if (r->err)
         return REDIS_ERR;
 
     /* When the buffer is empty, there will never be a reply.
-     * 此时内部没有数据 不需要解析 同时也不会为reply赋值
+     * 此时缓冲区中没有待解析数据 直接返回ok
      * */
     if (r->len == 0)
         return REDIS_OK;
 
     /* Set first item to process when the stack is empty.
-     * 代表此时还未读取任何task 或者说task本身还未被初始化
+     * 每个完整的数据包会被包装成一个task对象  这里代表此时还没有存储任何task 也就是还没有任何待处理的数据包
      * */
     if (r->ridx == -1) {
-        // 这里创建一个空的task对象 并将ridx变成0
+        // 第一个对象此时还没有设置任何属性
         r->task[0]->type = -1;
         r->task[0]->elements = -1;
         r->task[0]->idx = -1;
@@ -832,7 +832,9 @@ int redisReaderGetReply(redisReader *r, void **reply) {
         r->ridx = 0;
     }
 
-    /* Process items in reply. 挨个处理每个task 每次执行processItem时 最后会减少ridx 就会挨个处理每个task */
+    /* Process items in reply.
+     * 开始解析数据流 并将完整的数据包存入到task中
+     * */
     while (r->ridx >= 0)
         if (processItem(r) != REDIS_OK)
             break;
@@ -843,7 +845,7 @@ int redisReaderGetReply(redisReader *r, void **reply) {
 
     /* Discard part of the buffer when we've consumed at least 1k, to avoid
      * doing unnecessary calls to memmove() in sds.c.
-     * 每当偏移量超过1024时 对reader内部的buf 进行一次清理工作
+     * 每当已经处理了足够的数据时 对buf做一次裁剪
      * */
     if (r->pos >= 1024) {
         if (hi_sdsrange(r->buf,r->pos,-1) < 0) return REDIS_ERR;
@@ -855,7 +857,7 @@ int redisReaderGetReply(redisReader *r, void **reply) {
      * 当所有task 都被处理过后 ridx会变成-1
      * */
     if (r->ridx == -1) {
-        // 在process过程中 当发现ridx变成0时 会设置r->reply
+        // 当成功解析到一个数据时 就会生成reply
         if (reply != NULL) {
             *reply = r->reply;
             // 不需要使用reply指针时 释放对象

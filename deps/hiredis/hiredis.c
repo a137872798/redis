@@ -169,7 +169,6 @@ static void *createStringObject(const redisReadTask *task, char *str, size_t len
     }
     r->str = buf;
 
-    // TODO task->parent是做什么的
     if (task->parent) {
         parent = task->parent->obj;
         assert(parent->type == REDIS_REPLY_ARRAY ||
@@ -350,11 +349,11 @@ static size_t bulklen(size_t len) {
 }
 
 /**
- * 将所有参数按特定的格式输出
+ * 将本次要发送的信息格式化  原本的格式 command param1 param2 param3 ...
  * @param target
  * @param format
  * @param ap
- * @return 总计生成了多少长度的文本信息
+ * @return
  */
 int redisvFormatCommand(char **target, const char *format, va_list ap) {
     const char *c = format;
@@ -1106,9 +1105,9 @@ oom:
 
 /* Internal helper function to try and get a reply from the reader,
  * or set an error in the context otherwise.
+ * 将c->reader缓冲区内的数据解析成reply (实际上就是进行粘包和拆包处理)
  * */
 int redisGetReplyFromReader(redisContext *c, void **reply) {
-    // 解析reader内部的数据 生成reply对象
     if (redisReaderGetReply(c->reader,reply) == REDIS_ERR) {
         __redisSetError(c,c->reader->err,c->reader->errstr);
         return REDIS_ERR;
@@ -1129,7 +1128,7 @@ static int redisHandledPushReply(redisContext *c, void *reply) {
 }
 
 /**
- * 解析reader数据
+ * 首先解析目标节点返回的数据
  * @param c
  * @param reply
  * @return
@@ -1139,7 +1138,7 @@ int redisGetReply(redisContext *c, void **reply) {
     void *aux = NULL;
 
     /* Try to read pending replies
-     * 根据reader内部的task 解析reader->buf的数据 aux指向root对象(redisReply)
+     * 解析reader缓冲区内的数据
      * */
     if (redisGetReplyFromReader(c,&aux) == REDIS_ERR)
         return REDIS_ERR;

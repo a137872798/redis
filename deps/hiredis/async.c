@@ -317,7 +317,7 @@ static int __redisPushCallback(redisCallbackList *list, redisCallback *source) {
 }
 
 /**
- * 取出第一个callback对象 并赋值到target上
+ * 将首个回调对象转移到 target上 如果target为NULL 就代表直接丢弃第一个回调
  * @param list
  * @param target
  * @return
@@ -370,7 +370,7 @@ static void __redisAsyncFree(redisAsyncContext *ac) {
     dictIterator *it;
     dictEntry *de;
 
-    /* Execute pending callbacks with NULL reply. 挨个获取每个callback 并执行 */
+    /* Execute pending callbacks with NULL reply. 使用NULL触发每个回调 */
     while (__redisShiftCallback(&ac->replies,&cb) == REDIS_OK)
         __redisRunCallback(ac,&cb,NULL);
 
@@ -378,7 +378,6 @@ static void __redisAsyncFree(redisAsyncContext *ac) {
     while (__redisShiftCallback(&ac->sub.invalid,&cb) == REDIS_OK)
         __redisRunCallback(ac,&cb,NULL);
 
-    // sub.channels,sub.patterns 内部存储的是什么
     /* Run subscription callbacks with NULL reply */
     if (ac->sub.channels) {
         it = dictGetIterator(ac->sub.channels);
@@ -442,7 +441,7 @@ void redisAsyncFree(redisAsyncContext *ac) {
 }
 
 /* Helper function to make the disconnect happen and clean up.
- * 代表某次异步连接失败
+ * 异步关闭连接
  * */
 void __redisAsyncDisconnect(redisAsyncContext *ac) {
     redisContext *c = &(ac->c);
@@ -454,14 +453,14 @@ void __redisAsyncDisconnect(redisAsyncContext *ac) {
 
     if (ac->err == 0) {
         /* For clean disconnects, there should be no pending callbacks.
-         * 代表是手动断开连接 要清理所有回调函数
+         * 丢弃第一个callback
          * */
         int ret = __redisShiftCallback(&ac->replies,NULL);
         assert(ret == REDIS_ERR);
     } else {
         /* Disconnection is caused by an error, make sure that pending
          * callbacks cannot call new commands.
-         * 异常情况导致的连接断开 设置标记位
+         * 这里只是打上标记 还没有真正清理
          * */
         c->flags |= REDIS_DISCONNECTING;
     }
@@ -598,13 +597,13 @@ void redisProcessCallbacks(redisAsyncContext *ac) {
     void *reply = NULL;
     int status;
 
-    // 解析reader内部的数据   redisGetReply 方法本身应该会轮询消耗所有的task 直到ridx变成-1 所以这里为什么要用while
+    // 解析reader内部缓冲区的数据 并使用reply指向产生的结果
     while((status = redisGetReply(c,&reply)) == REDIS_OK) {
-        // 只有当本次处理的是最后一个task时 才会设置reply指针 否则该指针为null
+        // 本次数据不完整
         if (reply == NULL) {
             /* When the connection is being disconnected and there are
              * no more replies, this is the cue to really disconnect.
-             * TODO 先忽略连接断开的情况
+             * 此时该连接已经被标记成待关闭 并且此时没有待处理数据了 就可以真正关闭连接
              * */
             if (c->flags & REDIS_DISCONNECTING && hi_sdslen(c->obuf) == 0
                 && ac->replies.head == NULL) {
@@ -628,8 +627,7 @@ void redisProcessCallbacks(redisAsyncContext *ac) {
          * while allowing subscribe related PUSH messages to pass through.
          * This allows existing code to be backward compatible and work in
          * either RESP2 or RESP3 mode.
-         * 假设此时已经处理到最后一个task了 这样会返回reply对象
-         * 检查reply->type 是否是push类型 TODO 先忽略push类型
+         * TODO 先忽略push类型
          * */
         if (redisIsSpontaneousPushReply(reply)) {
             __redisRunPushCallback(ac, reply);
@@ -639,7 +637,7 @@ void redisProcessCallbacks(redisAsyncContext *ac) {
 
         /* Even if the context is subscribed, pending regular
          * callbacks will get a reply before pub/sub messages arrive.
-         * 代表没有回调对象
+         * 代表此时没有回调对象
          * */
         if (__redisShiftCallback(&ac->replies,&cb) != REDIS_OK) {
             /*
@@ -656,7 +654,7 @@ void redisProcessCallbacks(redisAsyncContext *ac) {
              * Another possibility is that the server is loading its dataset.
              * In this case we also want to close the connection, and have the
              * user wait until the server is ready to take our request.
-             * 如果本次处理出现了异常 断开连接   reply->type 是task->type 带过去的
+             * 先忽略异常情况
              */
             if (((redisReply*)reply)->type == REDIS_REPLY_ERROR) {
                 c->err = REDIS_ERR_OTHER;
@@ -666,7 +664,7 @@ void redisProcessCallbacks(redisAsyncContext *ac) {
                 return;
             }
             /* No more regular callbacks and no errors, the context *must* be subscribed or monitoring.
-             * 如果不包含回调对象的情况 必然是订阅或者监控模式
+             * 如果回调对象不在replies中 本次必然是订阅请求或者监控请求 他们存储回调的容器不一样
              * */
             assert((c->flags & REDIS_SUBSCRIBED || c->flags & REDIS_MONITORING));
             // TODO
@@ -867,22 +865,18 @@ void redisAsyncHandleTimeout(redisAsyncContext *ac) {
 
 /* Sets a pointer to the first argument and its length starting at p. Returns
  * the number of bytes to skip to get to the following argument.
- * 找到下一个参数的起始位置
  * */
 static const char *nextArgument(const char *start, const char **str, size_t *len) {
     const char *p = start;
 
-    // 如果存在$ 代表有一个描述参数长度的信息
     if (p[0] != '$') {
         p = strchr(p,'$');
         if (p == NULL) return NULL;
     }
 
-    // 获取长度信息
     *len = (int)strtol(p+1,NULL,10);
     p = strchr(p,'\r');
     assert(p);
-    // 这里会更新字符串的起始位置
     *str = p+2;
     return p+2+(*len)+2;
 }
@@ -893,6 +887,7 @@ static const char *nextArgument(const char *start, const char **str, size_t *len
  * 异步执行某个command
  * @param cmd 本次执行命令的参数流
  * @param len cmd的长度
+ * @param privdate 本次针对的实例对象
  * */
 static int __redisAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void *privdata, const char *cmd, size_t len) {
     redisContext *c = &(ac->c);
@@ -922,7 +917,7 @@ static int __redisAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void 
     cb.pending_subs = 1;
 
     /* Find out which command will be appended.
-     * 获取下一个参数的起始位置
+     * 移动到第一个参数的位置
      * */
     p = nextArgument(cmd,&cstr,&clen);
     assert(p != NULL);
@@ -1013,7 +1008,7 @@ int redisvAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void *privdat
     int len;
     int status;
 
-    // 原本要传输的数据流可能包含了一些占位符 这里通过填充ap的数据 生成完整字符信息
+    // 原本执行command传入的参数就是简单的格式化参数 但是要对它进行修改 使得满足redis的编解码规则
     len = redisvFormatCommand(&cmd,format,ap);
 
     /* We don't want to pass -1 or -2 to future functions as a length. */
