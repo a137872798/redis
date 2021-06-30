@@ -588,7 +588,7 @@ static int redisIsSubscribeReply(redisReply *reply) {
 }
 
 /**
- * 使用回调对象处理reader内存储的数据
+ * 开始处理该从该context对应的link接收到的数据 注意之前的数据还没有做粘拆包处理
  * @param ac
  */
 void redisProcessCallbacks(redisAsyncContext *ac) {
@@ -713,13 +713,13 @@ static void __redisAsyncHandleConnectFailure(redisAsyncContext *ac) {
 /* Internal helper function to detect socket status the first time a read or
  * write event fires. When connecting was not successful, the connect callback
  * is called with a REDIS_ERR status and the context is free'd.
- * 轮询el发现连接事件准备完成
+ * 之前在sentinel中 都是使用异步连接，并将write事件注册到ae上 此时收到write事件可能是代表连接已经完成了
  * */
 static int __redisAsyncHandleConnect(redisAsyncContext *ac) {
     int completed = 0;
     redisContext *c = &(ac->c);
 
-    // 连接失败
+    // 连接失败在sentinel的定时任务中就是等待一定时间后 进行下一次连接
     if (redisCheckConnectDone(c, &completed) == REDIS_ERR) {
         /* Error! */
         redisCheckSocketError(c);
@@ -733,7 +733,7 @@ static int __redisAsyncHandleConnect(redisAsyncContext *ac) {
             return REDIS_ERR;
         }
 
-        // 本次连接成功 修改context的标记位 同时触发onConnect函数
+        // 本次连接成功修改标记位 同时执行onConnect函数
         if (ac->onConnect) ac->onConnect(ac, REDIS_OK);
         c->flags |= REDIS_CONNECTED;
         return REDIS_OK;
@@ -744,6 +744,8 @@ static int __redisAsyncHandleConnect(redisAsyncContext *ac) {
 
 /**
  * 对应 c->funcs->async_read(ac)
+ * 有关网络模块 client总要准备解析响应结果的逻辑 (服务器则负责解析收到的数据) 在redis内部针对特定的模块都会使用自定义的readHandler 比如cluster/replication
+ * 所以我们使用到的redisClient实际上是帮我们做好了这一步
  * @param ac
  */
 void redisAsyncRead(redisAsyncContext *ac) {
@@ -754,22 +756,22 @@ void redisAsyncRead(redisAsyncContext *ac) {
         __redisAsyncDisconnect(ac);
     } else {
         /* Always re-schedule reads
-         * 只要数据读取成功就可以继续监听reader事件
+         * 读事件需要一直监听
          * */
         _EL_ADD_READ(ac);
-        // 使用callback对象处理此时reader内部的数据
+        // 现在开始处理收到的数据  在redisBufferRead中没有做粘拆包处理
         redisProcessCallbacks(ac);
     }
 }
 
 /* This function should be called when the socket is readable.
  * It processes all replies that can be read and executes their callbacks.
- * 代表el发现读事件准备完成了
+ * 当注册的read事件准备完成后
  */
 void redisAsyncHandleRead(redisAsyncContext *ac) {
     redisContext *c = &(ac->c);
 
-    // 如果连接还未完成 先处理连接事件
+    // 如果此时连接还没有完成 先进行连接
     if (!(c->flags & REDIS_CONNECTED)) {
         /* Abort connect was not successful. */
         if (__redisAsyncHandleConnect(ac) != REDIS_OK)
@@ -783,44 +785,47 @@ void redisAsyncHandleRead(redisAsyncContext *ac) {
 }
 
 /**
- * context中默认的 async_write函数  将context内部的文件句柄注册到el后 当写入事件准备完成就会触发该方法
+ * 对应异步写入执行的函数
+ * 在sentinel模块中每次执行asyncCommand时 都是将待发送数据存入到一个缓冲区中
  * @param ac
  */
 void redisAsyncWrite(redisAsyncContext *ac) {
     redisContext *c = &(ac->c);
+    // done代表数据是否全部被写完
     int done = 0;
 
-    // 将context缓冲区内的数据写入到socket缓冲区中
+    // 将缓冲区内的数据写入到socket中
     if (redisBufferWrite(c,&done) == REDIS_ERR) {
         __redisAsyncDisconnect(ac);
     } else {
         /* Continue writing when not done, stop writing otherwise
-         * 代表还有剩余的数据
          * */
         if (!done)
-            // 触发addWrite  代表还需要继续在el上轮询该句柄 之后又会回到redisAsyncWrite这个方法
+            // 因为还有数据 还需要继续注册写处理器
             _EL_ADD_WRITE(ac);
         else
             // 触发delWrite  就是从el上注销
             _EL_DEL_WRITE(ac);
 
         /* Always schedule reads after writes
-         * 触发addRead  也就是监听句柄对应的读事件
+         * 在发送数据后 可能会收到对端返回的信息 所以这里要注册readHandler
          * */
         _EL_ADD_READ(ac);
     }
 }
 
 /**
- * 当写入事件准备完成时 触发函数
+ * 当ae发现写事件准备完成时就会调用writeHandler进行处理
  * @param ac
  */
 void redisAsyncHandleWrite(redisAsyncContext *ac) {
     redisContext *c = &(ac->c);
 
-    // 代表此时连接未完成 先执行连接工作
+    // 此时发现与目标节点的连接还未完全建立
     if (!(c->flags & REDIS_CONNECTED)) {
-        /* Abort connect was not successful. */
+        /* Abort connect was not successful.
+         * 先处理连接事件  如果本次连接还未完成也就无法进行后面的写入工作
+         * */
         if (__redisAsyncHandleConnect(ac) != REDIS_OK)
             return;
         /* Try again later when the context is still not connected. */
@@ -828,7 +833,7 @@ void redisAsyncHandleWrite(redisAsyncContext *ac) {
             return;
     }
 
-    // 执行异步写入工作
+    // 在连接还没有完成时 待发送的数据会存储在一个缓冲区中 这里就是打算发送这些数据
     c->funcs->async_write(ac);
 }
 
@@ -984,7 +989,7 @@ static int __redisAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void 
     __redisAppendCommand(c,cmd,len);
 
     /* Always schedule a write when the write buffer is non-empty
-     * 在el上注册写事件
+     * 因为此时添加了需要发送的数据 所以这里要注册writeHandler
      * */
     _EL_ADD_WRITE(ac);
 

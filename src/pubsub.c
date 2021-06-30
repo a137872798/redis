@@ -379,7 +379,7 @@ int pubsubPublishMessage(robj *channel, robj *message) {
     listIter li;
 
     /* Send to clients listening for that channel
-     * 在集群中 某些client会监听哨兵节点发出的事件 按照channel 来选择监听类型
+     * 其他订阅者关注了哪些channel 都会在这里被记录下来
      * */
     de = dictFind(server.pubsub_channels,channel);
     if (de) {
@@ -396,7 +396,7 @@ int pubsubPublishMessage(robj *channel, robj *message) {
         }
     }
     /* Send to clients listening to matching channels
-     * 有些可能以正则方式匹配channel  节点可能会同时存在与2个监听容器中么???
+     * 有些可能以正则方式匹配channel
      * */
     di = dictGetIterator(server.pubsub_patterns_dict);
     if (di) {
@@ -479,16 +479,17 @@ void punsubscribeCommand(client *c) {
 }
 
 /**
- * 其他client也可以往server的channel 推送一条消息 其他在该server订阅该channel的client也会收到消息  这个server变成了一个消息中转站
+ * 哨兵会定期发送一个hello请求到其他所有实例的hello_channel上 就是通过publish
  * @param c
  */
 void publishCommand(client *c) {
+    // argv[1]对应的channel argv[2]对应的消息体 当返回时已经往订阅了这个channel的其他节点发送请求了 注意这个走的是pubsub专用的连接 不同于普通连接的readHandler
     int receivers = pubsubPublishMessage(c->argv[1],c->argv[2]);
     // 如果本节点处于集群模式下 将消息转发到其他节点
     if (server.cluster_enabled)
         clusterPropagatePublish(c->argv[1],c->argv[2]);
     else
-        // 否则打上一个传播到副本的标记
+        // 如果不在集群模式下 就是简单的将本次publishCommand同步到副本上
         forceCommandPropagation(c,PROPAGATE_REPL);
     addReplyLongLong(c,receivers);
 }

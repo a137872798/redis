@@ -753,7 +753,7 @@ void redisReaderFree(redisReader *r) {
 }
 
 /**
- * 使用context->reader对象读取buf中的数据
+ * 将从socket中读取到的数据填充到reader内
  * @param r
  * @param buf
  * @param len
@@ -781,7 +781,7 @@ int redisReaderFeed(redisReader *r, const char *buf, size_t len) {
             r->pos = 0;
         }
 
-        // 将数据直接转移到缓冲区中 实际上reader也没有做粘包/拆包处理
+        // 这里只是做了数据拷贝
         newbuf = hi_sdscatlen(r->buf,buf,len);
         if (newbuf == NULL) goto oom;
 

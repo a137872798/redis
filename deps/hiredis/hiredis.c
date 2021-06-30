@@ -1036,6 +1036,7 @@ redisPushFn *redisSetPushCallback(redisContext *c, redisPushFn *fn) {
  *
  * After this function is called, you may use redisGetReplyFromReader to
  * see if there is a reply available.
+ * 首先将数据从socket读取到某个缓冲区中
  * */
 int redisBufferRead(redisContext *c) {
     char buf[1024*16];
@@ -1045,9 +1046,10 @@ int redisBufferRead(redisContext *c) {
     if (c->err)
         return REDIS_ERR;
 
+    // 这里无法确定能读取到多少数据 也就是粘拆包问题
     nread = c->funcs->read(c, buf, sizeof(buf));
-    // reader对象也只是进行简单的数据拷贝 没有做粘包拆包处理
     if (nread > 0) {
+        // 将数据填充到reader中
         if (redisReaderFeed(c->reader, buf, nread) != REDIS_OK) {
             __redisSetError(c, c->reader->err, c->reader->errstr);
             return REDIS_ERR;
@@ -1067,6 +1069,7 @@ int redisBufferRead(redisContext *c) {
  *
  * Returns REDIS_ERR if an error occurred trying to write and sets
  * c->errstr to hold the appropriate error string.
+ * 异步写入就是先将数据存储到缓冲区中 等write事件准备好后 再将缓存区的数据写入到socket中
  */
 int redisBufferWrite(redisContext *c, int *done) {
 
@@ -1076,7 +1079,6 @@ int redisBufferWrite(redisContext *c, int *done) {
     if (c->err)
         return REDIS_ERR;
 
-    // 首先要求数据已经在缓冲区中了
     if (hi_sdslen(c->obuf) > 0) {
         // 实际上就是将obuf中的数据写入到socket缓冲区
         ssize_t nwritten = c->funcs->write(c);
@@ -1093,6 +1095,7 @@ int redisBufferWrite(redisContext *c, int *done) {
             }
         }
     }
+    // 根据缓冲区中是否还有残留数据 返回done
     if (done != NULL) *done = (hi_sdslen(c->obuf) == 0);
     return REDIS_OK;
 

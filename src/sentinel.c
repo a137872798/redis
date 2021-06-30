@@ -315,7 +315,6 @@ typedef struct redisAeEvents {
 } redisAeEvents;
 
 /**
- * 当el发现读事件准备完毕后 触发相关函数  为什么要单独用一个async.c呢 原本使用选择器模型应该就是异步的啊
  * @param el
  * @param fd
  * @param privdata
@@ -331,7 +330,7 @@ static void redisAeReadEvent(aeEventLoop *el, int fd, void *privdata, int mask) 
 }
 
 /**
- * 当轮询的事件准备完成时触发
+ * 在哨兵模块中 与其他节点建立普通连接/订阅发布连接时 会注册这个写事件处理器
  * @param el
  * @param fd
  * @param privdata
@@ -347,12 +346,13 @@ static void redisAeWriteEvent(aeEventLoop *el, int fd, void *privdata, int mask)
 }
 
 /**
- * 每当执行写入操作时 就会在el上注册读事件
+ * 在el上注册读事件
  * @param privdata
  */
 static void redisAeAddRead(void *privdata) {
     redisAeEvents *e = (redisAeEvents *) privdata;
     aeEventLoop *loop = e->loop;
+    // reading代表已经注册了读事件 这里是避免重复注册
     if (!e->reading) {
         e->reading = 1;
         aeCreateFileEvent(loop, e->fd, AE_READABLE, redisAeReadEvent, e);
@@ -375,7 +375,7 @@ static void redisAeDelRead(void *privdata) {
 static void redisAeAddWrite(void *privdata) {
     redisAeEvents *e = (redisAeEvents *) privdata;
     aeEventLoop *loop = e->loop;
-    // writing默认为0  主要是避免重复注册写事件
+    // writing代表此时已经注册了写事件
     if (!e->writing) {
         e->writing = 1;
         aeCreateFileEvent(loop, e->fd, AE_WRITABLE, redisAeWriteEvent, e);
@@ -3136,8 +3136,7 @@ void sentinelReceiveHelloMessages(redisAsyncContext *c, void *reply, void *privd
  *
  * Returns C_OK if the PUBLISH was queued correctly, otherwise
  * C_ERR is returned.
- * 将哨兵信息发送到该节点上
- * 在主循环中 哨兵会将需要更新的信息发往集群中其他节点
+ * 哨兵会定期将自身信息同步到集群的其他实例上
  * */
 int sentinelSendHello(sentinelRedisInstance *ri) {
     char ip[NET_IP_STR_LEN];
@@ -3171,7 +3170,7 @@ int sentinelSendHello(sentinelRedisInstance *ri) {
     else announce_port = server.port;
 
     /* Format and send the Hello message.
-     * 主要就是发送本哨兵信息 以及目标节点的master信息
+     * 将本哨兵用于通信的端口ip暴露给其他实例
      * */
     snprintf(payload, sizeof(payload),
              "%s,%d,%s,%llu," /* Info about this sentinel. */
@@ -3181,8 +3180,10 @@ int sentinelSendHello(sentinelRedisInstance *ri) {
     /* --- */
              master->name, master_addr->ip, master_addr->port,
              (unsigned long long) master->config_epoch);
-    // 将信息请求发送到其他节点
+
+    // 将本节点暴露出来的端口 通过hello管道发送出去
     retval = redisAsyncCommand(ri->link->cc,
+                               // 该函数主要是更新最近一次发布时间 避免短时间内重复发布
                                sentinelPublishReplyCallback, ri, "%s %s %s",
                                sentinelInstanceMapCommand(ri, "PUBLISH"),
                                SENTINEL_HELLO_CHANNEL, payload);
@@ -3309,7 +3310,7 @@ void sentinelSendPeriodicCommands(sentinelRedisInstance *ri) {
     if (ping_period > SENTINEL_PING_PERIOD) ping_period = SENTINEL_PING_PERIOD;
 
     /* Send INFO to masters and slaves, not sentinels.
-     * 每隔一定时间定期获取master/slave节点的信息
+     * 每隔一定时间定期获取master/slave节点的信息 通过它们的信息判断某个节点是否发生了角色的变化 以及通过某个slave现在的状态判断是否完成了选举
      * */
     if ((ri->flags & SRI_SENTINEL) == 0 &&
         (ri->info_refresh == 0 ||
@@ -3320,14 +3321,17 @@ void sentinelSendPeriodicCommands(sentinelRedisInstance *ri) {
         if (retval == C_OK) ri->link->pending_commands++;
     }
 
-    /* Send PING to all the three kinds of instances. 发出一个心跳请求 */
+    /* Send PING to all the three kinds of instances.
+     * 心跳请求会发往所有实例 而info请求只会发往master和slave
+     * */
     if ((now - ri->link->last_pong_time) > ping_period &&
         (now - ri->link->last_ping_time) > ping_period / 2) {
         sentinelSendPing(ri);
     }
 
     /* PUBLISH hello messages to all the three kinds of instances.
-     * 每隔一段时间就要将本节点相关信息重新发布到其他节点上
+     * 与info请求相反，是将本哨兵的信息通知到其他slave/master/sentinel上
+     * 当某个slave晋升成功后 sentinel会负责将这个信息同步到其他所有实例上
      * */
     if ((now - ri->last_pub_time) > SENTINEL_PUBLISH_PERIOD) {
         sentinelSendHello(ri);
@@ -4294,7 +4298,7 @@ void sentinelSetCommand(client *c) {
  *
  * Because we have a Sentinel PUBLISH, the code to send hello messages is the same
  * for all the three kind of instances: masters, slaves, sentinels.
- * 处理某个sentinel发布的消息
+ * 作为哨兵节点 它的publish 与普通节点的publish触发的command不一样
  * */
 void sentinelPublishCommand(client *c) {
     if (strcmp(c->argv[1]->ptr, SENTINEL_HELLO_CHANNEL)) {
@@ -5357,7 +5361,7 @@ void sentinelHandleRedisInstance(sentinelRedisInstance *ri) {
     /* We don't proceed with the acting half if we are in TILT mode.
      * TILT happens when we find something odd with the time, like a
      * sudden change in the clock.
-     * 当tilt开始到现在超过了某个时间 自动退出该模式 这模式是什么意思???
+     * 检测是否在tilt模式下经过了很长时间 是的话退出该模式
      * */
     if (sentinel.tilt) {
         if (mstime() - sentinel.tilt_start_time < SENTINEL_TILT_PERIOD) return;

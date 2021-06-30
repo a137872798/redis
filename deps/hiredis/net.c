@@ -58,7 +58,7 @@ void redisNetClose(redisContext *c) {
 }
 
 /**
- * 在hiredis中使用  将socket缓冲区的数据转移到buf中
+ * 这里就是将socket数据转移到内存缓冲区中
  * @param c
  * @param buf
  * @param bufcap

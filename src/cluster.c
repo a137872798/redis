@@ -2552,7 +2552,7 @@ int clusterProcessPacket(clusterLink *link) {
                       "Ignoring FAIL message from unknown node %.40s about %.40s",
                       hdr->sender, hdr->data.fail.about.nodename);
         }
-        // TODO 先忽略
+        // 在集群中收到该请求会针对本节点下所有订阅了这个channel的节点继续发送消息
     } else if (type == CLUSTERMSG_TYPE_PUBLISH) {
         robj *channel, *message;
         uint32_t channel_len, message_len;
@@ -3248,8 +3248,7 @@ void clusterBroadcastPong(int target) {
 /* Send a PUBLISH message.
  *
  * If link is NULL, then the message is broadcasted to the whole cluster.
- * 某个client往该server的某个channel投递一条消息
- * @param link 没有指定link 代表广播到集群的所有节点
+ * 本次会针对本集群中的某个节点发出一条消息
  * */
 void clusterSendPublish(clusterLink *link, robj *channel, robj *message) {
     unsigned char *payload;
@@ -3263,7 +3262,7 @@ void clusterSendPublish(clusterLink *link, robj *channel, robj *message) {
     channel_len = sdslen(channel->ptr);
     message_len = sdslen(message->ptr);
 
-    // 构建一条集群内传递的消息
+    // 构建一个类型是publish的消息体
     clusterBuildMessageHdr(hdr, CLUSTERMSG_TYPE_PUBLISH);
     totlen = sizeof(clusterMsg) - sizeof(union clusterMsgData);
     // 这里是计算clusterMsgData的大小
@@ -3291,7 +3290,7 @@ void clusterSendPublish(clusterLink *link, robj *channel, robj *message) {
     if (link)
         clusterSendMessage(link, payload, totlen);
     else
-        // 将数据发往集群中每个节点
+        // 没有指定目的地 代表是一条广播消息
         clusterBroadcastMessage(payload, totlen);
 
     decrRefCount(channel);
@@ -3398,7 +3397,8 @@ int clusterSendModuleMessageToTarget(const char *target, uint64_t module_id, uin
  * For now we do very little, just propagating PUBLISH messages across the whole
  * cluster. In the future we'll try to get smarter and avoiding propagating those
  * messages to hosts without receives for a given channel.
- * 某个client往该服务器的某个channel推送某条消息时执行该方法 (当发现服务器是集群模式的情况)
+ *
+ * 当某个节点在集群模式下打开时 并收到了一条发布消息 会将这条消息推送给集群的其他节点
  * @param channel
  * @param message
  * -------------------------------------------------------------------------- */
