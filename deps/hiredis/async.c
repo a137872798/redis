@@ -510,14 +510,16 @@ static int __redisGetSubscribeCallback(redisAsyncContext *ac, redisReply *reply,
 
     /* Custom reply functions are not supported for pub/sub. This will fail
      * very hard when they are used...
-     * TODO 先忽略复杂的情况
+     * 当注册的是订阅发布回调时 callback需要能重复使用
      * */
     if (reply->type == REDIS_REPLY_ARRAY || reply->type == REDIS_REPLY_PUSH) {
         assert(reply->elements >= 2);
         assert(reply->element[0]->type == REDIS_REPLY_STRING);
         stype = reply->element[0]->str;
+        // 第一个元素标记本次是匹配 channel/pattern
         pvariant = (tolower(stype[0]) == 'p') ? 1 : 0;
 
+        // 找到对应的回调列表
         if (pvariant)
             callbacks = ac->sub.patterns;
         else
@@ -525,6 +527,7 @@ static int __redisGetSubscribeCallback(redisAsyncContext *ac, redisReply *reply,
 
         /* Locate the right callback */
         assert(reply->element[1]->type == REDIS_REPLY_STRING);
+        // 对应channel名称
         sname = hi_sdsnewlen(reply->element[1]->str,reply->element[1]->len);
         if (sname == NULL)
             goto oom;
@@ -538,6 +541,7 @@ static int __redisGetSubscribeCallback(redisAsyncContext *ac, redisReply *reply,
                 cb->pending_subs -= 1;
             }
 
+            // 这里会取出callback对象 也就可以重复使用
             memcpy(dstcb,cb,sizeof(*dstcb));
 
             /* If this is an unsubscribe message, remove it. */
@@ -559,7 +563,7 @@ static int __redisGetSubscribeCallback(redisAsyncContext *ac, redisReply *reply,
         hi_sdsfree(sname);
     } else {
         /* Shift callback for invalid commands.
-         * 就是从特殊链表中找到回调对象
+         * 如果对该订阅管道发送了普通命令 那么对应的回调会设置在sub.invalid中 注意也是单次使用 一旦处理完某个响应这个callback就可以丢掉了
          * */
         __redisShiftCallback(&ac->sub.invalid,dstcb);
     }
@@ -604,7 +608,7 @@ void redisProcessCallbacks(redisAsyncContext *ac) {
     void *reply = NULL;
     int status;
 
-    // 解析reader内部缓冲区的数据 并使用reply指向产生的结果
+    // 每调用一次redisGetReply 会生成一个完整的数据包 这里在挨个处理
     while((status = redisGetReply(c,&reply)) == REDIS_OK) {
         // 本次数据不完整
         if (reply == NULL) {
@@ -695,7 +699,9 @@ void redisProcessCallbacks(redisAsyncContext *ac) {
             /* No callback for this reply. This can either be a NULL callback,
              * or there were no callbacks to begin with. Either way, don't
              * abort with an error, but simply ignore it because the client
-             * doesn't know what the server will spit out over the wire. */
+             * doesn't know what the server will spit out over the wire.
+             * 针对返回结果没有设置回调对象 忽略本次返回结果
+             * */
             c->reader->fn->freeObject(reply);
         }
     }
@@ -1003,7 +1009,7 @@ static int __redisAsyncCommand(redisAsyncContext *ac, redisCallbackFn *fn, void 
 
          // 本次执行的是一个普通命令 (哨兵连接到其他节点前可能需要验证)
     } else {
-        // 针对用于订阅发布的连接 使用特殊的列表存储回调函数
+        // 针对用于订阅发布的连接 如果执行的是普通的命令 使用特殊的容器存储数据
         if (c->flags & REDIS_SUBSCRIBED)
             /* This will likely result in an error reply, but it needs to be
              * received and passed to the callback. */

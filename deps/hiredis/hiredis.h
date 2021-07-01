@@ -118,6 +118,7 @@ typedef struct redisReply {
     char vtype[4]; /* Used for REDIS_REPLY_VERB, contains the null
                       terminated 3 character content type, such as "txt". */
     size_t elements; /* number of elements, for REDIS_REPLY_ARRAY */
+    // 当本次返回结果是多个元素时 会在element中存储一组子元素  一般订阅发布对应的就是这种结构
     struct redisReply **element; /* elements vector for REDIS_REPLY_ARRAY */
 } redisReply;
 

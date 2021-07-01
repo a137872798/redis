@@ -144,7 +144,7 @@ static void *createStringObject(const redisReadTask *task, char *str, size_t len
            task->type == REDIS_REPLY_VERB);
 
     /* Copy string value
-     * 如果本次数据类型是 REDIS_REPLY_VERB 会有一个头部 这部分数据是不包含在内的
+     * 先忽略verb类型
      * */
     if (task->type == REDIS_REPLY_VERB) {
         buf = hi_malloc(len-4+1); /* Skip 4 bytes of verbatim type header. */
@@ -169,12 +169,15 @@ static void *createStringObject(const redisReadTask *task, char *str, size_t len
     }
     r->str = buf;
 
+    // 代表本次解析出来的元素在一个聚合类型中 比如先检测到了一个array类型 这里是填充内部的元素
     if (task->parent) {
+        // 找到array对象
         parent = task->parent->obj;
         assert(parent->type == REDIS_REPLY_ARRAY ||
                parent->type == REDIS_REPLY_MAP ||
                parent->type == REDIS_REPLY_SET ||
                parent->type == REDIS_REPLY_PUSH);
+        // 将本次结果回填到对应的数组中
         parent->element[task->idx] = r;
     }
     return r;
@@ -185,9 +188,9 @@ oom:
 }
 
 /**
- * 解析task内部的数据 转换成等量的ele
+ * 本次收到的是一个数组类型
  * @param task
- * @param elements
+ * @param elements 内部有多少个元素
  * @return
  */
 static void *createArrayObject(const redisReadTask *task, size_t elements) {
@@ -207,7 +210,7 @@ static void *createArrayObject(const redisReadTask *task, size_t elements) {
 
     r->elements = elements;
 
-    // TODO parent是什么时候设置的 ???
+    // 这个是代表嵌套了
     if (task->parent) {
         parent = task->parent->obj;
         assert(parent->type == REDIS_REPLY_ARRAY ||

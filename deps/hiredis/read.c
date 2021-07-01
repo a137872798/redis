@@ -253,14 +253,15 @@ static char *readLine(redisReader *r, int *_len) {
 }
 
 /**
- * 单次可能会收到大量数据，拆分成多个数据包
+ * 尝试移动ridx指针 产生下一个空的task 便于解析下一个数据 如果发现此时已经解析完某个聚合数据下所有的element了 完成本次处理
  * @param r
  */
 static void moveToNextTask(redisReader *r) {
     redisReadTask *cur, *prv;
+
     while (r->ridx >= 0) {
         /* Return a.s.a.p. when the stack is now empty.
-         * 当数据栈中没有元素了 直接返回 同时将ridx-1
+         * 本次是单行返回结果 本对象就是root对象 那么将ridx变成-1后 外层就知道本轮数据包已经解析完成了
          * */
         if (r->ridx == 0) {
             r->ridx--;
@@ -273,15 +274,17 @@ static void moveToNextTask(redisReader *r) {
                prv->type == REDIS_REPLY_MAP ||
                prv->type == REDIS_REPLY_SET ||
                prv->type == REDIS_REPLY_PUSH);
+        // 当处理到最后一个元素时 就可以减小下标了
         if (cur->idx == prv->elements-1) {
             r->ridx--;
         } else {
             /* Reset the type because the next item can be anything
-             * 读取下一个ele
+             * 每当解析完单行数据后 本轮产生的reply对象已经存储到父对象的elements中了 在发现还有下一个待解析的元素时就可以重置本对象
              * */
             assert(cur->idx < prv->elements);
             cur->type = -1;
             cur->elements = -1;
+            // 对应任务的在整个聚合对象的下标
             cur->idx++;
             return;
         }
@@ -294,12 +297,13 @@ static void moveToNextTask(redisReader *r) {
  * @return
  */
 static int processLineItem(redisReader *r) {
+    // 定位到本次要处理的新task
     redisReadTask *cur = r->task[r->ridx];
     void *obj;
     char *p;
     int len;
 
-    // 读取一行新数据
+    // 这个代表的是数据长度
     if ((p = readLine(r,&len)) != NULL) {
         // 按照类型解析并存储数据
         if (cur->type == REDIS_REPLY_INTEGER) {
@@ -370,9 +374,9 @@ static int processLineItem(redisReader *r) {
 
         /* Set reply if this is the root object.
          * 解析成功后 将reply指针指向结果
+         * 比如此时处理的是一个array类型 那么reply肯定是指向array的 之后解析的数据只会作为array的element
          * */
         if (r->ridx == 0) r->reply = obj;
-        // 读取下一个对象
         moveToNextTask(r);
         return REDIS_OK;
     }
@@ -522,7 +526,7 @@ static int processAggregateItem(redisReader *r) {
             return REDIS_ERR;
     }
 
-    // 先读取一行表示ele数量的信息
+    // 针对聚合数据 第一行对应参数总数
     if ((p = readLine(r,&len)) != NULL) {
         if (string2ll(p, len, &elements) == REDIS_ERR) {
             __redisReaderSetError(r,REDIS_ERR_PROTOCOL,
@@ -530,10 +534,9 @@ static int processAggregateItem(redisReader *r) {
             return REDIS_ERR;
         }
 
-        // 判断本次读取的是否是root对象 是会怎么样 ???
         root = (r->ridx == 0);
 
-        // 聚合数据的数量超过限制
+        // 参数总数超过限制
         if (elements < -1 || (LLONG_MAX > SIZE_MAX && elements > SIZE_MAX) ||
             (r->maxelements > 0 && elements > r->maxelements))
         {
@@ -542,7 +545,7 @@ static int processAggregateItem(redisReader *r) {
             return REDIS_ERR;
         }
 
-        // 看来这个nil对象就是指空对象
+        // -1是允许的 就代表空对象
         if (elements == -1) {
             if (r->fn && r->fn->createNil)
                 obj = r->fn->createNil(cur);
@@ -557,7 +560,7 @@ static int processAggregateItem(redisReader *r) {
             // 切换到下一个元素
             moveToNextTask(r);
 
-            // 代表本次需要解析多个ele
+            // 开始解析具体的参数
         } else {
             // 如果是map类型 那么要读取的ele翻倍
             if (cur->type == REDIS_REPLY_MAP) elements *= 2;
@@ -578,10 +581,13 @@ static int processAggregateItem(redisReader *r) {
              * */
             if (elements > 0) {
                 cur->elements = elements;
+                // 切换指针 准备读取下一个元素
                 cur->obj = obj;
+                // 这里开辟了一个新的task对象
                 r->ridx++;
                 r->task[r->ridx]->type = -1;
                 r->task[r->ridx]->elements = -1;
+                // 设置该task的下标
                 r->task[r->ridx]->idx = 0;
                 r->task[r->ridx]->obj = NULL;
                 r->task[r->ridx]->parent = cur;
@@ -635,6 +641,7 @@ static int processItem(redisReader *r) {
                 cur->type = REDIS_REPLY_STRING;
                 break;
             case '*':
+                // 一般情况下订阅发布返回的都是这种类型 对用bulk协议
                 cur->type = REDIS_REPLY_ARRAY;
                 break;
             case '%':
@@ -799,7 +806,7 @@ oom:
  * @param reply
  * @return
  */
-int redisReaderGetReply(redisReader *r, void **reply) {
+int redisReaderGetReply(redisReader *r, void **replyreply) {
     /* Default target pointer to NULL.
      * 传入的reply应该是空 等下会进行设置
      * */
@@ -833,7 +840,7 @@ int redisReaderGetReply(redisReader *r, void **reply) {
     }
 
     /* Process items in reply.
-     * 开始解析数据流 并将完整的数据包存入到task中
+     * 这里会尝试解析直到获取一个完整的数据包 当ridx变成-1时代表解析完一个数据包
      * */
     while (r->ridx >= 0)
         if (processItem(r) != REDIS_OK)
