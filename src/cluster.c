@@ -3461,7 +3461,7 @@ void clusterSendMFStart(clusterNode *node) {
     clusterMsg *hdr = (clusterMsg *) buf;
     uint32_t totlen;
 
-    // 如果还未与该节点建立连接 直接返回 也就是非强制故障转移在这一步就终止了
+    // 如果还未与该节点建立连接 直接返回
     if (!node->link) return;
     // 填充数据包
     clusterBuildMessageHdr(hdr, CLUSTERMSG_TYPE_MFSTART);

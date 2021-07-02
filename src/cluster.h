@@ -198,7 +198,9 @@ typedef struct clusterState {
                                    It is zero if there is no MF in progress. */
     /* Manual failover state of master. 此时正在进行故障转移的节点 */
     clusterNode *mf_slave;      /* Slave performing the manual failover. */
-    /* Manual failover state of slave. */
+    /* Manual failover state of slave.
+     * 当某个master发起故障转移时的偏移量 当slave完成这部分的数据同步后 就可以开始故障转移
+     * */
     long long mf_master_offset; /* Master offset the slave needs to start MF
                                    or zero if still not received. */
     int mf_can_start;           /* If non-zero signal that the manual failover

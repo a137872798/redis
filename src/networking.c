@@ -2030,6 +2030,7 @@ void commandProcessed(client *c) {
     long long prev_offset = c->reploff;
     if (c->flags & CLIENT_MASTER && !(c->flags & CLIENT_MULTI)) {
         /* Update the applied replication offset of our master. */
+        // 更新此时已读取的数据偏移量
         c->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
     }
 
@@ -3229,7 +3230,7 @@ void flushSlavesOutputBuffers(void) {
  * time left for the previous duration. However if the duration is smaller
  * than the time left for the previous pause, no change is made to the
  * left duration.
- * 设置一个client暂停的标记 直到某个时间点  可以看到当某个slave想要进行故障转移时 就会通知它的master节点 并在此时将client暂停 注意这是非强制转移的情况
+ * 设置一个client暂停的标记 直到某个时间点  可以看到当某个slave想要进行故障转移时 就会通知它的master节点 并在此时将client暂停
  * */
 void pauseClients(mstime_t end) {
     if (!server.clients_paused || end > server.clients_pause_end_time)
